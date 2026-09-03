@@ -1,0 +1,25 @@
+name: accounting
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^3.4.2
+  go_router: ^17.5.0
+  intl: ^0.20.3
+  shared_preferences: ^2.5.5
+  supabase_flutter: ^2.17.2
+  syncfusion_flutter_charts: ^34.2.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
