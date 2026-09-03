@@ -1,4 +1,4 @@
-# 共同記帳 app — Spec v1.2（2026-09-02；v1.1 增「UI 互動原則」、結帳表單簡化、圖表套件；v1.2 預算改信封制）
+# 共同記帳 app — Spec v1.3（2026-09-03；v1.1 增「UI 互動原則」、結帳表單簡化、圖表套件；v1.2 預算改信封制；v1.3 帳務規則重整：共同預算單套、超支重算、個人／共同餘額連動）
 
 > 一切開發依本檔。改版需 Mike 點頭並記版次。決策依據見 `docs/adr/`。
 
@@ -9,7 +9,7 @@
 
 ## 範圍 / 非目標
 
-- 做：帳目（含細項）、分攤與結算（多簽）、統計、預算（含 rollover）、購物清單與待辦（與預算整合）、多帳本、Apple 登入。
+- 做：帳目（含細項）、分攤與結算（多簽）、統計、預算（共同一套、信封制）、購物清單與待辦（與預算整合）、多帳本、Apple 登入。
 - 不做：AI 收據辨識、收據照片、訂閱、自訂背景、多幣別、通知推播（僅「有結算等你簽」一種，排階段五之後）。
 
 ## 技術
@@ -35,10 +35,12 @@
 
 - **ledger**：帳本。`id, name, invite_code(6碼), default_ratio(jsonb member→%), opening_balance_shared(int), created_at`。多帳本可切換。
 - **member**：帳本成員。`ledger_id, user_id, display_name, opening_balance_personal(int), joined_at`。以邀請碼加入，不限人數。
-- **category**：`ledger_id, kind(expense|income), name, icon, sort, rollover(bool)`。app 內可增刪改。
+- **category**：`ledger_id, kind(expense|income), name, icon, sort`。app 內可增刪改。（v1.3 拿掉 rollover。）
 - **entry**：一筆收入或支出。
   `ledger_id, kind(expense|income), scope(private|shared), amount(int), category_id, occurred_on(date), note, created_by,
-   payer(member_id | null=共同錢包), split_method(equal|ratio|amount|common), settled_state(open|settling|settled), is_adjustment(bool)`
+   payer(member_id | null=共同錢包), split_method(equal|ratio|amount|common), settled_state(open|settling|settled), is_adjustment(bool),
+   funding(balance|budget)`
+  - `funding`：資金來源（v1.3）。只有 `payer=null`（共同錢包）且 `kind=expense`、`scope=shared` 時可為 `budget`；其餘一律 `balance`（DB check）。
   - `scope=private`：只有 `created_by` 看得到（RLS），不參與分攤結算，payer 固定自己。
   - `kind=income` 且 `scope=shared`：依 `default_ratio` 均分成份額，不參與結算。
   - `split_method=common` 或 `payer=null`：共同錢包出，不產生債務。
@@ -47,7 +49,7 @@
 - **settlement**：`ledger_id, status(pending|settled|void), initiated_by, created_at, settled_at, nets(jsonb member→int)`。
 - **settlement_entry**：`settlement_id, entry_id`。
 - **settlement_approval**：`settlement_id, member_id, approved_at`。
-- **budget**：`ledger_id, category_id, month(date, 該月 1 號), limit(int)`。改動只影響該月起（以最近一筆 ≤ month 的 limit 為基礎上限）。
+- **budget_allocation**（v1.3，取代 budget 表）：`ledger_id, category_id, amount(int, 可負), occurred_on(date), note, created_by`。一列＝一次手動撥款／退回；信封只看當月列，不跨月。
 - **list_item**：購物清單與待辦同表。`ledger_id, title, store(text|null), estimated(int|null), category_id(null=待辦), assignee(member_id|null), due_on, done_at, entry_id(勾選後產生的支出), sort`。
 
 ## 行為規格
@@ -55,7 +57,8 @@
 ### 帳目
 - 底部 Tab：帳目、統計、預算、清單；設定在帳目頁右上齒輪。
 - 帳目頁：月份切換、視角切換（家庭／個人）、依日分組列表、右下新增按鈕；頂部「待簽核／結算中」卡片有事才出現。
-- 新增表單全螢幕：金額大字、分類格子、日期、備註、細項（可展開、每列名稱＋金額可空）、下方折疊區：範圍（共同／私人）、付款來源、分攤方式；預設值＝共同、共同錢包、common（ADR-0005）。
+- 新增表單全螢幕：金額大字、分類格子、日期、備註、細項（可展開、每列名稱＋金額可空）、下方折疊區：範圍（共同／私人）、付款來源、分攤方式、資金來源；預設值＝共同、共同錢包、common（ADR-0005）。
+- 資金來源（v1.3）：付款來源＝共同錢包時顯示「預算／餘額」；該分類當月有撥款預設「預算」，否則預設「餘額」。付款來源切成成員（代墊）時欄位隱藏、強制「餘額」。
 - 分攤方式：equal 均分；ratio 依帳本 default_ratio；amount 手填各成員金額且合計須等於主筆；common 無分攤。
 - 修正筆：`is_adjustment=true`，金額可負，列表顯示「修正」標籤，統計正常計入。
 - 已結帳（settled）的支出：金額、payer、split 鎖住（DB trigger 擋更新）；分類、備註、細項可改。
@@ -63,25 +66,29 @@
 ### 結算（ADR-0002）
 - 發起：選帳本內所有 `open` 且 payer 非共同錢包的共同支出 → 算每人淨額（付出總額 − 分攤總額）→ 建 pending settlement，涵蓋 entry 轉 `settling`。
 - 需要簽的人＝淨額非零的成員 − 發起人。全部簽完 → RPC 在同一交易改 entry 為 `settled`、settlement 為 `settled`。
+- 單筆帳目不需簽核，記了即生效；只有結算要簽（v1.3 確認）。
 - `settling` 期間涵蓋的 entry 任何改動 → trigger 把 settlement 標 `void`、entry 回 `open`。
 - Realtime 訂閱 settlements / entries，app 開著即時更新。
 
 ### 統計
 - 視角：家庭（僅 shared）／個人（private ＋ 自己在 shared 的份額 ＋ 自己的收入）。
 - 圓餅：依分類／依成員，期間可選月或週。
-- 趨勢圖：顆粒度日／週（週一起）／月／年，四條線：花費（桶合計）、預算（桶內有效上限合計）、超支（max(0, 花費−預算)）、餘額（累計：期初＋收入−支出）。
-- 月摘要：收入、支出、損益、累計餘額（共同一條、個人各一條）。
+- 趨勢圖（v1.3）：顆粒度日／週（週一起）／月／年。家庭視圖三條線：花費（桶內共同支出合計，不分付款人與資金來源）、可用餘額（水位：桶末的共同可用餘額）、超支（桶末的當月超支合計）；個人視圖兩條線：花費、個人可用餘額。預算線拿掉。
+- 月摘要：收入、支出、損益、可用餘額（共同一條、個人各一條）。
 
-### 預算（v1.2 信封制，取代 v1 的「每分類上限」；Mike 2026-09-02 裁示）
-- **餘額＝可用餘額＋預算總額**。收入／支出決定餘額；預算是從可用餘額「撥」進分類信封的錢，撥款當下預扣可用餘額。
-- 撥款（allocation）：手動對某分類撥入金額（可負＝退回可用餘額）；可設每月自動撥款（月初自動撥固定額）。撥款跟著分類走，一分類一信封。
-- 支出資金來源（`funding`）：預設 `budget`（扣該分類信封，用完繼續扣＝信封為負＝超支，不擋只標紅）；要刻意從可用餘額出才手動選 `balance`。花費＝預算支出＋餘額支出。
-- 每月 1 號前要設定當月預算：進入新月份若該月無撥款，預算頁頂部提示「設定本月預算」，可一鍵套用上月撥款或自動撥款設定。
-- **清單只是購物車**：未結帳前不影響可用餘額與任何信封（不預留、不顯示預留段）；勾選結帳產生支出那一刻才依 funding 扣（Mike 2026-09-02 確認）。
-- rollover 改義為「月底信封餘額是否留到下月」：開＝留（含負數），關＝月底自動退回可用餘額（記一筆反向撥款）。
-- 趨勢圖的「預算」與「餘額」兩線是**水位**：預算線＝各分類信封剩餘合計（撥款−預算支出）隨時間的餘量；餘額線＝可用餘額（期初＋收入−撥款−餘額支出）餘量；「花費」線＝預算支出＋餘額支出；「超支」＝信封負值合計。
-- 領域模型新增：`budget_allocation(ledger_id, category_id, amount int, occurred_on date, kind manual|auto|rollback, note)`；`entries.funding enum('balance','budget') default 'balance'`；`budgets` 表改為每分類的自動撥款設定 `(category_id, monthly_amount, rollover)`。
-- 落地：波 2 與 DB 一起實作（migration 0022 起）；波 1 的預算頁維持 v1 版面不再精修。
+### 餘額與預算（v1.3 帳務規則，Mike 2026-09-03 裁示；ADR-0007）
+- **四個概念**：收入、支出、餘額、預算。餘額＝錢：共同一個、每位成員個人一個，皆可為負。
+- **預算只有共同一套**，每分類一個信封。撥款純手動、隨時加減（可負＝退回）；撥款當下從共同可用餘額預扣。**信封只看當月**：月底剩餘一律退回，不跨月、不自動撥款。
+- **共同餘額＝共同可用餘額＋當月信封剩餘合計**；信封剩餘＝max(0, 當月撥款 − 當月預算支出)。
+- **資金來源**：只有付款人＝共同錢包的共同支出可選「預算」；代墊（付款人＝成員）與私人支出一律走餘額，不進預算。
+- **超支**＝當月「該分類預算支出 − 當月撥款」的正值部分，**隨時重算**（補撥即回補）；超支額從共同可用餘額扣。花費＝預算支出＋餘額支出。
+- **連動**：
+  - 共同錢包付 → 共同餘額即扣（依資金來源扣信封或可用餘額）。
+  - 代墊 → 記帳當下只扣付款人自己的個人餘額（全額）；其他人的個人餘額不動。
+  - 結算全簽完那一刻：每位其他成員個人餘額扣自己的份額、代墊者個人餘額拿回（金額＋自己的份額）。結算後每人個人餘額恰等於自己實際負擔。
+  - 私人帳目只動本人個人餘額；共同收入進共同餘額、個人收入進個人餘額。
+- **清單只是購物車**：未結帳前不影響任何餘額與信封；勾選結帳產生支出那一刻才依資金來源扣。
+- 預算頁：頂部可用餘額＋信封總額；每分類一列：撥款、已花、剩餘／超支；點列開 sheet 撥款或退回。進入新月份若該月無撥款，頂部提示「設定本月預算」，可一鍵複製上月撥款。
 
 ### 清單
 - 購物項目：名稱、店家分組、預估金額、分類、負責人。待辦：無金額無分類，可指派、到期日（app 內標示，不推播）。
@@ -101,8 +108,9 @@
 | schema/RLS/RPC | `supabase db reset` 全綠；pgTAP 或 SQL 腳本驗 RLS（私人不可見）、結算多簽、settled 鎖 |
 | 前端 | `flutter analyze` 無錯；`flutter test` 全綠；Mike 地端手測（Flutter Web hot reload） |
 | 結算 | 兩帳號 e2e：A 代墊、B 簽、狀態 settled、entry 鎖住 |
-| 統計 | 已知資料集算出的四條線數值與 SQL 手算一致 |
+| 統計 | 已知資料集算出的三條線（花費、可用餘額、超支）與 SQL 手算一致 |
+| 餘額連動 | 兩帳號 e2e：代墊 1,000 均分 → 付款人個人 −1,000；簽完 → 付款人 −500、對方 −500、共同不變 |
 
 ## 已決策清單
 
-ADR-0001 資料模型（細項附註、分攤掛主筆）；ADR-0002 結算多簽與鎖定；ADR-0003 私人／共同範圍；ADR-0004 rollover 與餘額；ADR-0005 平台與預設值。
+ADR-0001 資料模型（細項附註、分攤掛主筆）；ADR-0002 結算多簽與鎖定；ADR-0003 私人／共同範圍；ADR-0004 rollover 與餘額（已被 0006、0007 取代）；ADR-0005 平台與預設值；ADR-0006 信封制（部分被 0007 取代）；ADR-0007 帳務規則 v1.3。
