@@ -46,6 +46,8 @@ class SupabaseRealtimeSource implements RealtimeSource {
   void subscribe(String ledgerId, void Function(LedgerTable table) onChange) {
     var channel = _client.channel('ledger:$ledgerId');
     for (final entry in _tableNames.entries) {
+      // migration 0026 起四表 replica identity full：DELETE payload 也帶 ledger_id，
+      // 單一帶 filter 的訂閱就收得到刪除事件（原「不帶 filter 的 DELETE 補丁」已拆）。
       channel = channel.onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',
@@ -55,16 +57,6 @@ class SupabaseRealtimeSource implements RealtimeSource {
           column: 'ledger_id',
           value: ledgerId,
         ),
-        callback: (_) => onChange(entry.key),
-      );
-      // DELETE 的 payload 在預設 replica identity 下**只有主鍵**，沒有 `ledger_id`，
-      // 所以上面那個帶 filter 的訂閱收不到刪除事件（對方刪一筆帳，我這邊永遠不知道）。
-      // 這裡再掛一個不帶 filter 的 DELETE 訂閱，收到就保守地整表重抓——
-      // 重抓本身仍吃 RLS，別的帳本的刪除頂多讓我們多打一次自己的查詢。
-      channel = channel.onPostgresChanges(
-        event: PostgresChangeEvent.delete,
-        schema: 'public',
-        table: entry.value,
         callback: (_) => onChange(entry.key),
       );
     }
