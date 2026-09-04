@@ -279,8 +279,8 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
             motion: const DrawerMotion(),
             extentRatio: 0.34,
             children: [
-              // 圓形 icon、無文字（Mike 裁示 2026-09-03）；沖銷紀錄不可編輯（只可刪）。
-              if (!e.isAdjustment)
+              // 圓形 icon、無文字（Mike 裁示 2026-09-03）；沖銷與被沖銷紀錄不可編輯（只可刪）。
+              if (!e.isAdjustment && !isReversed(e))
               CircleSlideAction(
                 icon: Icons.edit_outlined,
                 background: Theme.of(context).colorScheme.secondaryContainer,

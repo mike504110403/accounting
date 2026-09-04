@@ -507,7 +507,11 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         title: Text(_original == null ? '新增' : (_readOnly ? '明細' : '編輯')),
         leading: IconButton(icon: const Icon(Icons.close), tooltip: '關閉', onPressed: () => context.pop()),
         actions: [
-          if (_readOnly && !(_original?.isAdjustment ?? false))
+          // 沖銷與被沖銷都不可再編輯（Mike 裁示 2026-09-04），按鈕直接拿掉。
+          if (_readOnly &&
+              _original != null &&
+              !_original!.isAdjustment &&
+              !hasReversal(ref.watch(entriesProvider), _original!))
             IconButton(
               key: const Key('enter-edit'),
               icon: const Icon(Icons.edit_outlined),

@@ -593,10 +593,8 @@ void main() {
 
     await tester.tap(find.text('已結帳的買菜').first);
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('confirm-reverse')), findsNothing);
-    expect(find.textContaining('已沖銷過'), findsOneWidget);
+    expect(find.byKey(const Key('enter-edit')), findsNothing,
+        reason: '被沖銷的筆不可再編輯，鉛筆按鈕拿掉（Mike 裁示 2026-09-04）');
   });
 
   testWidgets('編輯開放筆＝沖銷重記：原筆＋反向筆＋新筆三筆軌跡', (tester) async {
