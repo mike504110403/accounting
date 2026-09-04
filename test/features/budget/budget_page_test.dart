@@ -512,6 +512,9 @@ void main() {
     expect(find.text('本月食品'), findsOneWidget);
     expect(find.text('加碼'), findsOneWidget);
 
+    // 左滑刪除（2026-09-04）：先把該列往左拖開 action pane 再點刪除。
+    await tester.drag(find.byKey(const ValueKey('allocation-flow-a-2')), const Offset(-200, 0));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('allocation-delete-a-2')));
     await tester.pumpAndSettle();
 

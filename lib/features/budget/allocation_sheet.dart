@@ -4,8 +4,10 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/circle_slide_action.dart';
 import '../../app/format.dart';
 import '../../data/month_summary_provider.dart';
 import '../../domain/balance_math.dart';
@@ -189,26 +191,39 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
               )
             else
               for (final a in flow)
-                Padding(
+                // 左滑刪除（Mike 裁示 2026-09-04：不放 X 按鈕）。
+                Slidable(
                   key: ValueKey('allocation-flow-${a.id}'),
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: Row(
+                  endActionPane: ActionPane(
+                    motion: const DrawerMotion(),
+                    extentRatio: 0.22,
                     children: [
-                      Text(fmtDate(a.occurredOn), style: Theme.of(context).textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        flex: 3,
-                        child: Text(fmtAmount(a.amount), maxLines: 1, overflow: TextOverflow.ellipsis, style: tabularStyle(null)),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(flex: 2, child: Text(a.note, maxLines: 1, overflow: TextOverflow.ellipsis)),
-                      IconButton(
+                      CircleSlideAction(
                         key: Key('allocation-delete-${a.id}'),
+                        icon: Icons.delete_outline,
+                        background: Theme.of(context).colorScheme.errorContainer,
+                        foreground: Theme.of(context).colorScheme.onErrorContainer,
                         tooltip: '刪除',
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: _saving ? null : () => _remove(a.id),
+                        onPressed: () {
+                          if (!_saving) _remove(a.id);
+                        },
                       ),
                     ],
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    child: Row(
+                      children: [
+                        Text(fmtDate(a.occurredOn), style: Theme.of(context).textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          flex: 3,
+                          child: Text(fmtAmount(a.amount), maxLines: 1, overflow: TextOverflow.ellipsis, style: tabularStyle(null)),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(flex: 2, child: Text(a.note, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                      ],
+                    ),
                   ),
                 ),
           ],

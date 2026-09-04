@@ -3,7 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:flutter_slidable/flutter_slidable.dart';
+
 import '../../app/category_wheel.dart';
+import '../../app/circle_slide_action.dart';
 import '../../app/format.dart';
 import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
@@ -1195,7 +1198,7 @@ class _ManualRow extends StatelessWidget {
 
 
 /// 細項：名稱＋金額可空，差額只在有細項且不等於主筆時以右對齊小字提示。
-class _LineItemsSection extends StatelessWidget {
+class _LineItemsSection extends StatefulWidget {
   const _LineItemsSection({
     required this.lines,
     required this.amount,
@@ -1210,6 +1213,22 @@ class _LineItemsSection extends StatelessWidget {
   final VoidCallback? onAdd;
   final void Function(int index) onRemove;
   final VoidCallback onChanged;
+
+  @override
+  State<_LineItemsSection> createState() => _LineItemsSectionState();
+}
+
+class _LineItemsSectionState extends State<_LineItemsSection> {
+  /// 每列的左滑累計位移：TextField 會在手勢競技場搶走水平拖曳，
+  /// 這裡用 raw pointer（不進競技場）觀察，超過門檻直接開 action pane。
+  final _dragAcc = <int, double>{};
+
+  List<_LineRow> get lines => widget.lines;
+  int get amount => widget.amount;
+  int get lineTotal => widget.lineTotal;
+  VoidCallback? get onAdd => widget.onAdd;
+  void Function(int index) get onRemove => widget.onRemove;
+  VoidCallback get onChanged => widget.onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1231,7 +1250,36 @@ class _LineItemsSection extends StatelessWidget {
           ],
         ),
         for (var i = 0; i < lines.length; i++)
-          Padding(
+          // 左滑刪除（Mike 裁示 2026-09-04：不放 X 按鈕）。
+          Slidable(
+            key: ValueKey('li-row-$i'),
+            endActionPane: ActionPane(
+              motion: const DrawerMotion(),
+              extentRatio: 0.22,
+              children: [
+                CircleSlideAction(
+                  key: Key('li-del-$i'),
+                  icon: Icons.delete_outline,
+                  background: Theme.of(context).colorScheme.errorContainer,
+                  foreground: Theme.of(context).colorScheme.onErrorContainer,
+                  tooltip: '刪除這列',
+                  onPressed: () => onRemove(i),
+                ),
+              ],
+            ),
+            child: Builder(
+            builder: (sctx) => Listener(
+            onPointerDown: (_) => _dragAcc[i] = 0,
+            onPointerMove: (e) {
+              if (e.delta.dx < 0 && e.delta.dx.abs() > e.delta.dy.abs()) {
+                _dragAcc[i] = (_dragAcc[i] ?? 0) + e.delta.dx;
+                if ((_dragAcc[i] ?? 0) < -24) {
+                  _dragAcc[i] = 0;
+                  Slidable.of(sctx)?.openEndActionPane();
+                }
+              }
+            },
+            child: Padding(
             padding: const EdgeInsets.only(bottom: 6),
             child: Row(
               children: [
@@ -1240,6 +1288,8 @@ class _LineItemsSection extends StatelessWidget {
                   child: TextField(
                     key: Key('li-name-$i'),
                     controller: lines[i].name,
+                    // 讓左滑刪除收得到水平手勢（TextField 的游標拖曳會搶）；小欄位不需要拖選字。
+                    enableInteractiveSelection: false,
                     decoration: const InputDecoration(hintText: '名稱'),
                     // 名稱變動要通知外層：加列 gate（空白列鎖「＋」）靠它重算。
                     onChanged: (_) => onChanged(),
@@ -1251,6 +1301,7 @@ class _LineItemsSection extends StatelessWidget {
                   child: TextField(
                     key: Key('li-amount-$i'),
                     controller: lines[i].amount,
+                    enableInteractiveSelection: false,
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     textAlign: TextAlign.end,
@@ -1258,14 +1309,10 @@ class _LineItemsSection extends StatelessWidget {
                     onChanged: (_) => onChanged(),
                   ),
                 ),
-                IconButton(
-                  key: Key('li-del-$i'),
-                  icon: const Icon(Icons.close, size: 18),
-                  constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-                  tooltip: '刪除這列',
-                  onPressed: () => onRemove(i),
-                ),
               ],
+            ),
+            ),
+            ),
             ),
           ),
         if (lines.isNotEmpty && lineTotal != amount)

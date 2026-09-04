@@ -804,11 +804,13 @@ void main() {
     }
 
     await tapKey(tester, 'lineitem-add');
-    for (final k in const ['lineitem-add', 'li-del-0']) {
-      final size = tester.getSize(find.byKey(Key(k)));
-      expect(size.height, greaterThanOrEqualTo(44), reason: k);
-      expect(size.width, greaterThanOrEqualTo(44), reason: k);
-    }
+    expect(tester.getSize(find.byKey(const Key('lineitem-add'))).height, greaterThanOrEqualTo(44));
+    // 細項刪除改左滑（2026-09-04）：拖開 action pane 後量命中區。
+    await tester.drag(find.byKey(const ValueKey('li-row-0')), const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    final size = tester.getSize(find.byKey(const Key('li-del-0')));
+    expect(size.height, greaterThanOrEqualTo(44));
+    expect(size.width, greaterThanOrEqualTo(44));
   });
 
   testWidgets('細項：空白列未填名稱時「＋」停用；儲存時空白列捨棄', (tester) async {
