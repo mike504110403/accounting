@@ -1,6 +1,6 @@
 # WIP — accounting 記帳 app（/mega）
 
-更新：2026-09-04 傍晚（手測迭代收斂；iOS TestFlight 首發流程進行中）
+更新：2026-09-04 晚（/wip 收斂；TestFlight 首發已上線至 build 6）
 
 ## 任務背景與目標
 
@@ -59,6 +59,13 @@
   （SQL 測試＋rls 白名單，雲端 dev 已 push、anon 401 驗過），預算頁／撥款 sheet／統計月摘要吃 server 值。
 - 驗證債見 ledger（趨勢逐桶仍前端算、settled_at UTC 邊界、複製上月金額前端加總）。
 
+## 09-04 晚（TestFlight 迭代）
+
+- 沖銷/被沖銷連刪除也鎖（滑動整排拿掉＋明細選單拿掉）。
+- 邀請流程：系統分享做了又退（Mike 裁示「停」）→ 首登分享關改「複製邀請碼」鈕；`lib/app/invite_share.dart` 已刪。邀請碼欄位（首登＋設定頁）加 `FilteringTextInputFormatter.allow([a-zA-Z0-9])`——貼上夾空白吃名額、10 碼變 9 碼有效的實測 bug。
+- ledger 新增「iOS 上架前審查遺留」節：帳號刪除（外部測試/上架必補）、隱私政策入口、token 進 Keychain、debugPrint、obfuscation。
+- 測試 377 綠；web 最新 build stamp 0904-1851（8787/8788 都已刷新）。
+
 ## 09-04 下午～傍晚新增（全部落 dev、逐輪過全套測試）
 
 - 分類選擇改橫向無限循環滾輪（viewport 1/5、點擊聚焦動畫；`lib/app/category_wheel.dart`），表單／編輯／結帳共用。
@@ -69,13 +76,13 @@
 - 鍵盤彈起表單頂對齊不擋欄位；SW controllerchange 自動 reload＋BUILD_STAMP（設定頁頁腳可對版本）。
 - e2e 固定測試帳號 e2e-tutorial@example.com；Docker supabase 棧瘦身統一。
 - **紀律**：release build 會弄壞同目錄跑著的 dev server → 每次 `tool/build_web.sh` 後必重啟 8787；ngrok 綁 8788（release 靜態）。
-- **iOS/TestFlight（進行中）**：bundle `com.mikelin.accounting`（Team DDMW7327JC）、SIWA capability＋entitlements、原生 Sign in with Apple（nonce＋signInWithIdToken；iOS 登入頁只放 Apple）、dist 憑證＋AppStore profile（fastlane cert/sigh）、`tool/build_ios.sh` 注入 prod。**Supabase prod 建好**：ref jcvichjhryczvlvkdsjj（東京）、26 migrations 全推、autoconfirm 開、Apple provider 開；憑證在 `~/mike/supabase/prod.env`、ASC 金鑰在 `~/mike/asc/`（Admin key 7FCJX2X2C7）。上架前雙審查（app-store-review＋OWASP）無 BLOCKER，M-1/m-5/m-10 已修（0904-1714）；M-2 帳號刪除、M-3 隱私政策、M-4 token 進 Keychain 記 ledger。ASC app record「accounting by mike」（id 6808578728）已建，ipa 已上傳，等 processing → 掛內部測試群組。
+- **iOS/TestFlight（首發完成，2026-09-04 晚）**：build 1～6 全數上傳成功，最新 **0.1.0 (6)**（stamp ios-0904-1850）。歷程：b1 首傳（90068 minOS 警告）→ b2 icon v1＋minOS 15 → b3 icon 定稿 v3（貓圖 duotone＋顆粒，`~/mike/icons/icon-v3.png`）→ b4 系統分享版（**作廢不發佈**）→ b5 分享退回複製鈕 → b6 邀請碼欄位濾非英數。ASC app「accounting by mike」（id 6808578728）；**internal 群組 `family`**（自動發佈、成員 mike504110403＋heart5588mem，邀請信已重發、等接受）；external 群組建過兩次都已刪（公開連結路線棄用——要過 beta review）。90068 警告已解。詳細：bundle `com.mikelin.accounting`（Team DDMW7327JC）、SIWA capability＋entitlements、原生 Sign in with Apple（nonce＋signInWithIdToken；iOS 登入頁只放 Apple）、dist 憑證＋AppStore profile（fastlane cert/sigh）、`tool/build_ios.sh` 注入 prod。**Supabase prod 建好**：ref jcvichjhryczvlvkdsjj（東京）、26 migrations 全推、autoconfirm 開、Apple provider 開；憑證在 `~/mike/supabase/prod.env`、ASC 金鑰在 `~/mike/asc/`（Admin key 7FCJX2X2C7）。上架前雙審查（app-store-review＋OWASP）無 BLOCKER，M-1/m-5/m-10 已修（0904-1714）；M-2 帳號刪除、M-3 隱私政策、M-4 token 進 Keychain 記 ledger。ASC app record「accounting by mike」（id 6808578728）已建，ipa 已上傳，等 processing → 掛內部測試群組。
 
 ## 下一步
 
-1. /ship：052ecfa 已推 origin；之後整個下午的 commits（至沖銷鎖刪＋iOS 設定）未推，等 Mike 說「推」。
+1. /ship：052ecfa 已推 origin；之後 **24 顆 commits 未推**（至 e16a6da），等 Mike 說「推」。
 2. ~~replica identity full migration~~ 已完成（0026 雲端已 push＋驗證、db review 過、前端拆補丁）。
-3. 待辦池：TestFlight build 掛測試群組＋Mike 實機驗、iOS home indicator padding（5 個 sheet）、帳號刪除＋刪帳本 RPC 合併做、隱私政策頁、token 進 Keychain、關 signup、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）、UI 現代化掃尾（隨 Mike 截圖迭代）。
+3. 待辦池：Mike/家人接受 TestFlight 邀請＋實機驗（build 6）、iOS home indicator padding（5 個 sheet）、帳號刪除＋刪帳本 RPC 合併做、隱私政策頁、token 進 Keychain、關 signup、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）、UI 現代化掃尾（隨 Mike 截圖迭代）。
 
 ## 環境備忘
 
