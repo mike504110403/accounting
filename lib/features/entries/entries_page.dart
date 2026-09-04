@@ -596,6 +596,7 @@ class _EntryTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     final tags = <String>[
+      if (entry.isAdjustment) '沖銷',
       if (entry.scope == EntryScope.private) '私人',
       if (entry.payerId != null && entry.splitMethod != SplitMethod.common) '代墊 ${_memberName(entry.payerId!)}',
       if (entry.settledState == SettledState.settling) '結算中',

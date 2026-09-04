@@ -7,6 +7,7 @@ import '../data/current_ledger.dart';
 import '../features/auth/login_page.dart';
 import '../features/auth/onboarding_page.dart';
 import '../features/budget/budget_page.dart';
+import '../domain/models.dart';
 import '../features/entries/entries_page.dart';
 import '../features/entries/entry_form_page.dart';
 import '../features/lists/lists_page.dart';
@@ -72,7 +73,7 @@ final routerProvider = Provider<GoRouter>((ref) {
               path: '/entries',
               builder: (_, _) => const EntriesPage(),
               routes: [
-                GoRoute(path: 'new', builder: (_, _) => const EntryFormPage()),
+                GoRoute(path: 'new', builder: (_, state) => EntryFormPage(template: state.extra as Entry?)),
                 GoRoute(path: ':id', builder: (_, s) => EntryFormPage(entryId: s.pathParameters['id'])),
               ],
             ),

@@ -8,6 +8,7 @@ import '../../app/format.dart';
 import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
+import 'reversal.dart';
 import 'split_math.dart';
 
 /// 新增／編輯帳目的全螢幕表單。entryId 為 null ＝ 新增。
@@ -15,27 +16,16 @@ import 'split_math.dart';
 /// 版面依 spec v1.1「資訊密度」：單一平面列表、細標題分段、說明只在錯誤時出現、
 /// 折疊區收起只留一行摘要、儲存鈕固定在底部。
 class EntryFormPage extends ConsumerStatefulWidget {
-  const EntryFormPage({super.key, this.entryId});
+  const EntryFormPage({super.key, this.entryId, this.template});
   final String? entryId;
+
+  /// 新增時的預填範本（沖銷後「重新記一筆」帶原資訊進來；不是編輯）。
+  final Entry? template;
 
   @override
   ConsumerState<EntryFormPage> createState() => _EntryFormPageState();
 }
 
-/// 金額輸入：只收數字，開頭至多一個負號，且只有修正筆允許負號（spec：金額整數元，修正筆可負）。
-class _AmountFormatter extends TextInputFormatter {
-  const _AmountFormatter({required this.allowNegative});
-  final bool allowNegative;
-
-  static final _positive = RegExp(r'^\d*$');
-  static final _signed = RegExp(r'^-?\d*$');
-
-  @override
-  TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
-    if (newValue.text.isEmpty) return newValue;
-    return (allowNegative ? _signed : _positive).hasMatch(newValue.text) ? newValue : oldValue;
-  }
-}
 
 class _LineRow {
   _LineRow({String name = '', String amount = ''})
@@ -118,8 +108,27 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     super.initState();
     final id = widget.entryId;
     if (id == null) {
-      // 分類改垂直滾輪（2026-09-03）：新增即預設第一個分類，不再有「未選」狀態。
-      _categoryId = _firstCategoryOf(_kind);
+      final tpl = widget.template;
+      if (tpl != null) {
+        // 沖銷重記：複製原資訊（日期改今天），仍是全新一筆、照走精靈。
+        _kind = tpl.kind;
+        _scope = tpl.scope;
+        _categoryId = tpl.categoryId;
+        _amount.text = tpl.amount.abs().toString();
+        _note.text = tpl.note;
+        _payerId = tpl.scope == EntryScope.private ? tpl.createdBy : tpl.payerId;
+        _method = tpl.splitMethod;
+        for (final li in tpl.lineItems) {
+          _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
+        }
+        for (final sp in tpl.splits) {
+          _manualOf(sp.memberId).text = sp.share.abs().round().toString();
+          if (tpl.splitMethod == SplitMethod.ratio && tpl.amount != 0) {
+            _ratioOf(sp.memberId).text = '${(sp.share / tpl.amount * 100).round().abs()}';
+          }
+        }
+      }
+      _categoryId ??= _firstCategoryOf(_kind);
       _syncFunding();
       return;
     }
@@ -181,7 +190,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   bool get _locked => _settled || _settling;
   bool get _settled => _original?.amountLocked ?? false;
   bool get _settling => _original?.settledState == SettledState.settling;
-  String get _lockReason => _settled ? '已結帳，金額鎖定；改用修正筆' : '結算中，簽核完成或作廢後才能改金額';
+  String get _lockReason => _settled ? '已結帳：金額與分攤鎖定，可整筆沖銷後重新記一筆' : '結算中，簽核完成或作廢後才能改金額';
   int get _amountValue => int.tryParse(_amount.text.trim()) ?? 0;
   /// 名稱非空的細項列（儲存與顯示的口徑：空白列一律不算、儲存時捨棄）。
   int get _validLineCount {
@@ -284,10 +293,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       }
       if (parsed == 0) {
         _toast('請輸入金額');
-        return;
-      }
-      if (parsed < 0 && !_isAdjustment) {
-        _toast('負數金額請開啟「修正筆」');
         return;
       }
       amount = parsed;
@@ -651,8 +656,8 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         key: const Key('amount-field'),
         controller: _amount,
         enabled: !_locked,
-        keyboardType: const TextInputType.numberWithOptions(signed: true),
-        inputFormatters: [_AmountFormatter(allowNegative: _isAdjustment)],
+        keyboardType: TextInputType.number,
+        inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         textAlign: TextAlign.center,
         style: t.textTheme.headlineMedium?.copyWith(
           fontFeatures: const [FontFeature.tabularFigures()],
@@ -776,14 +781,15 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         ),
       (
         '進階',
-        _advancedSummary(members) + (_isAdjustment ? '・修正筆' : ''),
+        _advancedSummary(members),
         'edit-row-advanced',
         editing
             ? () => _editFieldSheet('進階', (ctx) => _advancedBody(Theme.of(ctx), ref.read(membersProvider)))
             : go(2)
       ),
-      if (!editing && _isAdjustment) ('修正筆', '是', null, go(2)),
+
     ];
+    final reversed = editing && _settled && hasReversal(ref.watch(entriesProvider), _original!);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -818,8 +824,64 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ),
             ),
           ),
+        if (editing && _settled) ...[
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            key: const Key('reverse-entry'),
+            icon: const Icon(Icons.undo, size: 18),
+            onPressed: reversed || _saving ? null : _reverseAndRedo,
+            label: Text(reversed ? '已沖銷' : '沖銷並重新記一筆'),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              reversed
+                  ? '這筆已有反向紀錄；如需再記，直接新增即可。'
+                  : '會先記一筆一模一樣的反向紀錄（拆帳、預算、餘額沿原路回退），再帶你用原資訊重新記一筆。',
+              textAlign: TextAlign.center,
+              style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
+            ),
+          ),
+        ],
       ],
     );
+  }
+
+  /// 沖銷（Mike 裁示 2026-09-04）：寫入反向紀錄 → 帶原資訊進「新增」精靈重記。
+  Future<void> _reverseAndRedo() async {
+    final orig = _original!;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('沖銷這筆帳目？'),
+        content: const Text('會新增一筆等額反向的紀錄把它整筆抵銷（分攤與預算一併回退），接著用原資訊重新記一筆。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
+          FilledButton(
+            key: const Key('confirm-reverse'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('沖銷'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _saving = true);
+    try {
+      await ref
+          .read(entriesProvider.notifier)
+          .add(buildReversal(orig, me: ref.read(currentMemberIdProvider)));
+    } on LedgerException catch (e) {
+      if (mounted) setState(() => _saving = false);
+      _toast(e.message);
+      return;
+    } catch (e, st) {
+      debugPrint('沖銷失敗: $e\n$st');
+      if (mounted) setState(() => _saving = false);
+      _toast('沖銷失敗，請稍後再試');
+      return;
+    }
+    if (mounted) context.pushReplacement('/entries/new', extra: orig);
   }
 
   Widget _advancedBody(ThemeData t, List<Member> members) {
@@ -959,18 +1021,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ),
             ),
         ],
-        SwitchListTile(
-          key: const Key('adjustment-switch'),
-          dense: true,
-          contentPadding: EdgeInsets.zero,
-          visualDensity: VisualDensity.compact,
-          title: Tooltip(
-            message: '沖銷已結帳金額用，可填負數',
-            child: Text('修正筆', style: t.textTheme.labelMedium),
-          ),
-          value: _isAdjustment,
-          onChanged: _locked ? null : (v) => setState(() => _isAdjustment = v),
-        ),
       ],
     );
   }

@@ -524,7 +524,7 @@ void main() {
 
     final amount = tester.widget<TextField>(find.byKey(const Key('amount-field')));
     expect(amount.enabled, isFalse);
-    expect(find.textContaining('已結帳，金額鎖定'), findsOneWidget);
+    expect(find.textContaining('已結帳：金額與分攤鎖定'), findsOneWidget);
     expect(find.byKey(const Key('entry-menu')), findsNothing);
   });
 
@@ -631,6 +631,38 @@ void main() {
     expect(e.settledState, SettledState.settling);
   });
 
+  testWidgets('沖銷：settled 筆一鍵反向＋帶原資訊重記；第二次停用', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
+    await tester.tap(find.text('已結帳的買菜'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byKey(const Key('reverse-entry')));
+    await tester.tap(find.byKey(const Key('reverse-entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-reverse')));
+    await tester.pumpAndSettle();
+
+    // 反向紀錄：金額/份額全負、付款照抄、標記沖銷。
+    final rev = c.read(entriesProvider).firstWhere((e) => e.isAdjustment);
+    expect(rev.amount, -1000);
+    expect(rev.payerId, kMeId);
+    expect(rev.splits.map((s) => s.share).toSet(), {-500.0});
+
+    // 落在新增精靈且預填原資訊（金額 1000、備註同原筆）。
+    expect(find.byKey(const ValueKey('form-step-0')), findsOneWidget, reason: '沖銷後帶去重新記一筆');
+    expect(tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text, '1000');
+
+    // 回到列表能看到反向紀錄的沖銷標籤；再進原筆，沖銷鈕已停用。
+    Navigator.of(tester.element(find.byKey(const ValueKey('form-step-0')))).pop();
+    await tester.pumpAndSettle();
+    expect(find.text('沖銷'), findsWidgets);
+    await tester.tap(find.text('已結帳的買菜').first);
+    await tester.pumpAndSettle();
+    final btn = tester.widget<OutlinedButton>(find.byKey(const Key('reverse-entry')));
+    expect(btn.onPressed, isNull, reason: '已沖銷過不能再沖');
+    expect(find.text('已沖銷'), findsOneWidget);
+  });
+
   testWidgets('編輯：改備註後 entriesProvider 內容更新', (tester) async {
     final c = await pumpApp(tester, containerFor(repoWith(entries: oneOpenEntry())));
     await tester.tap(find.text('可刪的買菜'));
@@ -701,41 +733,31 @@ void main() {
     expect(c.read(entriesProvider).length, 1);
   });
 
-  testWidgets('金額欄擋掉 1-2／--5，修正筆開啟後才收負號', (tester) async {
+  testWidgets('金額欄只收數字：1-2／--5／-5 全擋（修正筆已改為沖銷，無負數輸入）', (tester) async {
     await pumpApp(tester);
     await openNewForm(tester);
 
     String amountText() => tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text;
 
+    // digitsOnly 濾掉非數字字元（不是整段拒絕）：貼上帶符號的字串會留下純數字。
     await fillKey(tester, 'amount-field', '1-2');
-    expect(amountText(), '');
+    expect(amountText(), '12');
     await fillKey(tester, 'amount-field', '--5');
-    expect(amountText(), '');
+    expect(amountText(), '5');
     await fillKey(tester, 'amount-field', '-5');
-    expect(amountText(), '', reason: '未開修正筆不收負號');
+    expect(amountText(), '5');
 
     await fillKey(tester, 'amount-field', '120');
     expect(amountText(), '120');
-
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'adjustment-switch');
-    await fillKey(tester, 'amount-field', '-5');
-    expect(amountText(), '-5');
-    await fillKey(tester, 'amount-field', '-5-3');
-    expect(amountText(), '-5', reason: '只收開頭一個負號');
   });
 
   testWidgets('金額只有負號 → 視同 0，下一步鎖住存不了', (tester) async {
     final c = await pumpApp(tester);
     final before = c.read(entriesProvider).length;
     await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '100'); // 先過第 0 關才開得了修正筆
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'adjustment-switch');
     await fillKey(tester, 'amount-field', '-');
 
-    // 金額 0／只有負號：第 0 關「下一步」直接鎖住（2026-09-03）。
+    // 負號被 digitsOnly 吃掉＝空值：第 0 關「下一步」鎖住。
     expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
     expect(c.read(entriesProvider).length, before);
   });
