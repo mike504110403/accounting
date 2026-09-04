@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../app/build_info.dart';
 import '../../app/tutorial.dart';
 
 import '../../app/format.dart';
@@ -806,6 +807,17 @@ class _OtherCard extends ConsumerWidget {
             key: const Key('sign-out-row'),
             label: '登出',
             onTap: () => _signOut(context, ref),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              'build $kBuildStamp',
+              textAlign: TextAlign.center,
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+            ),
           ),
         ],
       ),
