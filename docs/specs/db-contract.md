@@ -120,7 +120,7 @@ enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_met
 
 ### check constraint（前端要先擋，否則 insert 會被 DB 打回）
 
-- `entries_amount_sign`：非修正筆 `amount >= 0`；要記負數必須 `is_adjustment = true`。
+- `entries_amount_sign`：一般帳 `amount >= 0`；負數僅沖銷紀錄（`is_adjustment = true`，由前端沖銷流程自動產生）。
 - `entries_private_payer`：`scope = 'private'` 時 **`payer_id` 必須等於 `created_by`**（收入的私人筆也一樣要帶 `payer_id`，不能留 null）。
 - `entries_private_no_split`：private 筆 `split_method` 只能是 `common`（ADR-0003：私人不參與分攤）。
 - `entries_private_open`：private 筆 `settled_state` 只能是 `open`。
@@ -138,7 +138,7 @@ enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_met
   - `created_by` 與 `ledger_id` 另有不可變 trigger 當第二道（給 service_role 之類繞過欄位授權的路徑用）。
   - `settled_state` 只有 RPC 與 trigger 推得動：前端**不能**自己把帳目標成 settled。
   - **delete policy 另含 `settled_state <> 'settled'`**：已結帳的帳目對前端而言刪不掉（RLS 過濾＝影響 0 列，不會 raise），
-    繞過 RLS 的路徑還有 before delete trigger 擋（`entry settled: delete blocked`）。金額有誤一律開修正筆。
+    繞過 RLS 的路徑還有 before delete trigger 擋（`entry settled: delete blocked`）。金額有誤一律走沖銷（反向紀錄＋重記）。
   - 把別人的 shared entry 改成 `private` 會踩到 update 的 with check（改完自己就不該還看得到），一樣被擋。
 - `entry_splits`／`line_items`：select 與 insert／update／delete 都跟隨父 `entry`，條件與 `entries` 的 select／update policy 逐字相同（`exists` 子查詢明寫，不只倚賴 `entries` 自身 RLS）。
 - `categories`／`list_items`：成員全權（增刪改查）。
@@ -300,7 +300,7 @@ final rows = await supabase.rpc('search_items', params: {'ledger': ledgerId, 'q'
 | `entry_splits_void_pending_settlement_trg` ＋ `..._ins_del_trg` | 同上，比的是 `share`／`member_id` 的值；分攤的新增與刪除一律 void（分攤集合本身變了） |
 | `settlement_finalize_on_approval_trg` | 簽名到齊 → settlement `settled` ＋ `settled_at = now()`、涵蓋 entries `settled` |
 
-前端存檔一律 try/catch：踩到鎖定要顯示「這筆已結帳，金額鎖住，請改用修正筆」；踩到 void 要重新拉 settlement 狀態。
+前端存檔一律 try/catch：踩到鎖定要顯示「已結帳：金額與分攤鎖定，可整筆沖銷後重新記一筆」；踩到 void 要重新拉 settlement 狀態。
 
 void trigger 是 `after update of <欄位> ... when (old.x is distinct from new.x or ...)`：欄位限定先篩掉無關的更新，`when` 再比新舊值。所以
 - **值不變就不 void**：`amount`／`payer_id`／`split_method`／`scope`／`kind` 的值沒變，`settling` 期間改備註、分類、細項不會打斷結算。
