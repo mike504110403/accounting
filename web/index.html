@@ -42,5 +42,20 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+  <script>
+    // 新版 service worker 接管時自動重載一次（sessionStorage 防迴圈）：
+    // 使用者不用再「重整兩次／關分頁」才拿到新版（2026-09-04）。
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!sessionStorage.getItem('swReloaded')) {
+          sessionStorage.setItem('swReloaded', '1');
+          window.location.reload();
+        }
+      });
+      navigator.serviceWorker.ready.then(function () {
+        sessionStorage.removeItem('swReloaded');
+      });
+    }
+  </script>
 </body>
 </html>
