@@ -473,6 +473,7 @@ void main() {
     await pumpApp(tester, containerFor(repoWith(entries: ratioEntry())));
     await tester.tap(find.text('比例筆'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await tapKey(tester, 'advanced-tile');
 
     expect(tester.widget<TextField>(find.byKey(const Key('ratio-$kMeId'))).controller!.text, '70');
@@ -520,6 +521,7 @@ void main() {
     await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
     await tester.tap(find.text('已結帳的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await _prepareFor(tester, 'amount-field');
 
     final amount = tester.widget<TextField>(find.byKey(const Key('amount-field')));
@@ -532,6 +534,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
     await tester.tap(find.text('已結帳的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await tapKey(tester, 'advanced-tile');
 
     expect(tester.widget<ChoiceChip>(find.byKey(const Key('payer-common'))).onSelected, isNull);
@@ -563,6 +566,7 @@ void main() {
     );
     await tester.tap(find.text('已結帳的金額分攤'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
 
     await fillKey(tester, 'note-field', '只改備註');
     await tapKey(tester, 'save-button');
@@ -581,6 +585,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(repo));
     await tester.tap(find.text('已結帳帶細項'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await _prepareFor(tester, 'li-name-0');
 
     // enabled 沒明寫時是 null（＝可編輯）；唯讀會被顯式設成 false。
@@ -609,6 +614,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(repoWith(entries: settlingEntries())));
     await tester.tap(find.text('結算中的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await _prepareFor(tester, 'amount-field');
 
     expect(tester.widget<TextField>(find.byKey(const Key('amount-field'))).enabled, isFalse);
@@ -629,6 +635,29 @@ void main() {
     expect(e.payerId, kMeId);
     expect(e.splitMethod, SplitMethod.equal);
     expect(e.settledState, SettledState.settling);
+  });
+
+  testWidgets('點列表＝唯讀明細：欄位不可點、細項向下展開；鉛筆才進編輯', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: settledWithLineItems())));
+    await tester.tap(find.text('已結帳帶細項'));
+    await tester.pumpAndSettle();
+
+    // 唯讀：標題「明細」、沒有儲存鈕；點金額列不會開彈窗。
+    expect(find.text('明細'), findsOneWidget);
+    expect(find.byKey(const Key('save-button')), findsNothing);
+    await tester.tap(find.byKey(const Key('edit-row-amount')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('field-done')), findsNothing, reason: '唯讀不開編輯彈窗');
+
+    // 細項：點列向下展開，看得到細項名稱。
+    await tester.tap(find.byKey(const Key('edit-row-lines')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('detail-lineitems')), findsOneWidget);
+    expect(find.text('打錯的細項'), findsOneWidget);
+
+    // 鉛筆進編輯：儲存鈕出現、點欄位開彈窗。
+    await tapKey(tester, 'enter-edit');
+    expect(find.byKey(const Key('save-button')), findsOneWidget);
   });
 
   testWidgets('沖銷：settled 筆一鍵反向＋帶原資訊重記；第二次停用', (tester) async {
@@ -667,6 +696,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(repoWith(entries: oneOpenEntry())));
     await tester.tap(find.text('可刪的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
 
     await fillKey(tester, 'note-field', '改過的備註');
     await tapKey(tester, 'save-button');
@@ -681,6 +711,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(repoWith(entries: oneOpenEntry())));
     await tester.tap(find.text('可刪的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
 
     await tapKey(tester, 'entry-menu');
     await tapKey(tester, 'delete-entry');
@@ -711,6 +742,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(FailingRepository(seed: snapshotWith(entries: oneOpenEntry()), failUpsertEntry: true)));
     await tester.tap(find.text('可刪的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await fillKey(tester, 'note-field', '改不動');
     await goToStep(tester, 3);
     await tester.tap(find.byKey(const Key('save-button')));
@@ -724,6 +756,7 @@ void main() {
     final c = await pumpApp(tester, containerFor(FailingRepository(seed: snapshotWith(entries: oneOpenEntry()), failRemoveEntry: true)));
     await tester.tap(find.text('可刪的買菜'));
     await tester.pumpAndSettle();
+    await tapKey(tester, 'enter-edit'); // 點列表＝唯讀明細，進編輯要按鉛筆（2026-09-04）
     await tapKey(tester, 'entry-menu');
     await tapKey(tester, 'delete-entry');
     await tester.tap(find.byKey(const Key('confirm-delete')));
@@ -1038,6 +1071,7 @@ void main() {
       await pumpApp(tester, container);
       await tester.tap(find.text('預算買菜'));
       await tester.pumpAndSettle();
+      await tapKey(tester, 'enter-edit');
       await tapKey(tester, 'advanced-tile');
 
       expect(tester.widget<ChoiceChip>(find.byKey(const Key('funding-budget'))).selected, isTrue);
@@ -1055,6 +1089,7 @@ void main() {
       await pumpApp(tester, container);
       await tester.tap(find.text('代墊買菜'));
       await tester.pumpAndSettle();
+      await tapKey(tester, 'enter-edit');
       await tapKey(tester, 'advanced-tile');
 
       expect(find.byKey(const Key('funding-budget')), findsNothing, reason: '代墊時資金列不顯示');

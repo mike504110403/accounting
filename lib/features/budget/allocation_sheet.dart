@@ -190,6 +190,11 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
                 child: Text('本月還沒有撥款紀錄', style: Theme.of(context).textTheme.bodySmall),
               )
             else
+              // 固定 5 列高、區塊內可滾動——sheet 不再無限往上長（Mike 裁示 2026-09-04）。
+              SizedBox(
+                height: 5 * 48.0,
+                child: ListView(
+                  children: [
               for (final a in flow)
                 // 左滑刪除（Mike 裁示 2026-09-04：不放 X 按鈕）。
                 Slidable(
@@ -226,6 +231,9 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
                     ),
                   ),
                 ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),

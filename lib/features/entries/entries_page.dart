@@ -276,7 +276,7 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                 background: Theme.of(context).colorScheme.secondaryContainer,
                 foreground: Theme.of(context).colorScheme.onSecondaryContainer,
                 tooltip: '編輯',
-                onPressed: () => context.push('/entries/${e.id}'),
+                onPressed: () => context.push('/entries/${e.id}?edit=1'),
               ),
               CircleSlideAction(
                 icon: Icons.delete_outline,

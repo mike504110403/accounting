@@ -112,6 +112,6 @@ void main() {
     await tester.pumpAndSettle();
     // 編輯＝單頁明細 hub（2026-09-03）。
     expect(find.byKey(const Key('edit-mode')), findsOneWidget);
-    expect(find.text('編輯'), findsOneWidget);
+    expect(find.text('明細'), findsOneWidget);
   });
 }

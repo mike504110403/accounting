@@ -19,8 +19,11 @@ import 'split_math.dart';
 /// 版面依 spec v1.1「資訊密度」：單一平面列表、細標題分段、說明只在錯誤時出現、
 /// 折疊區收起只留一行摘要、儲存鈕固定在底部。
 class EntryFormPage extends ConsumerStatefulWidget {
-  const EntryFormPage({super.key, this.entryId, this.template});
+  const EntryFormPage({super.key, this.entryId, this.template, this.readOnly = false});
   final String? entryId;
+
+  /// 點列表進來＝唯讀明細（欄位全 disable，細項可展開）；左滑「編輯」才進可編輯模式。
+  final bool readOnly;
 
   /// 新增時的預填範本（沖銷後「重新記一筆」帶原資訊進來；不是編輯）。
   final Entry? template;
@@ -59,6 +62,11 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   bool _isAdjustment = false;
   Entry? _original;
   bool _missing = false;
+
+  /// 唯讀明細裡「細項」列的展開狀態。
+  bool _liExpanded = false;
+
+  bool get _readOnly => widget.readOnly && _original != null;
 
   /// 步驟精靈（Mike 裁示 2026-09-03，四關版）：類型・分類・金額 → 日期・備註・細項 → 進階 → 確認。
   static const _stepTitles = ['類型・分類・金額', '日期・備註・細項', '進階', '確認'];
@@ -484,10 +492,17 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(_original == null ? '新增' : '編輯'),
+        title: Text(_original == null ? '新增' : (_readOnly ? '明細' : '編輯')),
         leading: IconButton(icon: const Icon(Icons.close), tooltip: '關閉', onPressed: () => context.pop()),
         actions: [
-          if (_original != null && !_locked)
+          if (_readOnly)
+            IconButton(
+              key: const Key('enter-edit'),
+              icon: const Icon(Icons.edit_outlined),
+              tooltip: '編輯',
+              onPressed: () => context.pushReplacement('/entries/${widget.entryId}?edit=1'),
+            ),
+          if (_original != null && !_readOnly && !_locked)
             PopupMenuButton<String>(
               key: const Key('entry-menu'),
               onSelected: (v) {
@@ -499,7 +514,9 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
             ),
         ],
       ),
-      bottomNavigationBar: SafeArea(
+      bottomNavigationBar: _readOnly
+          ? null
+          : SafeArea(
         minimum: const EdgeInsets.fromLTRB(16, 0, 16, 12),
         child: Row(
           children: [
@@ -527,7 +544,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
             ),
           ],
         ),
-      ),
+            ),
       // 點內容空白處收鍵盤（Mike 裁示：鍵盤不要擋欄位、要收得掉）。
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -548,7 +565,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                 children: [
                   // 步驟標題與進度置中放大：一眼看懂現在在填什麼、走到哪。
                   // 編輯＝單頁明細 hub，沒有步驟進度。
-                  Text(_original != null ? '帳目明細' : _stepTitles[_step],
+                  Text(_original != null ? (_readOnly ? '帳目明細' : '編輯帳目') : _stepTitles[_step],
                       textAlign: TextAlign.center, style: t.textTheme.titleMedium),
                   if (_original == null) ...[
                     const SizedBox(height: 4),
@@ -734,7 +751,8 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     final note = _note.text.trim();
     final linesLabel = _validLineCount == 0 ? '—' : '$_validLineCount 筆・合計 ${fmtAmount(_lineTotal)}';
 
-    VoidCallback? go(int step) => () => setState(() => _step = step);
+    final ro = _readOnly;
+    VoidCallback? go(int step) => ro ? null : () => setState(() => _step = step);
     final rows = <(String, String, String?, VoidCallback?)>[
       // (標籤, 值, 編輯列 key, onTap)
       ('類型', _kind == EntryKind.income ? '收入' : '支出', null, editing ? null : go(0)),
@@ -742,7 +760,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         '分類',
         categoryName,
         'edit-row-category',
-        editing
+        editing && !ro
             ? () => _editFieldSheet('分類', (ctx) {
                   final categories = [
                     for (final c in ref.read(categoriesProvider))
@@ -765,28 +783,31 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         '金額',
         fmtAmount(_amountValue),
         'edit-row-amount',
-        editing ? () => _editFieldSheet('金額', (_) => _amountField(t)) : go(0)
+        editing && !ro ? () => _editFieldSheet('金額', (_) => _amountField(t)) : go(0)
       ),
-      ('日期', fmtDate(_date), 'date-button', editing ? _pickDate : go(1)),
+      ('日期', fmtDate(_date), 'date-button', editing && !ro ? _pickDate : go(1)),
       if (editing || note.isNotEmpty)
         (
           '備註',
           note.isEmpty ? '—' : note,
           'edit-row-note',
-          editing ? () => _editFieldSheet('備註', (_) => _noteField(autofocus: true)) : go(1)
+          editing && !ro ? () => _editFieldSheet('備註', (_) => _noteField(autofocus: true)) : go(1)
         ),
       if (editing || _validLineCount > 0)
         (
           '細項',
           linesLabel,
           'edit-row-lines',
-          editing ? () => _editFieldSheet('細項', (_) => _linesSection()) : go(1)
+          ro
+              // 唯讀明細：點細項是向下展開（Mike 裁示 2026-09-04）。
+              ? (_lines.isEmpty ? null : () => setState(() => _liExpanded = !_liExpanded))
+              : (editing ? () => _editFieldSheet('細項', (_) => _linesSection()) : go(1))
         ),
       (
         '進階',
         _advancedSummary(members),
         'edit-row-advanced',
-        editing
+        editing && !ro
             ? () => _editFieldSheet('進階', (ctx) => _advancedBody(Theme.of(ctx), ref.read(membersProvider)))
             : go(2)
       ),
@@ -819,12 +840,45 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                             // 編輯 hub：值弱色＝唯讀感；點了才開彈窗改。
                             color: editing ? t.colorScheme.onSurfaceVariant : null)),
                   ),
-                  if (editing && r.$4 != null) ...[
+                  if (editing && !ro && r.$4 != null) ...[
                     const SizedBox(width: 6),
                     Icon(Icons.chevron_right, size: 16, color: t.colorScheme.onSurfaceVariant),
                   ],
+                  if (ro && r.$3 == 'edit-row-lines' && _lines.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Icon(_liExpanded ? Icons.expand_less : Icons.expand_more,
+                        size: 16, color: t.colorScheme.onSurfaceVariant),
+                  ],
                 ],
               ),
+            ),
+          ),
+        if (ro && _liExpanded && _lines.isNotEmpty)
+          // 細項展開（唯讀）：同樣 3 列高可滾、倒序。
+          SizedBox(
+            height: 3 * 40.0,
+            child: ListView(
+              key: const Key('detail-lineitems'),
+              children: [
+                for (final i in [for (var k = 0; k < _lines.length; k++) k].reversed)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Row(
+                      children: [
+                        const SizedBox(width: 56),
+                        Expanded(
+                          child: Text(_lines[i].name.text,
+                              style: t.textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                        Text(
+                          _lines[i].amount.text.isEmpty ? '—' : fmtAmount(int.tryParse(_lines[i].amount.text) ?? 0),
+                          style: t.textTheme.bodySmall?.copyWith(
+                              fontFeatures: const [FontFeature.tabularFigures()]),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
             ),
           ),
         if (editing && _settled) ...[
@@ -1249,7 +1303,12 @@ class _LineItemsSectionState extends State<_LineItemsSection> {
             ),
           ],
         ),
-        for (var i = 0; i < lines.length; i++)
+        // 固定 3 列高、可滾動、倒序（新加的在最上）——sheet 不再被撐高（Mike 裁示 2026-09-04）。
+        SizedBox(
+          height: 3 * 54.0,
+          child: ListView(
+            children: [
+        for (final i in [for (var k = 0; k < lines.length; k++) k].reversed)
           // 左滑刪除（Mike 裁示 2026-09-04：不放 X 按鈕）。
           Slidable(
             key: ValueKey('li-row-$i'),
@@ -1315,6 +1374,9 @@ class _LineItemsSectionState extends State<_LineItemsSection> {
             ),
             ),
           ),
+            ],
+          ),
+        ),
         if (lines.isNotEmpty && lineTotal != amount)
           Align(
             alignment: Alignment.centerRight,
