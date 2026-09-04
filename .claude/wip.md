@@ -36,7 +36,7 @@
 
 ## 待 Mike 裁示
 
-- 雲端 dev＋prod 關 signup：帳號建好後在 dashboard 關（anon key 公開，任何人可註冊，RLS 擋資料）。建議：家人帳號建完就關。
+- ~~雲端 dev＋prod 關 signup~~ 已裁（2026-09-05）：**prod 不關 signup**，維持開放（RLS 擋資料）；dev 同樣不動。
 - 統計第一列 6 顆按鈕 390px 偏擠：建議看實機；不順眼一行改回兩列。
 - v1.4 review 留下的三題已依「兩人客製」原則收掉（2026-09-05 Mike 裁示）：payer 可指向他人不限制；時區裝置 vs 台北不處理；可清條件三份實作留著（ledger 記一行）。
 - SQL 測試 `supabase/tests/run.sh` 需地端 DB——「不再起地端 DB」後是否保留／改為只在 migration 時臨時起一次？建議：只在有新 migration 時臨時起棧跑一次再關。
@@ -108,6 +108,14 @@ scout 落檔 `.claude/scout-v14-balance.md`／`scout-v14-budget.md`（未入 git
 
 ### 部署順序（ledger 定則＋db review M1/M2）
 **v1.4 migration 與前端 build 必須同一波上**：新 `month_summary` 移除 `shared_available`／`envelope_total`，舊 build 的 `MonthSummary.fromJson` 硬轉會炸（首頁／預算頁全掛），TestFlight 舊 build 無法強更→push migration 後立即發新 web build 並上傳新 iOS build；push 後立刻呼叫一次 `month_summary` 驗。**push 前**：(1) 對 prod／dev 各 `pg_dump -t budget_allocation -t entries` 留檔記進 wip；(2) migration 自帶 `archive.budget_allocation_v13` 備份表；(3) 先在 prod 副本跑一次並 diff 撥款列數／金額總和。既有負撥款列由 migration 合併／刪除（原始列快照在 `archive.budget_allocation_v13`）。**push 前查 `supabase_migrations.schema_migrations`**：合併檔沿用版本號 `20260904000200`，若雲端曾套過舊拆分檔會整支跳過（db review N3）。
+
+## 2026-09-05 收尾狀態
+
+- dev 已推 origin：052ecfa → **d9d7a25**（34 顆，ls-remote 比對一致）。
+- 雲端 dev／prod 皆已套 `20260904000200_rules_v14.sql`（dev 撥款 18→7 合併、prod 2→2；三表 pg_dump 備份在 session scratchpad）。
+- iOS **0.1.0 (7)**（stamp ios-0905-0139，連 prod）已 altool 上傳成功（Delivery 2e485f05…），等 ASC processing → internal 群組 family 自動發佈。
+- 地端 Supabase 棧已 `supabase stop`；**不再起地端 DB**（memory：accounting-env-policy）。
+- Mike 手測改在 TestFlight（prod）進行：清單在 session scratchpad `handtest-v14.md`（21 條，改成 prod 帳號與真資料版）。
 
 ## 下一步
 
