@@ -1,6 +1,6 @@
 # WIP — accounting 記帳 app（/mega）
 
-更新：2026-09-04 晚（/wip 收斂；TestFlight 首發已上線至 build 6）
+更新：2026-09-04 晚（帳務規則 v1.4 /mega 探路段：decision 清單待裁）
 
 ## 任務背景與目標
 
@@ -38,7 +38,8 @@
 
 - 雲端 dev＋prod 關 signup：帳號建好後在 dashboard 關（anon key 公開，任何人可註冊，RLS 擋資料）。建議：家人帳號建完就關。
 - 統計第一列 6 顆按鈕 390px 偏擠：建議看實機；不順眼一行改回兩列。
-- ~~Apple 登入~~ 已解：原生 id-token 流程不需 Services ID，prod/dev provider 已開。
+- v1.4 review 留下的三題已依「兩人客製」原則收掉（2026-09-05 Mike 裁示）：payer 可指向他人不限制；時區裝置 vs 台北不處理；可清條件三份實作留著（ledger 記一行）。
+- SQL 測試 `supabase/tests/run.sh` 需地端 DB——「不再起地端 DB」後是否保留／改為只在 migration 時臨時起一次？建議：只在有新 migration 時臨時起棧跑一次再關。
 
 ## 手測回饋迭代（2026-09-03～04，全部已合入 feature/wave2 並過測試）
 
@@ -77,6 +78,36 @@
 - e2e 固定測試帳號 e2e-tutorial@example.com；Docker supabase 棧瘦身統一。
 - **紀律**：release build 會弄壞同目錄跑著的 dev server → 每次 `tool/build_web.sh` 後必重啟 8787；ngrok 綁 8788（release 靜態）。
 - **iOS/TestFlight（首發完成，2026-09-04 晚）**：build 1～6 全數上傳成功，最新 **0.1.0 (6)**（stamp ios-0904-1850）。歷程：b1 首傳（90068 minOS 警告）→ b2 icon v1＋minOS 15 → b3 icon 定稿 v3（貓圖 duotone＋顆粒，`~/mike/icons/icon-v3.png`）→ b4 系統分享版（**作廢不發佈**）→ b5 分享退回複製鈕 → b6 邀請碼欄位濾非英數。ASC app「accounting by mike」（id 6808578728）；**internal 群組 `family`**（自動發佈、成員 mike504110403＋heart5588mem，邀請信已重發、等接受）；external 群組建過兩次都已刪（公開連結路線棄用——要過 beta review）。90068 警告已解。詳細：bundle `com.mikelin.accounting`（Team DDMW7327JC）、SIWA capability＋entitlements、原生 Sign in with Apple（nonce＋signInWithIdToken；iOS 登入頁只放 Apple）、dist 憑證＋AppStore profile（fastlane cert/sigh）、`tool/build_ios.sh` 注入 prod。**Supabase prod 建好**：ref jcvichjhryczvlvkdsjj（東京）、26 migrations 全推、autoconfirm 開、Apple provider 開；憑證在 `~/mike/supabase/prod.env`、ASC 金鑰在 `~/mike/asc/`（Admin key 7FCJX2X2C7）。上架前雙審查（app-store-review＋OWASP）無 BLOCKER，M-1/m-5/m-10 已修（0904-1714）；M-2 帳號刪除、M-3 隱私政策、M-4 token 進 Keychain 記 ledger。ASC app record「accounting by mike」（id 6808578728）已建，ipa 已上傳，等 processing → 掛內部測試群組。
+
+## 帳務規則 v1.4 調整（/mega，2026-09-04 晚起）
+
+Mike 十題全裁（2026-09-04）：**ADR-0008**＋**spec v1.4** 已 commit 在 `feature/rules-v14`（161e207）。決策摘要：清帳只列明細＋動個人餘額；結算份額依 occurred_on 逐筆歸月、清帳前該月拆帳全簽完；個人期初餘額廢除；補入額加入月起算、改值套用未清月；已花＝所有共同支出含代墊；**預算每分類每月只能設定一次（不增不減）**；funding 整個 drop；清帳按序／一次／不可撤銷／不多簽／RPC；已清月鎖定；共同餘額不扣信封。
+
+scout 落檔 `.claude/scout-v14-balance.md`／`scout-v14-budget.md`（未入 git，波次結束刪）。brief 在 scratchpad `brief-db-v14.md`／`brief-form-nofunding.md`。
+
+### 波次看板
+
+| 波次／任務 | 階段 | 分支 | 切自 | 依賴 | 工人 | review |
+| --- | --- | --- | --- | --- | --- | --- |
+| feature/rules-v14（需求） | **已合 dev（2c6a020，一顆）；feature 三清**；雲端 dev／prod 已套 20260904000200（dev 撥款 18→7 合併、prod 2→2）；Mike 手測改在 TestFlight（prod）進行 | feature/rules-v14 | dev 5064f8f | — | — | Mike 手測站：整需求合 dev 前一次做（波 1 表單切片為純移除，延後到波 2 完成後） |
+| 波1 DB：migration 0027 合一支、month_closes、close_month/preview RPC、鎖月 trigger、entry_member_effects view、month_summary 重寫、SQL 測試 | **已合入 feature（ad6c814，merge 06b3486）** | wt 已清 | feature 161e207 | 獨立 | 已收工 | db／security／code 三 reviewer 兩輪複審＋MINOR 確認全過（累計 28 個變異）；review 檔留 scratchpad |
+| 波1 表單／結帳／沖銷去 funding UI（不動 model） | **已合入 feature（5815dcd）** | wt 已清 | feature 161e207 | 獨立 | 已收工 | code-reviewer 過（1 MAJOR 修復輪後複審過）；未指派 MINOR：沖銷對話框「預算一併回退」文案→F3；`_save` orig!=null 分支無測試（PLAUSIBLE 不可達） |
+| 波2 F1 domain/data：models 去 Funding、Member.monthlyTopup、MonthClose、balance_math 重寫、repository 介面＋兩實作、month_summary.dart 新鍵、errors.dart、消費者最小對齊 | **已合入 feature（21e04b2，merge 45356e5）** | wt 已清 | feature 06b3486 | 依賴波1 | 已收工 | code-reviewer 過（0 MAJOR，7 MINOR 修畢確認）；INTEGRATION 43 綠 |
+| 波2 F3 預算頁：頂部四數字、撥款 sheet 改「設定本月預算」一次性、複製上月只補未設定、tutorial 導覽文案、沖銷對話框文案 | **已合入 feature（5509ba9，merge 6a11747）** | wt 已清 | feature 45356e5 | 依賴 F1 | 已收工 | code-reviewer 過（1 MAJOR 修復輪重審過、MINOR 確認） |
+| 波2 F4 設定頁：每月補入額取代個人期初、清帳入口＋ `/settings/closes` 清帳頁（列表＋預覽＋二次確認）、鎖月 UI | **已合入 feature（06c1048，merge 1473d1e）** | wt 已清 | feature 45356e5 | 依賴 F1 | 已收工 | code-reviewer 過（0 MAJOR，6 MINOR 修畢確認；累計 43 變異）；INTEGRATION 45 綠 |
+| 波2 F5 統計：趨勢線改共同餘額／個人餘額新公式、月摘要吃新鍵、已清月看快照／未來月投影 | **已合入 feature（d1e8774，merge 014d4d9）** | wt 已清 | feature 45356e5 | 依賴 F1 | 已收工 | code-reviewer 過（0 MAJOR，7 MINOR 修畢確認） |
+
+### Mike 手測站（2026-09-05 起）
+- 入口：dev server **8789**（feature worktree，`--dart-define` 連地端 127.0.0.1:54321；**不要用 8787**——那是舊 session 的 dev server、指雲端 dev）。完整清單 `accounting-feature-rules-v14/.claude/handtest-v14.md`（21 條）。地端 DB 已 run.sh 重置成 v1.4 乾淨 seed；帳號 mike@test.local／wife@test.local，密碼 password。
+
+### 手測清單摘要
+- 預算頁：六位數金額月份看頂部三欄是否折行（reviewer PLAUSIBLE）；未設定但有花費的分類列（seed 住房）紅條＋灰標視覺是否順眼；已設定列點開唯讀、過去月「已過期」。
+- 清帳頁：三種 disabled 原因、預覽三方向文案、二次確認、B 帳號清下一月、Realtime 同步、同時清帳競爭（工人 15 條清單存 scratchpad 回報）。
+- 統計：切視角 legend、已清月個人卡讀快照、未來月投影小字（個人視角）；非月顆粒度已清月斷線時 trackball tooltip 是否仍列「個人餘額」（reviewer PLAUSIBLE）。
+- 設定：兩列餘額設定共用 sheet、補入額 1 億上界錯誤。
+
+### 部署順序（ledger 定則＋db review M1/M2）
+**v1.4 migration 與前端 build 必須同一波上**：新 `month_summary` 移除 `shared_available`／`envelope_total`，舊 build 的 `MonthSummary.fromJson` 硬轉會炸（首頁／預算頁全掛），TestFlight 舊 build 無法強更→push migration 後立即發新 web build 並上傳新 iOS build；push 後立刻呼叫一次 `month_summary` 驗。**push 前**：(1) 對 prod／dev 各 `pg_dump -t budget_allocation -t entries` 留檔記進 wip；(2) migration 自帶 `archive.budget_allocation_v13` 備份表；(3) 先在 prod 副本跑一次並 diff 撥款列數／金額總和。既有負撥款列由 migration 合併／刪除（原始列快照在 `archive.budget_allocation_v13`）。**push 前查 `supabase_migrations.schema_migrations`**：合併檔沿用版本號 `20260904000200`，若雲端曾套過舊拆分檔會整支跳過（db review N3）。
 
 ## 下一步
 
