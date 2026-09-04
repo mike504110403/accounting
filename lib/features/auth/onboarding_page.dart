@@ -244,6 +244,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
             controller: _code,
             autofocus: true,
             maxLength: kInviteCodeLength,
+            // 先濾掉空白／標點再套長度上限：聊天軟體複製常夾頭尾空白，
+            // 不濾的話空白吃掉一個名額，10 碼代碼只剩 9 碼有效（2026-09-04 實測回報）。
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9]'))],
             textCapitalization: TextCapitalization.characters,
             decoration: const InputDecoration(
               isDense: true,

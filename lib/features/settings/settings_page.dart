@@ -374,6 +374,8 @@ class _LedgerSwitchSheetState extends ConsumerState<_LedgerSwitchSheet> {
                     key: const ValueKey('join-code-field'),
                     controller: _joinController,
                     maxLength: kInviteCodeLength,
+                    // 同首登：先濾非英數再截長度，貼上夾空白不吃名額。
+                    inputFormatters: [FilteringTextInputFormatter.allow(RegExp('[a-zA-Z0-9]'))],
                     textCapitalization: TextCapitalization.characters,
                     decoration: const InputDecoration(
                       labelText: '輸入 $kInviteCodeLength 碼邀請碼',
