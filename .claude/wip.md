@@ -61,8 +61,8 @@
 
 ## 下一步
 
-1. /ship：dev 領先 origin/dev 一顆（5464b01 波 2 squash），Mike 授權後 push。
-2. 進行中：replica identity full migration（0026，修 Realtime DELETE 整表重抓繞路）＋SQL 測試＋db-reviewer＋雲端 push。
+1. /ship：052ecfa 已推 origin（2026-09-04）；0026 commit 待下批 push。
+2. ~~replica identity full migration~~ 已完成（0026 雲端已 push＋驗證、db review 過、前端拆補丁）。
 3. 待辦池（見 2026-09-04 盤點回報）：Apple provider 後台設定（要 Mike 的 Apple Developer 資料）、iOS 打包＋home indicator padding、刪帳本 RPC、prod 專案、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）。
 
 ## 環境備忘
