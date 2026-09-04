@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/category_wheel.dart';
 import '../../app/format.dart';
 import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
@@ -383,15 +384,18 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               ),
             ],
             const SizedBox(height: 8),
-            _fieldRow(
-              '分類',
-              DropdownButtonFormField<String>(
-                initialValue: _categoryId,
-                isDense: true,
-                decoration: const InputDecoration(isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8)),
-                items: [for (final c in categories) DropdownMenuItem(value: c.id, child: Text(c.name))],
-                onChanged: (v) => setState(() => _categoryId = v),
-              ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Text('分類', style: Theme.of(context).textTheme.bodyMedium),
+            ),
+            CategoryWheel(
+              key: const Key('checkout-category-wheel'),
+              categories: categories..sort((a, b) => a.sort.compareTo(b.sort)),
+              selectedId: _categoryId,
+              onSelected: (id) => setState(() {
+                _categoryId = id;
+                _syncFunding();
+              }),
             ),
             _dateFieldRow('日期', fmtDate(_date), _pickDate, key: const Key('checkout-date-row')),
             const SizedBox(height: 4),
@@ -413,18 +417,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
   }
 }
 
-/// 資訊密度：欄位標籤在左、輸入在右，單行。
-Widget _fieldRow(String label, Widget input) {
-  return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Row(
-      children: [
-        SizedBox(width: 56, child: Text(label)),
-        Expanded(child: input),
-      ],
-    ),
-  );
-}
 
 /// 可點的欄位列（如日期／到期日）：整列（含標籤）都能點開選擇器，且點擊高度至少 44px（點擊目標最小尺寸）。
 Widget _dateFieldRow(String label, String value, VoidCallback onTap, {Key? key}) {

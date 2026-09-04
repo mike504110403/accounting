@@ -1,11 +1,12 @@
-/// 分類垂直滾輪（Mike 裁示 2026-09-03：分類選擇不秀 icon、改滾輪）。
-/// 與 month_picker.dart 同款 CupertinoPicker；選中即回呼，永遠有選中值（滾輪語義）。
+/// 分類選擇器（Mike 裁示 2026-09-04 第二版）：橫向小 icon 無限循環滑動。
+/// 預設可視 5 個、置中者為選中、依分類排序左右接續（循環）；永遠有選中值（滾輪語義）。
+/// 表單、編輯彈窗、購物／結帳 sheet 共用這一顆。
 library;
 
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../domain/models.dart';
+import 'category_icon.dart';
 
 class CategoryWheel extends StatefulWidget {
   const CategoryWheel({
@@ -14,7 +15,7 @@ class CategoryWheel extends StatefulWidget {
     required this.selectedId,
     required this.onSelected,
     this.enabled = true,
-    this.height = 108,
+    this.height = 72,
   });
 
   final List<Category> categories;
@@ -23,28 +24,40 @@ class CategoryWheel extends StatefulWidget {
   final bool enabled;
   final double height;
 
-  static const itemExtent = 36.0;
+  /// 一屏可視數（置中選中＋左右各兩個）。測試用它換算單格寬。
+  static const visibleCount = 5;
 
   @override
   State<CategoryWheel> createState() => _CategoryWheelState();
 }
 
 class _CategoryWheelState extends State<CategoryWheel> {
-  late final FixedExtentScrollController _controller =
-      FixedExtentScrollController(initialItem: _indexOf(widget.selectedId));
+  /// 無限循環：從一個很大的中點頁開始，往兩邊都滑得動；index 取模映射回分類。
+  static const _loops = 1000;
+
+  int get _n => widget.categories.length;
+  int get _base => _n * _loops;
 
   int _indexOf(String? id) {
     final i = widget.categories.indexWhere((c) => c.id == id);
     return i < 0 ? 0 : i;
   }
 
+  late final PageController _controller = PageController(
+    viewportFraction: 1 / CategoryWheel.visibleCount,
+    initialPage: _base + _indexOf(widget.selectedId),
+  );
+
   @override
   void didUpdateWidget(CategoryWheel old) {
     super.didUpdateWidget(old);
-    // 外部把選取換掉（如切支出／收入重設）時把滾輪帶到位；自己滾動觸發的回呼不會進這裡的 jump。
+    if (_n == 0 || !_controller.hasClients) return;
+    final page = _controller.page?.round() ?? _controller.initialPage;
+    // 外部換選取（如支出/收入切換重設）或分類清單長度變了：跳回中點對應頁。
     final target = _indexOf(widget.selectedId);
-    if (_controller.hasClients && old.selectedId != widget.selectedId && _controller.selectedItem != target) {
-      _controller.jumpToItem(target);
+    final changed = old.categories.length != _n || old.selectedId != widget.selectedId;
+    if (changed && page % _n != target) {
+      _controller.jumpToPage(_base + target);
     }
   }
 
@@ -67,20 +80,44 @@ class _CategoryWheelState extends State<CategoryWheel> {
       ignoring: !widget.enabled,
       child: SizedBox(
         height: widget.height,
-        child: CupertinoTheme(
-          data: CupertinoThemeData(brightness: t.brightness),
-          child: CupertinoPicker(
-            itemExtent: CategoryWheel.itemExtent,
-            scrollController: _controller,
-            onSelectedItemChanged: (i) => widget.onSelected(widget.categories[i].id),
-            children: [
-              for (final c in widget.categories)
-                Center(
-                  key: Key('category-${c.id}'),
-                  child: Text(c.name, style: t.textTheme.bodyLarge),
-                ),
-            ],
-          ),
+        child: PageView.builder(
+          controller: _controller,
+          onPageChanged: (i) => widget.onSelected(widget.categories[i % _n].id),
+          itemBuilder: (_, i) {
+            final c = widget.categories[i % _n];
+            final selected = c.id == widget.selectedId;
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: selected ? 40 : 32,
+                    height: selected ? 40 : 32,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selected ? t.colorScheme.primaryContainer : t.colorScheme.surfaceContainerHigh,
+                    ),
+                    child: Icon(
+                      categoryIcon(c.icon),
+                      size: selected ? 20 : 16,
+                      color: selected ? t.colorScheme.onPrimaryContainer : t.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    c.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: t.textTheme.labelSmall?.copyWith(
+                      color: selected ? t.colorScheme.onSurface : t.colorScheme.onSurfaceVariant,
+                      fontWeight: selected ? FontWeight.w600 : null,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
         ),
       ),
     );

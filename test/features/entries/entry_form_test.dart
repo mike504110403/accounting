@@ -316,7 +316,7 @@ Future<void> _prepareFor(WidgetTester tester, String key) async {
   await goToStep(tester, step);
 }
 
-/// 分類垂直滾輪：先到步驟 0，由目前選中滾到目標分類。
+/// 分類改橫向循環選擇器（2026-09-04）：由目前選中往目標拖整數格（單格寬＝可視寬/5）。
 Future<void> selectCategory(WidgetTester tester, String id) async {
   await _prepareFor(tester, 'category-wheel');
   final wheelF = find.byKey(const Key('category-wheel'));
@@ -326,8 +326,9 @@ Future<void> selectCategory(WidgetTester tester, String id) async {
   final ids = [for (final c in wheel.categories) c.id];
   final cur = ids.indexOf(wheel.selectedId ?? ids.first).clamp(0, ids.length - 1);
   final target = ids.indexOf(id);
-  if (target < 0) fail('分類 $id 不在滾輪裡: $ids');
-  await tester.drag(wheelF, Offset(0, -(target - cur) * CategoryWheel.itemExtent));
+  if (target < 0) fail('分類 $id 不在選擇器裡: $ids');
+  final extent = tester.getSize(wheelF).width / CategoryWheel.visibleCount;
+  await tester.drag(wheelF, Offset(-(target - cur) * extent, 0));
   await tester.pumpAndSettle();
 }
 
