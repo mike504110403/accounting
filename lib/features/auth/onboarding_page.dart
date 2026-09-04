@@ -1,15 +1,15 @@
 /// 首登頁（Mike 裁示 2026-09-03 關卡制）：
 /// 關 0 二選一（建立新帳本／用邀請碼加入）→ 關 1 輸入 → 建立成功再一關
-/// 顯示邀請碼＋系統分享（把連結與邀請碼貼進會話），才進 app。
+/// 顯示邀請碼＋一鍵複製，才進 app。
 ///
 /// 錯誤一律顯示在頁內紅字（不用 SnackBar）。
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../app/invite_share.dart';
 import '../../data/current_ledger.dart';
 import '../../data/ledger_repository.dart';
 import '../../domain/models.dart';
@@ -124,8 +124,12 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     }
   }
 
-  Future<void> _share() =>
-      shareInvite(context, ledgerName: _created!.name, inviteCode: _created!.inviteCode);
+  /// 系統分享棄用（Mike 裁示 2026-09-04）：只做邀請碼複製。
+  Future<void> _copyCode() async {
+    final messenger = ScaffoldMessenger.of(context);
+    await Clipboard.setData(ClipboardData(text: _created!.inviteCode));
+    messenger.showSnackBar(const SnackBar(content: Text('已複製邀請碼')));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -285,9 +289,9 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
           const SizedBox(height: 24),
           FilledButton.icon(
             key: const Key('onboarding-share-button'),
-            onPressed: _share,
-            icon: const Icon(Icons.ios_share, size: 18),
-            label: const Text('分享邀請'),
+            onPressed: _copyCode,
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            label: const Text('複製邀請碼'),
           ),
           const SizedBox(height: 8),
           OutlinedButton(

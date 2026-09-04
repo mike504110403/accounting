@@ -4,7 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/build_info.dart';
-import '../../app/invite_share.dart';
 import '../../app/tutorial.dart';
 
 import '../../app/format.dart';
@@ -130,13 +129,6 @@ class _LedgerCard extends ConsumerWidget {
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                IconButton(
-                  key: const Key('share-invite'),
-                  icon: const Icon(Icons.ios_share_outlined),
-                  tooltip: '分享邀請',
-                  onPressed: () => shareInvite(context,
-                      ledgerName: ledger.name, inviteCode: ledger.inviteCode),
-                ),
                 IconButton(
                   key: const Key('copy-invite-code'),
                   icon: const Icon(Icons.copy_outlined),
