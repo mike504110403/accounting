@@ -6,11 +6,10 @@
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:share_plus/share_plus.dart';
 
+import '../../app/invite_share.dart';
 import '../../data/current_ledger.dart';
 import '../../data/ledger_repository.dart';
 import '../../domain/models.dart';
@@ -125,23 +124,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     }
   }
 
-  String get _inviteMessage {
-    final l = _created!;
-    final origin = Uri.base.hasScheme ? Uri.base.origin : '';
-    return '跟我一起記帳！打開 $origin 登入後，用邀請碼 ${l.inviteCode} 加入「${l.name}」。';
-  }
-
-  /// 系統分享；環境不支援（桌面瀏覽器等）就複製到剪貼簿。
-  Future<void> _share() async {
-    try {
-      await SharePlus.instance.share(ShareParams(text: _inviteMessage));
-    } catch (_) {
-      await Clipboard.setData(ClipboardData(text: _inviteMessage));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已複製邀請訊息，貼給另一半吧')));
-      }
-    }
-  }
+  Future<void> _share() =>
+      shareInvite(context, ledgerName: _created!.name, inviteCode: _created!.inviteCode);
 
   @override
   Widget build(BuildContext context) {
