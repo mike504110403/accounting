@@ -92,13 +92,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   /// 寫入進行中：儲存鈕停用，避免重複送出。
   bool _saving = false;
 
-  /// 資金來源（v1.3／ADR-0007）：只有共同錢包的共同支出可選，其餘一律 balance。
-  Funding _funding = Funding.balance;
-
-  /// 使用者是否手動選過資金來源：true 就不再被 [_syncFunding] 的預設值覆寫，
-  /// 直到付款來源切成員／範圍切私人／種類切收入把它強制清掉。
-  bool _fundingTouched = false;
-
   /// 分攤欄位的 controller 延後到用得到時才建立：成員清單變動（加入新成員、切帳本）
   /// 也不會出現沒有 controller 的成員。
   TextEditingController _manualOf(String memberId) =>
@@ -132,10 +125,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         _note.text = tpl.note;
         _payerId = tpl.scope == EntryScope.private ? tpl.createdBy : tpl.payerId;
         _method = tpl.splitMethod;
-        if (tpl.fromBudget && tpl.payerId == null) {
-          _funding = Funding.budget;
-          _fundingTouched = true;
-        }
         for (final li in tpl.lineItems) {
           _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
         }
@@ -147,7 +136,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         }
       }
       _categoryId ??= _firstCategoryOf(_kind);
-      _syncFunding();
       return;
     }
 
@@ -175,12 +163,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     _payerId = found.payerId;
     _method = found.splitMethod;
     _isAdjustment = found.isAdjustment;
-    // 編輯既有帳目：只有「共同錢包的共同支出」才是使用者真的選過資金來源，視為已
-    // touched、不被之後的分類／日期變動自動覆寫；代墊／私人／收入的 balance 是
-    // Entry 不變式逼出來的，不是使用者選的——不能讓它們「假裝已選過」，否則之後切回
-    // 共同錢包時 `_syncFunding` 會被 touched 擋住，沒辦法依 defaultFunding 重算。
-    _funding = found.funding;
-    _fundingTouched = _fundingSelectable;
     for (final li in found.lineItems) {
       _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
     }
@@ -208,6 +190,10 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     }
     super.dispose();
   }
+
+  /// 目前選到的日期落在已清帳月份（含更早月份）：不能記、不能改（spec v1.4 鎖月）。
+  /// 真正的守衛在 DB trigger，這裡是先擋一步、把原因講出來，不讓人填完整張表才被打回。
+  bool get _dateClosed => isMonthClosed(ref.watch(monthClosesProvider), _date);
 
   /// 已結帳或結算中都鎖金額／付款來源／分攤／範圍（結算中改動會讓 settlement 作廢，ADR-0002）。
   bool get _locked => _settled || _settling;
@@ -254,28 +240,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   /// 支出＋共同時才有付款來源與分攤。
   bool get _splittable => _kind == EntryKind.expense && _scope == EntryScope.shared;
 
-  /// 資金來源只在「共同錢包的共同支出、且已選分類」可選（與 [Entry] 的建構不變式一致；
-  /// 未選分類時 [defaultFunding] 無主體可算，不渲染這列，維持 balance）。
-  bool get _fundingSelectable => _splittable && _payerId == null && _categoryId != null;
-
-  /// 依目前狀態同步 `_funding`：條件不符（付款人是成員／範圍私人／種類收入／尚未選分類）
-  /// 就強制收回 balance 並清「已手動選過」旗標；條件符合但使用者還沒手動選過，就依
-  /// [defaultFunding] 重算預設；已手動選過的維持原值不覆寫。呼叫端要在每個會影響
-  /// 分攤性、付款人、分類、日期的 setState 裡呼叫這個，讓狀態隨時保持一致。
-  void _syncFunding() {
-    if (!_fundingSelectable) {
-      _funding = Funding.balance;
-      _fundingTouched = false;
-      return;
-    }
-    if (_fundingTouched) return;
-    _funding = defaultFunding(
-      allocations: ref.read(allocationsProvider),
-      categoryId: _categoryId!,
-      month: _date,
-    );
-  }
-
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
       context: context,
@@ -286,7 +250,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     if (picked != null && mounted) {
       setState(() {
         _date = picked;
-        _syncFunding();
       });
     }
   }
@@ -347,12 +310,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       return;
     }
 
-    // 防禦層：不變式保證 funding=budget 只允許共同錢包的共同支出；_syncFunding 已經
-    // 隨狀態同步過，這裡用最終算出的 scope／payerId 再擋一次，確保炸不了。
-    final funding = locked
-        ? orig!.funding
-        : (payerId == null && scope == EntryScope.shared && _kind == EntryKind.expense ? _funding : Funding.balance);
-
     // 新筆的 id 留空字串＝交給 repository（Supabase 由 DB）產生。
     final id = orig?.id ?? '';
     final splits = locked
@@ -395,7 +352,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       splitMethod: method,
       settledState: orig?.settledState ?? SettledState.open,
       isAdjustment: locked ? orig!.isAdjustment : _isAdjustment,
-      funding: funding,
+      // v1.4 起沒有資金來源狀態機：一律走 Entry 建構的餘額支出預設值（ADR-0008）。
       lineItems: lineItems,
       splits: splits,
     );
@@ -511,6 +468,8 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
           if (_readOnly &&
               _original != null &&
               !_original!.isAdjustment &&
+              // 已清帳月份的帳目一律不可改（v1.4 鎖月）：入口直接拿掉。
+              !isMonthClosed(ref.watch(monthClosesProvider), _original!.occurredOn) &&
               !hasReversal(ref.watch(entriesProvider), _original!))
             IconButton(
               key: const Key('enter-edit'),
@@ -524,6 +483,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               _readOnly &&
               !_locked &&
               !_original!.isAdjustment &&
+              !isMonthClosed(ref.watch(monthClosesProvider), _original!.occurredOn) &&
               !hasReversal(ref.watch(entriesProvider), _original!))
             PopupMenuButton<String>(
               key: const Key('entry-menu'),
@@ -554,13 +514,16 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               child: _step == _confirmStep
                   ? FilledButton(
                       key: const Key('save-button'),
-                      onPressed: _saving ? null : _save,
+                      onPressed: _saving || _dateClosed ? null : _save,
                       child: Text(_saving ? '儲存中…' : '儲存'),
                     )
                   : FilledButton(
                       key: const Key('form-next-button'),
                       // 金額 0／空白不能進下一關（Mike 裁示 2026-09-03）；其餘格式錯誤仍由儲存端擋。
-                      onPressed: _step == 0 && _amountValue == 0 ? null : _nextStep,
+                      // 日期落在已清帳月份也走不下去（v1.4 鎖月）：那筆記下去 DB 一定擋。
+                      onPressed: (_step == 0 && _amountValue == 0) || (_step == 1 && _dateClosed)
+                          ? null
+                          : _nextStep,
                       child: const Text('下一步'),
                     ),
             ),
@@ -643,7 +606,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                   : (s) => setState(() {
                         _kind = s.first;
                         _categoryId = _firstCategoryOf(_kind);
-                        _syncFunding();
                       }),
               ),
             ),
@@ -656,7 +618,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               enabled: true,
               onSelected: (id) => setState(() {
                 _categoryId = id;
-                _syncFunding();
               }),
             ),
             const SizedBox(height: 8),
@@ -675,6 +636,16 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                 onPressed: _pickDate,
               ),
             ),
+            if (_dateClosed)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '該月已清帳',
+                  key: const Key('date-closed-error'),
+                  textAlign: TextAlign.center,
+                  style: t.textTheme.bodySmall?.copyWith(fontSize: 12, color: t.colorScheme.error),
+                ),
+              ),
             const SizedBox(height: 12),
             _noteField(),
             const SizedBox(height: 8),
@@ -795,7 +766,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                     enabled: true,
                     onSelected: (id) => setState(() {
                       _categoryId = id;
-                      _syncFunding();
                     }),
                   );
                 })
@@ -839,6 +809,19 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (editing) const SizedBox.shrink(key: Key('edit-mode')),
+        // 編輯 hub 也能從「日期」列開日曆選到已清帳的月份：儲存鈕會 disable，
+        // 但沒有這一行的話它是靜默變灰的（人只會覺得按鈕壞了）。
+        // key 與精靈第二關那行相同：兩處互斥（`_step` 不同），不會同時出現。
+        if (!ro && _dateClosed)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Text(
+              '該月已清帳',
+              key: const Key('date-closed-error'),
+              textAlign: TextAlign.right,
+              style: t.textTheme.bodySmall?.copyWith(fontSize: 12, color: t.colorScheme.error),
+            ),
+          ),
         for (final r in rows) ...[
           InkWell(
             key: r.$3 == null ? null : Key(r.$3!),
@@ -908,7 +891,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   }
 
   /// 編輯＝沖銷重記（Mike 裁示 2026-09-04 第二版，適用所有筆）：
-  /// 原筆保留（標已沖銷）→ 寫入等額反向紀錄（分攤／預算／餘額沿原路回退）→
+  /// 原筆保留（標已沖銷）→ 寫入等額反向紀錄（分攤／餘額沿原路回退）→
   /// 帶原資訊進「新增」精靈重記成新的一筆。結算中與沖銷紀錄本身不可編輯。
   Future<void> _reverseAndRedo() async {
     final orig = _original!;
@@ -928,7 +911,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('編輯這筆帳目？'),
-        content: const Text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（分攤與預算一併回退），接著用原資訊重新記一筆。'),
+        content: const Text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（分攤一併回退），接著用原資訊重新記一筆。'),
         actions: [
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
           FilledButton(
@@ -978,7 +961,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                             _payerId = ref.read(currentMemberIdProvider);
                             _method = SplitMethod.common;
                           }
-                          _syncFunding();
                         }),
               ),
           ],
@@ -996,7 +978,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                     : () => setState(() {
                           _payerId = null;
                           _method = SplitMethod.common;
-                          _syncFunding();
                         }),
               ),
               for (final m in members)
@@ -1008,39 +989,10 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                       ? null
                       : () => setState(() {
                             _payerId = m.id;
-                            _syncFunding();
                           }),
                 ),
             ],
           ),
-          if (_fundingSelectable)
-            _OptionRow(
-              label: '資金',
-              children: [
-                _MiniChip(
-                  chipKey: const Key('funding-budget'),
-                  label: '預算',
-                  selected: _funding == Funding.budget,
-                  onTap: _locked
-                      ? null
-                      : () => setState(() {
-                            _funding = Funding.budget;
-                            _fundingTouched = true;
-                          }),
-                ),
-                _MiniChip(
-                  chipKey: const Key('funding-balance'),
-                  label: '餘額',
-                  selected: _funding == Funding.balance,
-                  onTap: _locked
-                      ? null
-                      : () => setState(() {
-                            _funding = Funding.balance;
-                            _fundingTouched = true;
-                          }),
-                ),
-              ],
-            ),
           _OptionRow(
             label: '分攤',
             children: [

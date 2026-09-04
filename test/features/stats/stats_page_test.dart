@@ -1,5 +1,7 @@
+import 'package:accounting/data/month_summary_provider.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
+import 'package:accounting/domain/month_summary.dart' as domain_summary;
 import 'package:accounting/app/month_app_bar.dart';
 import 'package:accounting/app/router.dart';
 import 'package:accounting/features/entries/entries_page.dart';
@@ -40,6 +42,13 @@ class _FixedSettlements extends SettlementsNotifier {
   List<Settlement> build() => seed;
 }
 
+class _FixedMonthCloses extends MonthClosesNotifier {
+  _FixedMonthCloses(this.seed);
+  final List<MonthClose> seed;
+  @override
+  List<MonthClose> build() => seed;
+}
+
 void main() {
   final now = DateTime.now();
   final thisMonth = DateTime(now.year, now.month, 1);
@@ -52,19 +61,21 @@ void main() {
     defaultRatio: {kMeId: 50, kWifeId: 50},
     openingBalanceShared: 5000,
   );
-  const members = [
+  // v1.4：個人餘額＝每月補入額 × 未清帳月份數 ＋ 淨變動；加入月＝本月 → 只補一次。
+  final members = [
     Member(
         id: kMeId,
         ledgerId: kLedgerId,
         userId: 'u1',
         displayName: 'Mike',
-        openingBalancePersonal: 1000),
+        monthlyTopup: 1000,
+        joinedAt: DateTime(now.year, now.month, 1)),
     Member(
         id: kWifeId,
         ledgerId: kLedgerId,
         userId: 'u2',
         displayName: '老婆',
-        openingBalancePersonal: 0),
+        joinedAt: DateTime(now.year, now.month, 1)),
   ];
   const categories = [
     Category(
@@ -137,6 +148,11 @@ void main() {
     List<Category>? categoriesValue,
     List<Member>? membersValue,
     List<Settlement>? settlementsValue,
+    List<MonthClose>? closes,
+    // 少數測試（server 未回應時的 fallback）需要換掉整個 repository 實作，不能再疊一個
+    // `ledgerRepositoryProvider.overrideWithValue`——同一個 provider 在同一個 container
+    // 覆寫兩次會被 Riverpod 直接擋下來。
+    InMemoryLedgerRepository? repository,
   }) => [
         ledgerProvider.overrideWithValue(ledgerValue ?? ledger),
         membersProvider.overrideWithValue(membersValue ?? members),
@@ -147,15 +163,19 @@ void main() {
         // 暗中吃到全域 mock 的 s-1（雖然它是 pending、目前算不到，但別讓
         // 測試的正確性依賴「剛好沒被算到」這種巧合）。
         settlementsProvider.overrideWith(() => _FixedSettlements(settlementsValue ?? const [])),
+        // 清帳紀錄（v1.4／ADR-0008）：預設空，個人餘額月份語意測試會顯式帶入。
+        monthClosesProvider.overrideWith(() => _FixedMonthCloses(closes ?? const [])),
         // month_summary（衍生數字改吃 DB）：InMemory repo 餵同一份 fixture。
-        ledgerRepositoryProvider.overrideWithValue(repoWith(
-          ledger: ledgerValue ?? ledger,
-          members: membersValue ?? members,
-          categories: categoriesValue ?? categories,
-          entries: entries ?? seed,
-          allocations: allocations ?? const [],
-          settlements: settlementsValue ?? const [],
-        )),
+        ledgerRepositoryProvider.overrideWithValue(repository ??
+            repoWith(
+              ledger: ledgerValue ?? ledger,
+              members: membersValue ?? members,
+              categories: categoriesValue ?? categories,
+              entries: entries ?? seed,
+              allocations: allocations ?? const [],
+              settlements: settlementsValue ?? const [],
+              closes: closes ?? const [],
+            )),
       ];
 
   Future<void> phone(WidgetTester tester) async {
@@ -184,6 +204,7 @@ void main() {
     List<Category>? categoriesValue,
     List<Member>? membersValue,
     List<Settlement>? settlementsValue,
+    List<MonthClose>? closes,
   }) async {
     await phone(tester);
     await tester.pumpWidget(ProviderScope(
@@ -194,6 +215,7 @@ void main() {
         categoriesValue: categoriesValue,
         membersValue: membersValue,
         settlementsValue: settlementsValue,
+        closes: closes,
       ),
       child: const MaterialApp(home: StatsPage()),
     ));
@@ -212,16 +234,16 @@ void main() {
 
     expect(find.byType(StatsPage), findsOneWidget);
     expect(find.text('月摘要'), findsOneWidget);
-    // balance 標籤是「可用餘額」（v1.3，家庭／個人共用同一套字，
-    // 見 stats_page._SummaryCard、trend_card.TrendLineX.label）。
-    expect(inSummary(find.text('可用餘額')), findsOneWidget);
+    // 月摘要卡的 balance 格借用趨勢 legend 同一個 label（v1.4）：家庭視角是「共同餘額」。
+    expect(inSummary(find.text('共同餘額')), findsOneWidget);
     expect(find.text('支出分布'), findsOneWidget);
     expect(find.text('趨勢'), findsOneWidget);
     expect(find.text('家庭'), findsOneWidget);
     expect(find.byType(SfCircularChart), findsOneWidget);
     expect(find.byType(SfCartesianChart), findsOneWidget);
     // 自製切換列一排三條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
-    for (final l in ['花費', '超支', '可用餘額']) {
+    // （趨勢線的 balance legend 家庭視角叫「共同餘額」，v1.4，ADR-0008）。
+    for (final l in ['花費', '超支', '共同餘額']) {
       expect(find.descendant(of: find.byType(TrendCard), matching: find.text(l)), findsOneWidget,
           reason: '切換列應有 $l');
     }
@@ -255,7 +277,7 @@ void main() {
     await pumpStats(tester);
 
     // 家庭：收入 1000、支出 400（私人 100 不算）、損益 600
-    // 可用餘額（v1.3 sharedAvailable，無撥款）：期初 5000 ＋1000 收入 −400 共同錢包支出＝5600
+    // 餘額（v1.4 sharedBalance）：期初 5000 ＋1000 收入 −400 共同錢包支出＝5600
     expect(inSummary(find.text('1,000')), findsOneWidget);
     expect(inSummary(find.text('400')), findsOneWidget);
     expect(inSummary(find.text('600')), findsOneWidget);
@@ -265,7 +287,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // 個人：收入 0（x-1 共同收入進共同餘額，不進個人視角）、支出 200+100=300、損益 −300
-    // 可用餘額（v1.3 personalBalance）：期初 1000 − 私人支出 100（x-3）＝900
+    // 餘額（v1.4 personalBalance）：本月補入額 1000 − 私人支出 100（x-3）＝900
     // （x-2 的 200 是我在共同支出的份額，viewEntries 換算給月摘要「支出」看，
     //  但 personalBalance 只認 payerId==me 的代墊全額，x-2 沒有 payerId 不算）
     expect(inSummary(find.text('0')), findsOneWidget);
@@ -341,9 +363,9 @@ void main() {
   testWidgets('個人視角空資料同樣顯示提示、圖區保留高度（兩線都 0，過濾邏輯沒被視角改壞）',
       (tester) async {
     // 個人視角只有花費／餘額兩線，要讓兩者都是 0：Mike 期初改 0、無帳。
-    const zeroMembers = [
-      Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike'),
-      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆'),
+    final zeroMembers = [
+      Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: DateTime(now.year, now.month, 1)),
+      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: DateTime(now.year, now.month, 1)),
     ];
     await pumpStats(tester, entries: const [], membersValue: zeroMembers);
 
@@ -372,8 +394,8 @@ void main() {
     expect(find.text('這個範圍沒有資料'), findsNothing);
     expect(find.byType(SfCartesianChart), findsOneWidget);
 
-    // 點切換列的「可用餘額」打開該線，圖仍正常（家庭視角標籤，v1.3）
-    await tester.tap(inTrend(find.text('可用餘額')));
+    // 點切換列的「共同餘額」打開該線，圖仍正常（家庭視角標籤，v1.4）
+    await tester.tap(inTrend(find.text('共同餘額')));
     await tester.pumpAndSettle();
     expect(find.byType(SfCartesianChart), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -468,12 +490,12 @@ void main() {
     expect(seriesCount(), 2);
     expect(find.text('請至少開啟一條線'), findsNothing);
 
-    // 打開可用餘額（家庭視角標籤，v1.3） → 三條
-    await toggle('可用餘額');
+    // 打開共同餘額（家庭視角標籤，v1.4） → 三條
+    await toggle('共同餘額');
     expect(seriesCount(), 3);
 
     // 逐條關掉，series 跟著減少
-    await toggle('可用餘額');
+    await toggle('共同餘額');
     expect(seriesCount(), 2);
     await toggle('超支');
     expect(seriesCount(), 1);
@@ -509,13 +531,13 @@ void main() {
     // 餘額線預設隱藏 → 負區間沒有任何線經過，下界不該放開
     expect(yAxis().minimum, 0);
 
-    // 打開可用餘額線（家庭視角標籤，v1.3） → 下界放開，讓 −400 畫得出來
-    await tester.tap(inTrend(find.text('可用餘額')));
+    // 打開共同餘額線（家庭視角標籤，v1.4） → 下界放開，讓 −400 畫得出來
+    await tester.tap(inTrend(find.text('共同餘額')));
     await tester.pumpAndSettle();
     expect(yAxis().minimum, isNull);
 
     // 再關回去 → 又釘回 0
-    await tester.tap(inTrend(find.text('可用餘額')));
+    await tester.tap(inTrend(find.text('共同餘額')));
     await tester.pumpAndSettle();
     expect(yAxis().minimum, 0);
   });
@@ -772,9 +794,9 @@ void main() {
     // 所以只把這幾個控制字釘成唯一，避免同一組操作在兩處用同一個詞。
     //
     // 已知且刻意保留的例外（不要拿這條守衛去「修」它們）：
-    //   - 「可用餘額」：月摘要的一格 vs 趨勢的線別，兩者確實是同一個量、不同呈現
-    //     （v1.3 起兩者字面也統一了，兩處都叫「可用餘額」——見 trend_card.TrendLineX.label）。
     //   - 「預算」：趨勢的線別 vs 底部 Tab 的頁名，跨層級，不會被誤讀成同一個控制。
+    //   （月摘要卡的「餘額」與趨勢線的「共同餘額」／「個人餘額」v1.4 起是不同字面，
+    //    不再有「可用餘額」這種兩處共用同一個詞的情況，見 trend_card.TrendLineX.labelFor。）
     //
     // 更重要的是：**分類名稱由使用者自訂**，完全可能取名叫「總覽」「整月」甚至「花費」，
     // 屆時這條會紅——那是資料造成的，不是程式壞了，調整測試資料即可。
@@ -787,8 +809,8 @@ void main() {
   testWidgets('資訊密度：月摘要一列四格、圓餅圖例只有名稱與金額', (tester) async {
     await pumpStats(tester);
 
-    // 月摘要四格，沒有額外說明列（家庭視角標籤是「可用餘額」，v1.3）
-    for (final l in ['收入', '支出', '損益', '可用餘額']) {
+    // 月摘要四格，沒有額外說明列（balance 標籤依視角，家庭是「共同餘額」，v1.4）
+    for (final l in ['收入', '支出', '損益', '共同餘額']) {
       expect(inSummary(find.text(l)), findsOneWidget);
     }
     expect(find.text('累計餘額'), findsNothing);
@@ -877,17 +899,17 @@ void main() {
     expect(find.byType(SfCircularChart), findsOneWidget);
     expect(find.byType(SfCartesianChart), findsOneWidget);
     // 自製切換列一排三條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
-    for (final l in ['花費', '超支', '可用餘額']) {
+    for (final l in ['花費', '超支', '共同餘額']) {
       expect(find.descendant(of: find.byType(TrendCard), matching: find.text(l)), findsOneWidget,
           reason: '切換列應有 $l');
     }
     expect(find.byType(FilterChip), findsNothing);
 
-    // 深色主題下切個人視角：不炸，線別標籤不變（不依視角變，見下方 label 說明）。
+    // 深色主題下切個人視角：不炸，balance 標籤跟著換成「個人餘額」（v1.4）。
     await tester.tap(find.text('個人'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
-    expect(inTrend(find.text('可用餘額')), findsOneWidget);
+    expect(inTrend(find.text('個人餘額')), findsOneWidget);
   });
 
   testWidgets('個人視角超支恆 0：TrendInput.overspendAt 不吃 totalOverspend（不靠 UI 沒畫出來就當沒事）',
@@ -896,7 +918,7 @@ void main() {
     // overspendAt 有沒有被錯接成 totalOverspend；直接讀 TrendCard.buckets 是
     // stats_page._mode==personal 分支「overspendAt 恆傳回 0」這條規則唯一的守衛，
     // 屬合法的 widget 層斷言（不是繞過畫面，是畫面本來就不呈現這個量）。
-    // 用真的會超支的資料（撥款 1000、預算支出 5000）：家庭視角這個月 over 必須 > 0，
+    // 用真的會超支的資料（預算 1000、共同支出 5000）：家庭視角這個月 over 必須 > 0，
     // 若個人視角量到同一個非 0 值，就代表 overspendAt 被錯接了。
     final overspendEntries = [
       Entry(
@@ -909,7 +931,6 @@ void main() {
         occurredOn: day(5),
         createdBy: kMeId,
         splitMethod: SplitMethod.common,
-        funding: Funding.budget,
       ),
     ];
     final overspendAllocations = [
@@ -948,8 +969,8 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    // 家庭：三個 toggle，預設花費／超支開、可用餘額關 → 2 條 series
-    for (final l in ['花費', '超支', '可用餘額']) {
+    // 家庭：三個 toggle，預設花費／超支開、共同餘額關 → 2 條 series
+    for (final l in ['花費', '超支', '共同餘額']) {
       expect(inTrend(find.text(l)), findsOneWidget);
     }
     expect(seriesCount(), 2);
@@ -958,24 +979,28 @@ void main() {
     await tapToggle('超支');
     expect(seriesCount(), 1);
 
-    // 切個人：沒有「超支」toggle（個人沒有信封，v1.3），只剩花費／可用餘額兩個
-    // （標籤不依視角變：個人也叫「可用餘額」，spec：個人視角＝個人可用餘額）
+    // 切個人：沒有「超支」toggle（個人沒有預算，v1.4），只剩花費／個人餘額兩個
+    // （balance 標籤依視角變：家庭「共同餘額」、個人「個人餘額」，見 TrendLineX.labelFor）
     await tester.tap(find.text('個人'));
     await tester.pumpAndSettle();
     expect(inTrend(find.text('超支')), findsNothing);
     expect(inTrend(find.text('花費')), findsOneWidget);
-    expect(inTrend(find.text('可用餘額')), findsOneWidget);
-    expect(seriesCount(), 1, reason: '花費仍開、可用餘額仍收起（沿用切視角前的設定）');
+    expect(inTrend(find.text('共同餘額')), findsNothing, reason: '個人視角不該出現家庭字面');
+    expect(inTrend(find.text('個人餘額')), findsOneWidget);
+    expect(seriesCount(), 1, reason: '花費仍開、個人餘額仍收起（沿用切視角前的設定）');
 
-    // 切回家庭：超支重新出現，且回到「預設可見」——不殘留切個人前手動關閉的狀態
-    // （它在個人視角期間並不存在，不該假裝「還記得」；比照分類刪除又復原的既有規則）
+    // 切回家庭：超支重新出現，字面換回「共同餘額」，且回到「預設可見」——不殘留切個人
+    // 前手動關閉的狀態（它在個人視角期間並不存在，不該假裝「還記得」；比照分類刪除又
+    // 復原的既有規則）
     await tester.tap(find.text('家庭'));
     await tester.pumpAndSettle();
     expect(inTrend(find.text('超支')), findsOneWidget);
-    expect(seriesCount(), 2, reason: '花費＋重新可見的超支；可用餘額仍收起');
+    expect(inTrend(find.text('共同餘額')), findsOneWidget);
+    expect(inTrend(find.text('個人餘額')), findsNothing, reason: '切回家庭不該殘留個人字面');
+    expect(seriesCount(), 2, reason: '花費＋重新可見的超支；共同餘額仍收起');
   });
 
-  testWidgets('真實組裝：家庭視角月摘要可用餘額符合 v1.3 手算基準（本月 144,300／上月 134,700）',
+  testWidgets('真實組裝：家庭視角月摘要餘額符合 v1.4 手算基準（本月 154,800／上月 134,800）',
       (tester) async {
     await phone(tester);
     final container = ProviderContainer();
@@ -986,13 +1011,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(StatsPage), findsOneWidget);
-    // sharedAvailable（月底）＝共同餘額 154800 − 當月信封剩餘合計 10500（手算見 brief）
-    expect(inSummary(find.text('144,300')), findsOneWidget);
+    // v1.4：sharedBalance（月底）＝154,800，預算不再預扣。
+    expect(inSummary(find.text('154,800')), findsOneWidget);
 
     await tester.fling(find.byKey(const Key('month-title')), const Offset(120, 0), 800);
     await tester.pumpAndSettle();
-    // 上月：共同餘額 134800 − 上月信封剩餘合計 100
-    expect(inSummary(find.text('134,700')), findsOneWidget);
+    // 上月底的共同餘額＝120,000 ＋ 52,000 − 37,200 ＝ 134,800
+    expect(inSummary(find.text('134,800')), findsOneWidget);
   });
 
   testWidgets('真實組裝（seam）：AccountingApp 開機切個人視角，沒有「超支」toggle，月摘要餘額＝手算個人餘額',
@@ -1009,11 +1034,378 @@ void main() {
         of: find.byKey(const Key('view-mode-toggle')), matching: find.text('個人')));
     await tester.pumpAndSettle();
 
-    // 個人視角沒有「超支」toggle（v1.3：個人沒有信封，恆 0 不給開關）
+    // 個人視角沒有「超支」toggle（v1.4：個人沒有預算，恆 0 不給開關）
+    // personalBalance 手算：補入額 10,000 × 2 個未清帳月份（假資料加入月＝上月）＝20,000
+    //   ＋ 私人收入 8,000（接案）− 私人支出 350（Steam）
+    //   − 未結算代墊全額 567（全聯 e-5，payerId Mike）− 1,520（Costco e-7，payerId Mike）＝25,563
+    // （期初個人餘額已廢用；與 view_math_test 的手算對照一致）
     expect(inTrend(find.text('超支')), findsNothing);
-    // personalBalance 手算：期初 50000 ＋ 私人收入 8000（接案）− 私人支出 350（Steam）
-    //   − 代墊全額 567（全聯 e-5，payerId Mike）− 1520（Costco e-7，payerId Mike）＝55563
-    // （s-1 結算 pending 未 settled，nets 不算；與 view_math_test 的手算對照一致）
-    expect(inSummary(find.text('55,563')), findsOneWidget);
+    expect(inSummary(find.text('25,563')), findsOneWidget);
+  });
+
+  testWidgets('月摘要卡：server 給定值優先於前端本地公式（sharedBalance／personalBalance）',
+      (tester) async {
+    await phone(tester);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [
+        ...overridesFor(),
+        // server 值刻意跟本地公式手算值（家庭 5,600、個人 900，見上面兩條測試）不同，
+        // 卡片顯示哪個就代表接的是哪一路——不刻意造出差異就測不出「有沒有真的吃 server」。
+        monthSummaryProvider.overrideWith((ref, until) async => const domain_summary.MonthSummary(
+              sharedBalance: 7500,
+              budgetTotal: 0,
+              spentTotal: 0,
+              overspendTotal: 0,
+              categories: [],
+              memberId: kMeId,
+              personalBalance: 8700,
+              monthlyTopup: 1000,
+              monthNet: 0,
+            )),
+      ],
+      child: const MaterialApp(home: StatsPage()),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(inSummary(find.text('7,500')), findsOneWidget);
+    expect(inSummary(find.text('5,600')), findsNothing, reason: '不該是本地公式值');
+    expect(inSummary(find.text('共同餘額')), findsOneWidget);
+
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+
+    expect(inSummary(find.text('8,700')), findsOneWidget);
+    expect(inSummary(find.text('900')), findsNothing, reason: '不該是本地公式值');
+    expect(inSummary(find.text('個人餘額')), findsOneWidget);
+  });
+
+  testWidgets('月摘要卡：server 未回應時 fallback 前端本地公式值', (tester) async {
+    await phone(tester);
+    await tester.pumpWidget(ProviderScope(
+      // 用一個 monthSummary 永遠不 resolve 的 repo：monthSummaryProvider(...).value
+      // 恆是 null，逼卡片走 server==null 的 fallback 分支（走 `repository:` 換掉整個
+      // repo，不能再疊一個 ledgerRepositoryProvider.overrideWithValue——同一個
+      // provider 覆寫兩次會被 Riverpod 擋下來）。
+      overrides: overridesFor(
+        repository: NeverRespondingMonthSummaryRepository(
+          seed: snapshotWith(
+            ledger: ledger,
+            members: members,
+            categories: categories,
+            entries: seed,
+          ),
+        ),
+      ),
+      child: const MaterialApp(home: StatsPage()),
+    ));
+    await tester.pumpAndSettle();
+
+    // 家庭：sharedBalance 本地手算＝5600（同「月摘要：家庭視角數值」測試）
+    expect(inSummary(find.text('5,600')), findsOneWidget);
+
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    // 個人：personalBalance 本地手算＝900（同上）
+    expect(inSummary(find.text('900')), findsOneWidget);
+  });
+
+  testWidgets('個人餘額月份語意：已清帳月個人卡讀快照 ending，看未來月出現投影小字', (tester) async {
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+    final close = MonthClose(
+      id: 'mc-1',
+      ledgerId: kLedgerId,
+      month: lastMonth,
+      closedBy: kMeId,
+      closedAt: DateTime(lastMonth.year, lastMonth.month, 28),
+      details: MonthCloseDetails(
+        month: lastMonth,
+        members: const [
+          MonthCloseMemberLine(
+              memberId: kMeId, displayName: 'Mike', topup: 1000, net: -300, ending: 700),
+          MonthCloseMemberLine(
+              memberId: kWifeId, displayName: '老婆', topup: 0, net: 0, ending: 0),
+        ],
+        sharedDelta: 0,
+      ),
+    );
+
+    await pumpStats(tester, entries: const [], closes: [close]);
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('personal-balance-projection-note')), findsNothing,
+        reason: '本月不是未來月');
+
+    // 切到上月（已清帳）：個人卡讀快照 ending 700——不是即時公式／server 對已清帳月
+    // 恆給的 0（isMonthClosed 讓兩者都排除該月）。
+    await tester.tap(find.byKey(const Key('month-prev')));
+    await tester.pumpAndSettle();
+    expect(inSummary(find.text('700')), findsOneWidget);
+    expect(find.byKey(const Key('personal-balance-projection-note')), findsNothing);
+
+    // 回本月，再往後一個月（未來月）：小字出現
+    await tester.tap(find.byKey(const Key('month-next')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('month-next')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('personal-balance-projection-note')), findsOneWidget);
+
+    // 切回家庭視角（還停在未來月）：小字不該出現——投影只對「不含未來補入額」的
+    // 個人餘額有意義，共同餘額沒有補入額這回事。
+    await tester.tap(find.text('家庭'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('personal-balance-projection-note')), findsNothing,
+        reason: '家庭視角未來月不該有投影小字');
+  });
+
+  testWidgets('個人餘額月份語意：已清帳月快照裡找不到本人 → 個人卡顯示「—」', (tester) async {
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+    final close = MonthClose(
+      id: 'mc-2',
+      ledgerId: kLedgerId,
+      month: lastMonth,
+      closedBy: kWifeId,
+      closedAt: DateTime(lastMonth.year, lastMonth.month, 28),
+      // 快照裡沒有 kMeId 這一行（資料異常／成員在清帳後才加入之類的邊界情況）。
+      details: MonthCloseDetails(
+        month: lastMonth,
+        members: const [
+          MonthCloseMemberLine(memberId: kWifeId, displayName: '老婆', topup: 0, net: 0, ending: 0),
+        ],
+        sharedDelta: 0,
+      ),
+    );
+
+    await pumpStats(tester, entries: const [], closes: [close]);
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('month-prev')));
+    await tester.pumpAndSettle();
+
+    // balance 格顯示「—」，不假裝有一個算得出來的數字（不是 0——0 是一個真的算出來的
+    // 值，「—」是「這個問題在已清帳月份沒有答案」）。
+    expect(inSummary(find.text('—')), findsOneWidget);
+  });
+
+  testWidgets('個人餘額月份語意：前史月份（≤ 最後清帳月但這個月本身沒有列）個人卡顯示 0，不是「—」',
+      (tester) async {
+    // closes 只有上月一筆；再往前一個月（更早於任何清帳列）沒有自己的列，但因為
+    // isMonthClosed 是級聯定義（≤ 最後清帳月），即時公式仍然會判定它「已清帳」而
+    // 把 N 與淨變動都算成 0——這才是正確答案：那個月根本沒發生過清帳，個人餘額
+    // 本來就是 0，不是「有列找不到本人」的「—」。
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+    final preHistoryMonth = DateTime(now.year, now.month - 2, 1);
+    final close = MonthClose(
+      id: 'mc-6',
+      ledgerId: kLedgerId,
+      month: lastMonth,
+      closedBy: kMeId,
+      closedAt: DateTime(lastMonth.year, lastMonth.month, 28),
+      details: MonthCloseDetails(
+        month: lastMonth,
+        members: const [
+          MonthCloseMemberLine(
+              memberId: kMeId, displayName: 'Mike', topup: 1000, net: 0, ending: 1000),
+          MonthCloseMemberLine(memberId: kWifeId, displayName: '老婆', topup: 0, net: 0, ending: 0),
+        ],
+        sharedDelta: 0,
+      ),
+    );
+    // 收支各給一筆非 0 值：income／expense／net 都不是 0，這樣「balance 顯示 0」
+    // 才是頁面上唯一一個 0，斷言才不會因為別格也剛好是 0 而假陽性。
+    final preHistoryEntries = [
+      Entry(
+        id: 'ph-1',
+        ledgerId: kLedgerId,
+        kind: EntryKind.income,
+        scope: EntryScope.private,
+        amount: 500,
+        categoryId: 'c-salary',
+        occurredOn: DateTime(preHistoryMonth.year, preHistoryMonth.month, 5),
+        createdBy: kMeId,
+      ),
+      Entry(
+        id: 'ph-2',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        scope: EntryScope.private,
+        amount: 200,
+        categoryId: 'c-food',
+        occurredOn: DateTime(preHistoryMonth.year, preHistoryMonth.month, 6),
+        createdBy: kMeId,
+        payerId: kMeId,
+      ),
+    ];
+
+    await pumpStats(tester, entries: preHistoryEntries, closes: [close]);
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('month-prev')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('month-prev')));
+    await tester.pumpAndSettle();
+
+    expect(inSummary(find.text('500')), findsOneWidget, reason: '收入 500（前史月份的私人收入）');
+    expect(inSummary(find.text('200')), findsOneWidget, reason: '支出 200（前史月份的私人支出）');
+    expect(inSummary(find.text('300')), findsOneWidget, reason: '損益 500−200');
+    expect(inSummary(find.text('0')), findsOneWidget, reason: 'balance 格＝0（前史月份，不是「—」）');
+    expect(inSummary(find.text('—')), findsNothing);
+  });
+
+  testWidgets(
+      '個人趨勢餘額線：closes 含上月 → 上月桶末值讀快照 ending、本月桶末值扣掉整個已清帳的上月',
+      (tester) async {
+    // 注意：這條測試刻意只 pump 一次——flutter_riverpod 的 ProviderScope 在同一顆
+    // widget tree 上重複 pumpWidget 時，State.didUpdateWidget 會重用既有
+    // ProviderContainer 並呼叫 updateOverrides（而非整個重建），對 NotifierProvider
+    // 覆寫（如 monthClosesProvider）不保證重跑 build()；驗「清帳前後」這種對比
+    // 要嘛拆兩條各自獨立 pump 的測試，要嘛像這裡一樣把「清帳前應該是多少」寫死在
+    // 註解裡當手算依據，只驗清帳後那個唯一畫面。
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+    // 加入月＝上月：上月是 N=1 的邊界情況，該月自己的 topup+net 剛好等於累計到
+    // 該月為止的 personalBalance，快照 ending 才能跟「假設清帳前的桶末值」對得上號
+    // （清帳明細的 ending 定義是「該月自己的 topup+net」，見
+    // InMemoryLedgerRepository._closeDetails，不是累計值）。
+    final joinLastMonthMembers = [
+      Member(
+          id: kMeId,
+          ledgerId: kLedgerId,
+          userId: 'u1',
+          displayName: 'Mike',
+          monthlyTopup: 1000,
+          joinedAt: lastMonth),
+      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: lastMonth),
+    ];
+    final closeEntries = [
+      Entry(
+        id: 'ce-1',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        scope: EntryScope.private,
+        amount: 300,
+        categoryId: 'c-food',
+        occurredOn: DateTime(lastMonth.year, lastMonth.month, 10),
+        createdBy: kMeId,
+        payerId: kMeId,
+      ),
+      Entry(
+        id: 'ce-2',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        scope: EntryScope.private,
+        amount: 150,
+        categoryId: 'c-food',
+        occurredOn: day(10),
+        createdBy: kMeId,
+        payerId: kMeId,
+      ),
+    ];
+    // 假設清帳前（closes=[]）：V(上月)＝補入額 1000 − 私人支出 300＝700；
+    // V(本月)＝補入額 1000×2 − 300 − 150＝1550（與 trend_math_test.dart／
+    // view_math_test.dart 同一套 personalBalance 手算法，這裡不重新 pump 驗證，
+    // 只當作下面「清帳後」斷言的算式依據）。
+    final close = MonthClose(
+      id: 'mc-1',
+      ledgerId: kLedgerId,
+      month: lastMonth,
+      closedBy: kMeId,
+      closedAt: DateTime(lastMonth.year, lastMonth.month, 28),
+      details: MonthCloseDetails(
+        month: lastMonth,
+        members: const [
+          MonthCloseMemberLine(
+              memberId: kMeId, displayName: 'Mike', topup: 1000, net: -300, ending: 700),
+          MonthCloseMemberLine(
+              memberId: kWifeId, displayName: '老婆', topup: 0, net: 0, ending: 0),
+        ],
+        sharedDelta: 0,
+      ),
+    );
+
+    await pumpStats(tester,
+        entries: closeEntries, membersValue: joinLastMonthMembers, closes: [close]);
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    final buckets = tester.widget<TrendCard>(find.byType(TrendCard)).buckets;
+
+    // 上月已清帳：即時公式會把該月整個排除（回 0），這裡驗的正是「桶末值改讀快照」
+    // 而不是巧合對到 0——快照 ending 700 與「假設清帳前」的桶末值 700 相等
+    // （N=1 的邊界情況：該月自己的 topup+net 就是累計到該月為止的全部）。
+    expect(buckets[buckets.length - 2].balance, 700,
+        reason: '上月桶末值＝快照 ending，不是即時公式排除該月後的 0');
+    // 本月：即時公式扣掉整個已清帳的上月（topup 1000＋net −300）＝1550 − 700＝850
+    expect(buckets.last.balance, 850, reason: '本月桶末值＝假設清帳前 1550 − (topup 1000＋上月 net −300)');
+  });
+
+  testWidgets('個人趨勢餘額線：非月顆粒度落在已清帳月的桶不畫點（線斷開），家庭線不受影響',
+      (tester) async {
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+    final joinLastMonthMembers = [
+      Member(
+          id: kMeId,
+          ledgerId: kLedgerId,
+          userId: 'u1',
+          displayName: 'Mike',
+          monthlyTopup: 1000,
+          joinedAt: lastMonth),
+      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: lastMonth),
+    ];
+    final close = MonthClose(
+      id: 'mc-4',
+      ledgerId: kLedgerId,
+      month: lastMonth,
+      closedBy: kMeId,
+      closedAt: DateTime(lastMonth.year, lastMonth.month, 28),
+      details: MonthCloseDetails(
+        month: lastMonth,
+        members: const [
+          MonthCloseMemberLine(
+              memberId: kMeId, displayName: 'Mike', topup: 1000, net: -300, ending: 700),
+          MonthCloseMemberLine(
+              memberId: kWifeId, displayName: '老婆', topup: 0, net: 0, ending: 0),
+        ],
+        sharedDelta: 0,
+      ),
+    );
+
+    await pumpStats(tester, entries: const [], membersValue: joinLastMonthMembers, closes: [close]);
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    await tester.tap(inTrend(find.text('週')));
+    await tester.pumpAndSettle();
+
+    final weekBuckets = tester.widget<TrendCard>(find.byType(TrendCard)).buckets;
+    final lastMonthWeeks = weekBuckets
+        .where((b) => b.end.year == lastMonth.year && b.end.month == lastMonth.month)
+        .toList();
+    expect(lastMonthWeeks, isNotEmpty, reason: '固定樣本應該真的有整週落在上月，這條斷言才有意義');
+    for (final b in lastMonthWeeks) {
+      expect(b.balance, isNull, reason: '週顆粒度落在已清帳月的桶不畫個人餘額點');
+    }
+    final thisMonthWeeks =
+        weekBuckets.where((b) => b.end.year == now.year && b.end.month == now.month).toList();
+    expect(thisMonthWeeks, isNotEmpty);
+    for (final b in thisMonthWeeks) {
+      expect(b.balance, isNotNull, reason: '本月未清帳，週顆粒度照樣有值');
+    }
+
+    // 切回月顆粒度：上月桶末值改讀快照 700，不是 null
+    await tester.tap(inTrend(find.text('月')));
+    await tester.pumpAndSettle();
+    final monthBuckets = tester.widget<TrendCard>(find.byType(TrendCard)).buckets;
+    expect(monthBuckets[monthBuckets.length - 2].balance, 700);
+
+    // 家庭視角：同一個已清帳月，週顆粒度不受影響，恆有值（共同餘額不吃 closes）
+    await tester.tap(find.text('家庭'));
+    await tester.pumpAndSettle();
+    await tester.tap(inTrend(find.text('週')));
+    await tester.pumpAndSettle();
+    final familyWeekBuckets = tester.widget<TrendCard>(find.byType(TrendCard)).buckets;
+    final familyLastMonthWeeks = familyWeekBuckets
+        .where((b) => b.end.year == lastMonth.year && b.end.month == lastMonth.month)
+        .toList();
+    expect(familyLastMonthWeeks, isNotEmpty);
+    for (final b in familyLastMonthWeeks) {
+      expect(b.balance, isNotNull, reason: '家庭線（共同餘額）不受清帳影響，恆有值');
+    }
   });
 }

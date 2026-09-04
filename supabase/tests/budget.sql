@@ -1,4 +1,5 @@
--- 預算撥款（budget_allocation）與資金來源（entries.funding）測試 — ADR-0007／spec v1.3。
+-- 預算影子紀錄（budget_allocation）測試 — ADR-0008／spec v1.4。
+-- v1.4：每分類每月至多一筆、金額 > 0、建立後不可改不可刪；entries.funding 與 enum 已 drop。
 -- 一段只驗一條規則，各自獨立 fixture，全部包在 begin/rollback 裡。
 -- 身分模擬與 rls.sql 相同：request.jwt.claims + set local role authenticated。
 \set MIKE '11111111-1111-1111-1111-111111111111'
@@ -8,6 +9,11 @@
 \set LEDGER '10000000-0000-0000-0000-000000000001'
 \set CAT_FOOD '30000000-0000-0000-0000-000000000001'
 \set CAT_INCOME '30000000-0000-0000-0000-000000000008'
+-- 種子在「本月」已經給食品／餐飲／日用品／水電／交通各設了一筆預算，
+-- 每分類每月只能一筆（v1.4），所以要新增的段落一律用種子沒碰過的「住房」。
+\set CAT_HOUSE '30000000-0000-0000-0000-000000000004'
+\set CAT_PLAY '30000000-0000-0000-0000-000000000007'
+\set CAT_TRAFFIC '30000000-0000-0000-0000-000000000006'
 
 \echo '== budget: a1. 成員能撥款（前端真實路徑：authenticated 直接 insert）=='
 begin;
@@ -19,14 +25,14 @@ declare
   v_row public.budget_allocation;
 begin
   insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
-  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
-          1200, current_date, '加碼買菜', '20000000-0000-0000-0000-000000000001')
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
+          1200, current_date, '本月住房', '20000000-0000-0000-0000-000000000001')
   returning id into v_id;
 
   select * into v_row from public.budget_allocation b where b.id = v_id;
   assert v_row.id is not null, '成員撥款後應查得回來';
   assert v_row.amount = 1200, format('金額不對：%s', v_row.amount);
-  assert v_row.note = '加碼買菜', '備註不對';
+  assert v_row.note = '本月住房', '備註不對';
 end;
 $$;
 rollback;
@@ -78,15 +84,15 @@ end;
 $$;
 rollback;
 
-\echo '== budget: a3. budget_allocation 四個動詞都有 policy（RLS 第二道門）=='
+\echo '== budget: a3. budget_allocation 只剩 SELECT／INSERT 兩個 policy（v1.4 收回改刪）=='
 do $$
 declare
   v_cmds text;
 begin
   select string_agg(distinct cmd, ',' order by cmd) into v_cmds
   from pg_policies where schemaname = 'public' and tablename = 'budget_allocation';
-  assert v_cmds = 'DELETE,INSERT,SELECT,UPDATE',
-    format('budget_allocation 的 policy 動詞不齊：%s', v_cmds);
+  assert v_cmds = 'INSERT,SELECT',
+    format('budget_allocation 的 policy 動詞應只剩 INSERT／SELECT：%s', v_cmds);
 end;
 $$;
 
@@ -103,7 +109,7 @@ begin
   -- 以 Mike 身分撥款，卻硬塞老婆的 member id → insert policy 的 with check 擋掉（比照 entries）。
   begin
     insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by)
-    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
+    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
             800, current_date, '20000000-0000-0000-0000-000000000002');
   exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
   end;
@@ -113,7 +119,7 @@ begin
 
   -- 反面：填自己的 member id 就進得去。
   insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by)
-  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
           800, current_date, '20000000-0000-0000-0000-000000000001')
   returning id into v_id;
   assert (select b.created_by from public.budget_allocation b where b.id = v_id)
@@ -171,7 +177,7 @@ end;
 $$;
 rollback;
 
-\echo '== budget: d. amount = 0 被擋、負數（退回）可入 =='
+\echo '== budget: d. amount <= 0 被擋（0 與負數各一條；v1.4 起沒有退回）=='
 begin;
 select set_config('request.jwt.claims', json_build_object('sub', :'MIKE', 'role', 'authenticated')::text, true) as _claims \gset
 set local role authenticated;
@@ -179,29 +185,33 @@ do $$
 declare
   v_blocked boolean := false;
   v_err text;
-  v_id uuid;
 begin
   begin
     insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by)
-    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
+    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
             0, current_date, '20000000-0000-0000-0000-000000000001');
   exception when others then v_blocked := true; v_err := sqlerrm;
   end;
   assert v_blocked, 'amount = 0 竟然入得了';
-  assert v_err like '%budget_allocation_amount_nonzero%', format('錯誤訊息不對：%s', v_err);
+  assert v_err like '%budget_allocation_amount_positive%', format('錯誤訊息不對：%s', v_err);
   raise notice '  預期的失敗：%', v_err;
 
-  -- 負數＝退回，必須進得去。
-  insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
-  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
-          -700, current_date, '月底退回', '20000000-0000-0000-0000-000000000001')
-  returning id into v_id;
-  assert (select b.amount from public.budget_allocation b where b.id = v_id) = -700, '退回（負數）應可入';
+  -- v1.4：撥款不再是流水、沒有「退回」，負數一律擋掉（ADR-0008 決策 6）。
+  v_blocked := false;
+  begin
+    insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
+    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
+            -700, current_date, '想退回', '20000000-0000-0000-0000-000000000001');
+  exception when others then v_blocked := true; v_err := sqlerrm;
+  end;
+  assert v_blocked, '負數（退回）竟然還入得了';
+  assert v_err like '%budget_allocation_amount_positive%', format('錯誤訊息不對：%s', v_err);
+  raise notice '  預期的失敗：%', v_err;
 end;
 $$;
 rollback;
 
-\echo '== budget: e. 欄位級授權：update 只開三欄、insert 不給填 id／created_at（違反皆 42501）=='
+\echo '== budget: e. 設定後不可改不可刪（UPDATE／DELETE 皆 42501），insert 仍不給填 created_at =='
 begin;
 select set_config('request.jwt.claims', json_build_object('sub', :'MIKE', 'role', 'authenticated')::text, true) as _claims \gset
 set local role authenticated;
@@ -212,205 +222,143 @@ declare
   v_err text;
 begin
   insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by)
-  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
           1000, current_date, '20000000-0000-0000-0000-000000000001')
   returning id into v_id;
 
-  -- 應失敗①：改 created_by（欄位級授權沒給這欄 → 42501）。
+  -- 應失敗①：改金額（v1.4 起整張表對前端沒有 UPDATE 授權）。
   begin
-    update public.budget_allocation set created_by = '20000000-0000-0000-0000-000000000002' where id = v_id;
+    update public.budget_allocation set amount = 1500 where id = v_id;
   exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
   end;
-  assert v_blocked, '竟然改得了 created_by';
+  assert v_blocked, '竟然改得動已設定的預算';
   assert v_err like '%permission denied%', format('錯誤訊息不對：%s', v_err);
   raise notice '  預期的失敗：%', v_err;
 
-  -- 應失敗②：改 ledger_id。
+  -- 應失敗②：改備註（同樣一欄都沒開）。
   v_blocked := false;
   begin
-    update public.budget_allocation set ledger_id = gen_random_uuid() where id = v_id;
+    update public.budget_allocation set note = '改備註' where id = v_id;
   exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
   end;
-  assert v_blocked, '竟然改得了 ledger_id';
-  assert v_err like '%permission denied%', format('錯誤訊息不對：%s', v_err);
+  assert v_blocked, '竟然改得動備註';
 
-  -- 應失敗③：改 category_id（換分類＝換一筆撥款，請刪掉重開）。
+  -- 應失敗③：刪掉重設（不可退回）。
   v_blocked := false;
   begin
-    update public.budget_allocation set category_id = '30000000-0000-0000-0000-000000000002' where id = v_id;
+    delete from public.budget_allocation where id = v_id;
   exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
   end;
-  assert v_blocked, '竟然改得了 category_id';
+  assert v_blocked, '竟然刪得掉已設定的預算';
+  assert v_err like '%permission denied%', format('錯誤訊息不對：%s', v_err);
+  raise notice '  預期的失敗：%', v_err;
+  assert (select count(*) from public.budget_allocation b where b.id = v_id) = 1, '那筆預算應該還在';
 
   -- 應失敗④：insert 自己填 created_at（欄位級 INSERT 授權沒給這欄）。
   v_blocked := false;
   begin
     insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by, created_at)
-    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
+    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000007',
             100, current_date, '20000000-0000-0000-0000-000000000001', now() - interval '1 year');
   exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
   end;
   assert v_blocked, '前端竟然填得了 created_at';
   assert v_err like '%permission denied%', format('錯誤訊息不對：%s', v_err);
-  raise notice '  預期的失敗：%', v_err;
-
-  -- 可以改的三欄。
-  update public.budget_allocation set amount = 1500, note = '改金額', occurred_on = current_date - 1 where id = v_id;
-  assert (select b.amount from public.budget_allocation b where b.id = v_id) = 1500, 'amount 應改得動';
-  assert (select b.note from public.budget_allocation b where b.id = v_id) = '改金額', 'note 應改得動';
 end;
 $$;
 rollback;
 
-\echo '== budget: f. entries.funding 只有共同錢包的共同支出可選 budget =='
+\echo '== budget: f. 每分類每月至多一筆（第二筆 23505），不同月可以 =='
 begin;
 select set_config('request.jwt.claims', json_build_object('sub', :'MIKE', 'role', 'authenticated')::text, true) as _claims \gset
 set local role authenticated;
 do $$
 declare
   v_id uuid;
+  v_month date := date_trunc('month', current_date)::date;
   v_blocked boolean := false;
   v_err text;
+  v_state text;
 begin
-  -- 可以：共同錢包（payer_id is null）的共同支出。
-  insert into public.entries (ledger_id, kind, scope, amount, category_id, occurred_on, note,
-                              created_by, payer_id, split_method, funding)
-  values ('10000000-0000-0000-0000-000000000001', 'expense', 'shared', 300,
-          '30000000-0000-0000-0000-000000000001', current_date, '共同錢包買菜',
-          '20000000-0000-0000-0000-000000000001', null, 'common', 'budget')
+  insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
+          9000, v_month, '本月住房', '20000000-0000-0000-0000-000000000001')
   returning id into v_id;
-  assert (select e.funding from public.entries e where e.id = v_id) = 'budget', 'funding 應為 budget';
+  assert (select b.month from public.budget_allocation b where b.id = v_id) = v_month,
+    'month 欄應由 occurred_on 推導成月初';
 
-  -- 應失敗①：代墊（payer_id 是成員）。
+  -- 同分類同月第二筆（日期不同也不行）→ unique violation。
   begin
-    insert into public.entries (ledger_id, kind, scope, amount, category_id, occurred_on, note,
-                                created_by, payer_id, split_method, funding)
-    values ('10000000-0000-0000-0000-000000000001', 'expense', 'shared', 300,
-            '30000000-0000-0000-0000-000000000001', current_date, '代墊也想吃預算',
-            '20000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'equal', 'budget');
-  exception when others then v_blocked := true; v_err := sqlerrm;
+    insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
+    values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
+            500, v_month + 10, '再加碼', '20000000-0000-0000-0000-000000000001');
+  exception when unique_violation then
+    v_blocked := true; v_err := sqlerrm; v_state := sqlstate;
   end;
-  assert v_blocked, '代墊竟然能用預算';
-  assert v_err like '%entries_funding_common_wallet_only%', format('錯誤訊息不對：%s', v_err);
+  assert v_blocked, '同分類同月竟然設得了第二筆預算';
+  assert v_state = '23505', format('SQLSTATE 應是 23505，實際 %s', v_state);
   raise notice '  預期的失敗：%', v_err;
 
-  -- 應失敗②：私人支出。
-  v_blocked := false;
-  begin
-    insert into public.entries (ledger_id, kind, scope, amount, category_id, occurred_on, note,
-                                created_by, payer_id, split_method, funding)
-    values ('10000000-0000-0000-0000-000000000001', 'expense', 'private', 300,
-            '30000000-0000-0000-0000-000000000001', current_date, '私人也想吃預算',
-            '20000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'common', 'budget');
-  exception when others then v_blocked := true; v_err := sqlerrm;
-  end;
-  assert v_blocked, '私人支出竟然能用預算';
-  assert v_err like '%entries_funding_common_wallet_only%', format('錯誤訊息不對：%s', v_err);
-
-  -- 應失敗③：收入。
-  v_blocked := false;
-  begin
-    insert into public.entries (ledger_id, kind, scope, amount, category_id, occurred_on, note,
-                                created_by, payer_id, split_method, funding)
-    values ('10000000-0000-0000-0000-000000000001', 'income', 'shared', 300,
-            '30000000-0000-0000-0000-000000000008', current_date, '收入也想吃預算',
-            '20000000-0000-0000-0000-000000000001', null, 'common', 'budget');
-  exception when others then v_blocked := true; v_err := sqlerrm;
-  end;
-  assert v_blocked, '收入竟然能用預算';
-  assert v_err like '%entries_funding_common_wallet_only%', format('錯誤訊息不對：%s', v_err);
-
-  -- 預設是 balance。
-  insert into public.entries (ledger_id, kind, scope, amount, category_id, occurred_on, note,
-                              created_by, payer_id, split_method)
-  values ('10000000-0000-0000-0000-000000000001', 'expense', 'shared', 300,
-          '30000000-0000-0000-0000-000000000001', current_date, '沒指定資金來源',
-          '20000000-0000-0000-0000-000000000001', null, 'common')
+  -- 不同月可以（同分類、下個月）。
+  insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000004',
+          9000, (v_month + interval '1 month')::date, '下月住房', '20000000-0000-0000-0000-000000000001')
   returning id into v_id;
-  assert (select e.funding from public.entries e where e.id = v_id) = 'balance', 'funding 預設應為 balance';
+  assert (select b.month from public.budget_allocation b where b.id = v_id)
+         = (v_month + interval '1 month')::date, '下個月那筆的 month 不對';
+
+  -- 同月不同分類也可以。
+  insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
+  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000007',
+          1200, v_month, '本月娛樂', '20000000-0000-0000-0000-000000000001');
 end;
 $$;
 rollback;
 
-\echo '== budget: g. upsert_entry 帶 funding（前端真實路徑：RPC → 撥款 → 查回來）=='
+\echo '== budget: g. entries.funding 與 funding enum 已 drop；upsert_entry 忽略多餘的 funding 鍵 =='
+do $$
+begin
+  assert not exists (select 1 from information_schema.columns
+                     where table_schema = 'public' and table_name = 'entries' and column_name = 'funding'),
+    'entries.funding 應該已經被移除（ADR-0008）';
+  assert not exists (select 1 from pg_type t join pg_namespace n on n.oid = t.typnamespace
+                     where n.nspname = 'public' and t.typname = 'funding'),
+    'funding enum 應該已經被移除（ADR-0008）';
+  assert not exists (select 1 from pg_constraint
+                     where conname = 'entries_funding_common_wallet_only'),
+    'entries_funding_common_wallet_only 應該隨欄位一起消失';
+  assert not exists (select 1 from information_schema.column_privileges cp
+                     where cp.table_schema = 'public' and cp.table_name = 'entries'
+                       and cp.column_name = 'funding'),
+    'funding 的欄位級授權應該隨欄位一起消失';
+end;
+$$;
+
 begin;
 select set_config('request.jwt.claims', json_build_object('sub', :'MIKE', 'role', 'authenticated')::text, true) as _claims \gset
 set local role authenticated;
 do $$
 declare
   v_entry public.entries;
-  v_alloc uuid;
-  v_blocked boolean := false;
-  v_err text;
 begin
-  -- ① RPC 新增一筆用預算支付的共同錢包支出。
+  -- 舊版前端還會送 funding 鍵：jsonb 的多餘鍵不影響，不該炸也不該留下任何痕跡。
   v_entry := public.upsert_entry(jsonb_build_object(
     'ledger_id', '10000000-0000-0000-0000-000000000001',
     'kind', 'expense', 'scope', 'shared', 'amount', 900,
     'category_id', '30000000-0000-0000-0000-000000000001',
-    'occurred_on', current_date, 'note', '共同錢包・預算支付',
+    'occurred_on', current_date, 'note', '共同錢包支出',
     'funding', 'budget'));
-  assert v_entry.funding = 'budget', format('upsert_entry 應寫入 funding=budget，實際 %s', v_entry.funding);
+  assert v_entry.id is not null, 'upsert_entry 帶多餘的 funding 鍵不該失敗';
+  assert v_entry.amount = 900 and v_entry.note = '共同錢包支出', '其餘欄位應照寫';
 
-  -- ② 只改備註時 funding 不變。
-  v_entry := public.upsert_entry(jsonb_build_object(
-    'id', v_entry.id,
-    'ledger_id', '10000000-0000-0000-0000-000000000001',
-    'note', '只改備註'));
-  assert v_entry.funding = 'budget', format('只改備註不該動到 funding，實際 %s', v_entry.funding);
-  assert v_entry.note = '只改備註', 'note 應改到';
-
-  -- ②b 把 payer_id 從 null 改成成員（改代墊）卻沒送 funding：舊的 budget 留著 → check 擋（23514）。
-  begin
-    v_entry := public.upsert_entry(jsonb_build_object(
-      'id', v_entry.id,
-      'ledger_id', '10000000-0000-0000-0000-000000000001',
-      'payer_id', '20000000-0000-0000-0000-000000000001',
-      'split_method', 'equal'));
-    v_blocked := false;
-  exception when check_violation then v_blocked := true; v_err := sqlerrm;
-  end;
-  assert v_blocked, '改成代墊卻沒改資金來源，竟然過得了';
-  assert v_err like '%entries_funding_common_wallet_only%', format('錯誤訊息不對：%s', v_err);
-  raise notice '  預期的失敗：%', v_err;
-
-  -- ②c 同一次呼叫補送 funding = balance 就成功（契約文件寫明的做法）。
+  -- 代墊也一樣（v1.3 的 check 不在了，代墊不會再因為 funding 被擋）。
   v_entry := public.upsert_entry(jsonb_build_object(
     'id', v_entry.id,
     'ledger_id', '10000000-0000-0000-0000-000000000001',
     'payer_id', '20000000-0000-0000-0000-000000000001',
     'split_method', 'equal',
-    'funding', 'balance'));
-  assert v_entry.funding = 'balance', format('補送 funding 後應為 balance，實際 %s', v_entry.funding);
+    'funding', 'budget'));
   assert v_entry.payer_id = '20000000-0000-0000-0000-000000000001'::uuid, 'payer_id 應改成 Mike';
-
-  -- ②d 改回共同錢包＋預算。
-  v_entry := public.upsert_entry(jsonb_build_object(
-    'id', v_entry.id,
-    'ledger_id', '10000000-0000-0000-0000-000000000001',
-    'payer_id', null, 'split_method', 'common', 'funding', 'budget'));
-  assert v_entry.funding = 'budget', '改回共同錢包＋預算應成功';
-
-  -- ③ 明確指定改回 balance（共同錢包的支出兩種資金來源都合法）。
-  v_entry := public.upsert_entry(jsonb_build_object(
-    'id', v_entry.id,
-    'ledger_id', '10000000-0000-0000-0000-000000000001',
-    'funding', 'balance'));
-  assert v_entry.funding = 'balance', format('funding 應改成 balance，實際 %s', v_entry.funding);
-
-  -- ③b 直接對 entries 寫 funding 也要通（B1：欄位級 INSERT／UPDATE 授權要含 funding）。
-  update public.entries set funding = 'budget' where id = v_entry.id;
-  assert (select e.funding from public.entries e where e.id = v_entry.id) = 'budget',
-    'authenticated 應能直接 update entries.funding（欄位級授權）';
-
-  -- ④ 同一條前端路徑接著撥款，並查回來。
-  insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, note, created_by)
-  values ('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001',
-          2000, date_trunc('month', current_date)::date, '本月食品加碼',
-          '20000000-0000-0000-0000-000000000001')
-  returning id into v_alloc;
-  assert (select b.created_by from public.budget_allocation b where b.id = v_alloc)
-         = '20000000-0000-0000-0000-000000000001'::uuid, '撥款人應是呼叫者';
 end;
 $$;
 rollback;
@@ -436,5 +384,151 @@ begin
     'categories.rollover 應該已經被移除（ADR-0007）';
 end;
 $$;
+
+\echo '== budget: j1. 遷移前快照：archive.budget_allocation_v13 存在且前端完全碰不到 =='
+do $$
+begin
+  assert exists (select 1 from information_schema.tables
+                 where table_schema = 'archive' and table_name = 'budget_allocation_v13'),
+    'archive.budget_allocation_v13 應該存在（0027 的遷移前快照）';
+  -- 快照放 archive 而不是 public：public 每張表都要開 RLS（rls.sql 全表掃描），
+  -- 而快照沒有 RLS 也不該有——所以改用「前端連 schema 都進不去」這道。
+  assert not exists (select 1 from information_schema.role_table_grants
+                     where table_schema = 'archive'
+                       and grantee in ('anon', 'authenticated')),
+    '前端角色不該對 archive schema 的表有任何權限';
+  -- 表權限之外，schema 的 USAGE 本身也要是關的：沒有 USAGE 就連表名都解析不到，
+  -- 日後有人手滑 grant 了表權限，這條會先攔下來。
+  assert not has_schema_privilege('anon', 'archive', 'usage'),
+    'anon 不該有 archive schema 的 USAGE';
+  assert not has_schema_privilege('authenticated', 'archive', 'usage'),
+    'authenticated 不該有 archive schema 的 USAGE';
+end;
+$$;
+
+begin;
+select set_config('request.jwt.claims', json_build_object('sub', :'MIKE', 'role', 'authenticated')::text, true) as _claims \gset
+set local role authenticated;
+do $$
+declare
+  v_blocked boolean := false;
+  v_err text;
+  v_n int;
+begin
+  begin
+    select count(*) into v_n from archive.budget_allocation_v13;
+  exception when insufficient_privilege then v_blocked := true; v_err := sqlerrm;
+  end;
+  assert v_blocked, '前端竟然讀得到遷移前快照';
+  assert v_err like '%permission denied for schema archive%', format('錯誤訊息不對：%s', v_err);
+  raise notice '  預期的失敗：%', v_err;
+end;
+$$;
+rollback;
+
+\echo '== budget: j2. 合併規則鏡像（v1.3 撥款流水 → v1.4 每分類每月一筆）=='
+-- ⚠️ 這一段是 20260904000200_rules_v14.sql 第 3a 節那句合併 SQL 的**鏡像**：
+--    地端 db reset 時 budget_allocation 是空的（seed 在 migration 之後才跑），
+--    真正的那句在地端永遠是 no-op，等於沒被測到。這裡用 temp table 造出雲端才有的形狀來驗。
+--    **改 migration 的合併 SQL 就要同步改這一段，反之亦然。**
+begin;
+create temp table ba_mirror (
+  id uuid primary key default gen_random_uuid(),
+  ledger_id uuid not null,
+  category_id uuid not null,
+  amount int not null,
+  occurred_on date not null,
+  note text not null default '',
+  created_by uuid not null,
+  created_at timestamptz not null default now()
+) on commit drop;
+
+insert into ba_mirror (id, ledger_id, category_id, amount, occurred_on, note, created_by, created_at) values
+  -- ① 同分類同月三筆：撥 5,000 → 加碼 2,000 → 退回 1,000，合計 6,000（最早那筆備註是空的）
+  ('50000000-0000-0000-0000-000000000001', :'LEDGER', :'CAT_FOOD',  5000, date '2026-03-04', '',     :'MIKE_M', '2026-03-04 10:00+08'),
+  ('50000000-0000-0000-0000-000000000002', :'LEDGER', :'CAT_FOOD',  2000, date '2026-03-02', '加碼', :'WIFE_M', '2026-03-05 10:00+08'),
+  ('50000000-0000-0000-0000-000000000003', :'LEDGER', :'CAT_FOOD', -1000, date '2026-03-20', '退回', :'WIFE_M', '2026-03-06 10:00+08'),
+  -- ② 撥了又全退 → 合計 0 → 整組刪除
+  ('50000000-0000-0000-0000-000000000004', :'LEDGER', :'CAT_HOUSE', 1000, date '2026-03-01', '撥',   :'MIKE_M', '2026-03-01 10:00+08'),
+  ('50000000-0000-0000-0000-000000000005', :'LEDGER', :'CAT_HOUSE',-1000, date '2026-03-09', '全退', :'MIKE_M', '2026-03-09 10:00+08'),
+  -- ③ 合計為負 → 也整組刪除
+  ('50000000-0000-0000-0000-000000000006', :'LEDGER', :'CAT_PLAY',   500, date '2026-03-01', '撥',   :'MIKE_M', '2026-03-01 10:00+08'),
+  ('50000000-0000-0000-0000-000000000007', :'LEDGER', :'CAT_PLAY',  -800, date '2026-03-05', '超退', :'MIKE_M', '2026-03-05 10:00+08'),
+  -- ④ 單筆、不同月 → 原封不動
+  ('50000000-0000-0000-0000-000000000008', :'LEDGER', :'CAT_FOOD',  4000, date '2026-02-03', '上月', :'WIFE_M', '2026-02-03 10:00+08'),
+  -- ⑤ created_at 完全並列 → 由 id 決定先後（結果必須穩定）
+  ('50000000-0000-0000-0000-00000000000b', :'LEDGER', :'CAT_TRAFFIC', 300, date '2026-03-08', 'B 先建', :'WIFE_M', '2026-03-07 10:00+08'),
+  ('50000000-0000-0000-0000-00000000000a', :'LEDGER', :'CAT_TRAFFIC', 700, date '2026-03-06', 'A 先建', :'MIKE_M', '2026-03-07 10:00+08');
+
+-- ↓↓↓ 以下這句與 migration 第 3a 節逐字相同，只有表名不同 ↓↓↓
+with grouped as (
+  select b.ledger_id,
+         b.category_id,
+         date_trunc('month', b.occurred_on)::date as m,
+         sum(b.amount)::int as total,
+         min(b.occurred_on) as min_occurred,
+         (array_remove(array_agg(nullif(btrim(b.note), '') order by b.created_at, b.id), null))[1] as keep_note,
+         (array_agg(b.id order by b.created_at, b.id))[1] as keep_id
+  from ba_mirror b
+  group by b.ledger_id, b.category_id, date_trunc('month', b.occurred_on)::date
+),
+merged as (
+  delete from ba_mirror b
+  using grouped g
+  where b.ledger_id = g.ledger_id
+    and b.category_id = g.category_id
+    and date_trunc('month', b.occurred_on)::date = g.m
+    and (g.total <= 0 or b.id <> g.keep_id)
+  returning b.id
+)
+update ba_mirror b
+   set amount = g.total,
+       occurred_on = g.min_occurred,
+       note = coalesce(g.keep_note, '')
+  from grouped g
+ where b.id = g.keep_id
+   and g.total > 0
+   and (b.amount, b.occurred_on, b.note) is distinct from (g.total, g.min_occurred, coalesce(g.keep_note, ''));
+-- ↑↑↑ 鏡像結束 ↑↑↑
+
+do $$
+declare r ba_mirror;
+begin
+  assert (select count(*) from ba_mirror) = 3,
+    format('合併後應剩 3 列（食品 3 月、食品 2 月、交通 3 月），實際 %s', (select count(*) from ba_mirror));
+
+  -- ① 含負數但合計仍 > 0：合併成一列，欄位各取各的規則
+  select * into r from ba_mirror where id = '50000000-0000-0000-0000-000000000001';
+  assert r.amount = 6000, format('①合計應 6,000（5,000＋2,000−1,000），實際 %s', r.amount);
+  assert r.occurred_on = date '2026-03-02', format('①occurred_on 應取該組最小，實際 %s', r.occurred_on);
+  assert r.note = '加碼', format('①note 應取最早的非空備註，實際 %s', r.note);
+  assert r.created_by = '20000000-0000-0000-0000-000000000001'::uuid, format('①created_by 應是最早那列的，實際 %s', r.created_by);
+
+  -- ②③ 合計 ≤ 0 整組刪除
+  assert not exists (select 1 from ba_mirror where category_id = '30000000-0000-0000-0000-000000000004'::uuid),
+    '②合計 0 的組合應整組刪除';
+  assert not exists (select 1 from ba_mirror where category_id = '30000000-0000-0000-0000-000000000007'::uuid),
+    '③合計為負的組合應整組刪除';
+
+  -- ④ 單筆不同月：原封不動
+  select * into r from ba_mirror where id = '50000000-0000-0000-0000-000000000008';
+  assert r.amount = 4000 and r.note = '上月' and r.occurred_on = date '2026-02-03',
+    format('④單筆應原封不動：%s', r);
+
+  -- ⑤ created_at 並列 → id 小的勝出（結果穩定，不隨掃描順序漂）
+  select * into r from ba_mirror where category_id = '30000000-0000-0000-0000-000000000006'::uuid;
+  assert r.id = '50000000-0000-0000-0000-00000000000a', format('⑤並列時應由 id 決定保留哪列，實際 %s', r.id);
+  assert r.amount = 1000, format('⑤合計應 1,000，實際 %s', r.amount);
+  assert r.note = 'A 先建', format('⑤note 應取 (created_at, id) 排序第一個非空，實際 %s', r.note);
+  assert r.created_by = '20000000-0000-0000-0000-000000000001'::uuid, format('⑤created_by 應是 id 小的那列，實際 %s', r.created_by);
+
+  -- 合併後 v1.4 的兩道約束在真表上加得起來（migration 的實際順序）
+  assert not exists (select 1 from ba_mirror where amount <= 0), '合併後不該剩下 amount <= 0';
+  assert not exists (
+    select 1 from ba_mirror group by ledger_id, category_id, date_trunc('month', occurred_on)
+    having count(*) > 1), '合併後不該剩下同分類同月多筆';
+end;
+$$;
+rollback;
 
 \echo 'budget.sql PASS'

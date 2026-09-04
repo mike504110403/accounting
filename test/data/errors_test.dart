@@ -1,8 +1,9 @@
 /// 錯誤轉譯：DB／Auth 的英文訊息一律變成使用者看得懂的中文。
 ///
 /// 這層是「不變式的第二道防線真的被踩到時，使用者看到什麼」——
-/// 前端的 `Entry` 建構子已經先擋掉 funding 違規，但 DB 的 check 仍可能因為
-/// 別的路徑（舊資料、並行改動）打回來，那時不能讓 constraint 名字直接噴到畫面上。
+/// 前端會先擋掉大部分違規，但 DB 的 check／trigger 仍可能因為別的路徑
+/// （舊資料、並行改動、另一台裝置剛清完帳）打回來，
+/// 那時不能讓 constraint 名字或英文 raise 直接噴到畫面上。
 library;
 
 import 'package:accounting/data/errors.dart';
@@ -18,13 +19,36 @@ Future<void> expectMessage(PostgrestException e, String expected) async {
 
 void main() {
   group('check constraint', () {
-    test('代墊／私人走信封（23514）→ 說清楚哪種帳目才能用信封', () async {
+    test('v1.4：同分類同月第二筆預算（unique 23505）→ 說「本月已設定」', () async {
       await expectMessage(
         const PostgrestException(
-          message: 'new row for relation "entries" violates check constraint "entries_funding_common_wallet_only"',
+          message: 'duplicate key value violates unique constraint '
+              '"budget_allocation_one_per_category_month"',
+          code: '23505',
+        ),
+        '這個分類本月已設定預算，設定後不可修改',
+      );
+    });
+
+    test('v1.4：每月補入額超出範圍（23514）→ 說清楚上下界', () async {
+      await expectMessage(
+        const PostgrestException(
+          message: 'new row for relation "members" violates check constraint '
+              '"members_monthly_topup_range"',
           code: '23514',
         ),
-        '只有共同錢包的共同支出可以從信封（預算）支出，代墊與私人帳目請改成餘額',
+        '每月補入額必須介於 0 與 1 億之間',
+      );
+    });
+
+    test('v1.4：預算金額 ≤ 0（23514）→ 說「必須大於 0」', () async {
+      await expectMessage(
+        const PostgrestException(
+          message: 'new row for relation "budget_allocation" violates check constraint '
+              '"budget_allocation_amount_positive"',
+          code: '23514',
+        ),
+        '預算金額必須大於 0',
       );
     });
 
@@ -35,6 +59,34 @@ void main() {
           code: '23514',
         ),
         '負數金額請開啟「修正筆」',
+      );
+    });
+  });
+
+  group('v1.4 鎖月 trigger 與清帳 RPC', () {
+    test('month closed: YYYY-MM → 「該月已清帳」（訊息帶的是被擋那筆的月份）', () async {
+      await expectMessage(const PostgrestException(message: 'month closed: 2026-08'), '該月已清帳');
+    });
+
+    test('清帳可清條件的六種訊息各自對應一句中文（db-contract 逐條）', () async {
+      await expectMessage(const PostgrestException(message: 'close_month: month must be first day'),
+          '清帳月份格式錯誤，請重新整理後再試');
+      await expectMessage(
+          const PostgrestException(message: 'close_month: month not ended'), '本月尚未結束');
+      await expectMessage(
+          const PostgrestException(message: 'close_month: already closed'), '該月已清帳');
+      await expectMessage(
+          const PostgrestException(message: 'close_month: nothing to close'), '沒有可清的月份');
+      await expectMessage(
+          const PostgrestException(message: 'close_month: unsettled entries in month'), '有拆帳尚未簽完');
+      await expectMessage(
+          const PostgrestException(message: 'close_month: must close 2026-07 first'), '請先清 2026／07');
+    });
+
+    test('month_close_preview 的非成員 42501 走既有的「不是成員」', () async {
+      await expectMessage(
+        const PostgrestException(message: 'month_close_preview: not a member', code: '42501'),
+        '你不是這本帳本的成員',
       );
     });
   });

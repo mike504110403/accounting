@@ -1,19 +1,26 @@
-/// 撥款／退回 sheet（v1.3／ADR-0007）：一次寫一列 [BudgetAllocation]；下方看得到當月撥款流水並可刪除。
-/// 過去月份不可撥款（信封不跨月，補撥過去月沒有意義）——按鈕 disabled，欄位仍可看。
+/// 設定本月預算 sheet（v1.4／ADR-0008）：一次寫一列 [BudgetAllocation]；
+/// **每分類每月只能設定一次，設定後不可改、不可刪、不可逆轉**（DB 連 UPDATE／DELETE
+/// 授權都收回了）。三種畫面（「已設定」判定看 `allocationsProvider` 的本地快取，不是
+/// 每次開 sheet 都重打一次 server；快取落後於 server 的競態——例如另一台裝置剛設定過、
+/// 這裡還沒 refresh／realtime 追上——放行編輯表單，送出時仍會撞真正的 unique 23505，
+/// 由 repository 那層擋下並轉成「本月已設定」，見 `budget_page_test.dart` 的
+/// unique 23505 測試）：
+/// - 該分類本月已設定 → 唯讀顯示金額／備註／設定者／日期，沒有輸入欄，也沒有
+///   修改或刪除入口。
+/// - 該分類本月尚未設定、看的是過去月份 → 顯示「已過期，不可設定」，沒有輸入欄
+///   （預算不跨月，過去月份補設也沒意義）。
+/// - 該分類本月尚未設定、看的是當月或未來月 → 金額欄＋備註欄＋「設定」鈕。
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../app/circle_slide_action.dart';
 import '../../app/format.dart';
 import '../../data/month_summary_provider.dart';
 import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
-import 'budget_widgets.dart';
 
 class AllocationSheet extends ConsumerStatefulWidget {
   const AllocationSheet({super.key, required this.category, required this.month});
@@ -43,28 +50,18 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
 
   DateTime get _until => DateTime(widget.month.year, widget.month.month + 1, 0);
 
-  /// 撥款日：看的是本月就記今天，看的是別的月就記該月 1 號（信封只看當月，日期只影響「算到某日」）。
+  /// 設定日：看的是本月就記今天，看的是別的月就記該月 1 號（預算只看當月，日期不影響金額）。
   DateTime _occurredOn() {
     final now = DateTime.now();
     if (sameMonth(now, widget.month)) return DateTime(now.year, now.month, now.day);
     return DateTime(widget.month.year, widget.month.month, 1);
   }
 
-  Future<void> _submit({required bool isReturn}) async {
+  Future<void> _submit() async {
     final raw = int.tryParse(_amountController.text.trim());
     if (raw == null || raw <= 0) {
       setState(() => _error = '請輸入金額');
       return;
-    }
-
-    if (isReturn) {
-      // 退回上限吃 DB month_summary 的剩餘（server 資料計算；Mike 裁示 2026-09-03）。
-      final remainingNow =
-          ref.read(monthSummaryProvider(_until)).value?.envelopeOf(widget.category.id).remaining ?? 0;
-      if (raw > remainingNow) {
-        setState(() => _error = '退回不得超過剩餘 ${fmtAmount(remainingNow)}');
-        return;
-      }
     }
 
     setState(() {
@@ -77,7 +74,7 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
             id: '',
             ledgerId: ref.read(ledgerProvider).id,
             categoryId: widget.category.id,
-            amount: isReturn ? -raw : raw,
+            amount: raw,
             occurredOn: _occurredOn(),
             note: _noteController.text.trim(),
             createdBy: ref.read(currentMemberIdProvider),
@@ -93,36 +90,30 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
     }
   }
 
-  Future<void> _remove(String id) async {
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    try {
-      await ref.read(allocationsProvider.notifier).remove(id);
-      if (mounted) setState(() => _saving = false);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _saving = false;
-        _error = e is LedgerException ? e.message : '刪除失敗，請重試';
-      });
+  String _memberName(List<Member> members, String id) {
+    for (final m in members) {
+      if (m.id == id) return m.displayName;
     }
+    return '成員';
   }
 
   @override
   Widget build(BuildContext context) {
     final allocations = ref.watch(allocationsProvider);
-    // 本月三數字吃 DB month_summary（首載前畫 0；任何寫入／輪詢後自動跟上 server）。
-    final env = ref.watch(monthSummaryProvider(_until)).value?.envelopeOf(widget.category.id);
-    final allocated = env?.allocated ?? 0;
-    final spent = env?.spent ?? 0;
-    final remaining = env?.remaining ?? 0;
+    final members = ref.watch(membersProvider);
+    // 本月已花吃 DB month_summary（首載前畫 0；任何寫入／輪詢後自動跟上 server）。
+    final spent = ref.watch(monthSummaryProvider(_until)).value?.envelopeOf(widget.category.id).spent ?? 0;
 
-    final flow = allocations.where((a) => a.categoryId == widget.category.id && sameMonth(a.occurredOn, widget.month)).toList()
-      ..sort((a, b) => a.occurredOn.compareTo(b.occurredOn));
-
-    final canSubmit = !_isPastMonth && !_saving;
+    BudgetAllocation? existing;
+    for (final a in allocations) {
+      if (a.categoryId == widget.category.id && sameMonth(a.occurredOn, widget.month)) {
+        existing = a;
+        break;
+      }
+    }
+    // canSubmit 只在編輯分支（existing == null && !_isPastMonth）用得到——過去月份
+    // 未設定走的是上面那個 else if 分支，根本沒有這顆按鈕；這裡不必再判一次 _isPastMonth。
+    final canSubmit = !_saving;
 
     return Padding(
       padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: MediaQuery.of(context).viewInsets.bottom + 16),
@@ -133,110 +124,61 @@ class _AllocationSheetState extends ConsumerState<AllocationSheet> {
           children: [
             Text(widget.category.name, style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 4),
-            Text(
-              '本月：撥款 ${fmtAmount(allocated)}・已花 ${fmtAmount(spent)}・剩餘 ${fmtAmount(remaining)}',
-              style: Theme.of(context).textTheme.bodyMedium,
-            ),
+            // 「本月」寫死會在切到過去／未來月時文不對題（跟月份標題對不起來）；
+            // 一律吃 widget.month 換算的月份字串，跟 AppBar 的 MonthTitle 是同一份資料。
+            Text('${fmtMonth(widget.month)}已花 ${fmtAmount(spent)}', style: Theme.of(context).textTheme.bodyMedium),
             const SizedBox(height: 12),
-            TextField(
-              key: const Key('allocation-amount-field'),
-              controller: _amountController,
-              keyboardType: const TextInputType.numberWithOptions(signed: false),
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(labelText: '金額'),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              key: const Key('allocation-note-field'),
-              controller: _noteController,
-              decoration: const InputDecoration(labelText: '備註'),
-            ),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            if (existing != null) ...[
+              _detailRow(context, '金額', fmtAmount(existing.amount)),
+              _detailRow(context, '備註', existing.note.isEmpty ? '（無）' : existing.note),
+              _detailRow(context, '設定者', _memberName(members, existing.createdBy)),
+              _detailRow(context, '日期', fmtDate(existing.occurredOn)),
+            ] else if (_isPastMonth)
+              Text('已過期，不可設定', style: TextStyle(color: Theme.of(context).colorScheme.error))
+            else ...[
+              TextField(
+                key: const Key('allocation-amount-field'),
+                controller: _amountController,
+                keyboardType: const TextInputType.numberWithOptions(signed: false),
+                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                decoration: const InputDecoration(labelText: '金額'),
               ),
-            if (_isPastMonth)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text('過去月份不可撥款', style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              const SizedBox(height: 8),
+              TextField(
+                key: const Key('allocation-note-field'),
+                controller: _noteController,
+                decoration: const InputDecoration(labelText: '備註'),
               ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    key: const Key('allocation-return-btn'),
-                    onPressed: canSubmit ? () => _submit(isReturn: true) : null,
-                    child: const Text('退回'),
-                  ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: FilledButton(
-                    key: const Key('allocation-add-btn'),
-                    onPressed: canSubmit ? () => _submit(isReturn: false) : null,
-                    child: Text(_saving ? '處理中…' : '撥入'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text('本月撥款流水', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 4),
-            if (flow.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text('本月還沒有撥款紀錄', style: Theme.of(context).textTheme.bodySmall),
-              )
-            else
-              // 固定 5 列高、區塊內可滾動——sheet 不再無限往上長（Mike 裁示 2026-09-04）。
+              const SizedBox(height: 8),
               SizedBox(
-                height: 5 * 48.0,
-                child: ListView(
-                  children: [
-              for (final a in flow)
-                // 左滑刪除（Mike 裁示 2026-09-04：不放 X 按鈕）。
-                Slidable(
-                  key: ValueKey('allocation-flow-${a.id}'),
-                  endActionPane: ActionPane(
-                    motion: const DrawerMotion(),
-                    extentRatio: 0.22,
-                    children: [
-                      CircleSlideAction(
-                        key: Key('allocation-delete-${a.id}'),
-                        icon: Icons.delete_outline,
-                        background: Theme.of(context).colorScheme.errorContainer,
-                        foreground: Theme.of(context).colorScheme.onErrorContainer,
-                        tooltip: '刪除',
-                        onPressed: () {
-                          if (!_saving) _remove(a.id);
-                        },
-                      ),
-                    ],
-                  ),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    child: Row(
-                      children: [
-                        Text(fmtDate(a.occurredOn), style: Theme.of(context).textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          flex: 3,
-                          child: Text(fmtAmount(a.amount), maxLines: 1, overflow: TextOverflow.ellipsis, style: tabularStyle(null)),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(flex: 2, child: Text(a.note, maxLines: 1, overflow: TextOverflow.ellipsis)),
-                      ],
-                    ),
-                  ),
-                ),
-                  ],
+                width: double.infinity,
+                child: FilledButton(
+                  key: const Key('allocation-add-btn'),
+                  onPressed: canSubmit ? _submit : null,
+                  child: Text(_saving ? '處理中…' : '設定'),
                 ),
               ),
+            ],
+            const SizedBox(height: 8),
           ],
         ),
       ),
     );
   }
+
+  Widget _detailRow(BuildContext context, String label, String value) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(width: 64, child: Text(label, style: Theme.of(context).textTheme.bodySmall)),
+            Expanded(child: Text(value, style: Theme.of(context).textTheme.bodyMedium)),
+          ],
+        ),
+      );
 }

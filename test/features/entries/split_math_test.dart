@@ -4,11 +4,13 @@ import 'package:accounting/features/entries/split_math.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const members = [
-    Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike'),
-    Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆'),
+  // 這組測試只算分攤，跟加入月無關：一律「很久以前就加入」。
+  final epoch = DateTime(1970);
+  final members = [
+    Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: epoch),
+    Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: epoch),
   ];
-  const third = Member(id: 'm-3', ledgerId: kLedgerId, userId: 'u3', displayName: '小孩');
+  final third = Member(id: 'm-3', ledgerId: kLedgerId, userId: 'u3', displayName: '小孩', joinedAt: epoch);
   const ratio = {kMeId: 50, kWifeId: 50};
 
   test('equal：均分兩位小數，567 → 283.5／283.5', () {

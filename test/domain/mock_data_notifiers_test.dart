@@ -20,11 +20,11 @@ void main() {
     addTearDown(container.dispose);
     final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
     await container.read(membersStateProvider.notifier).update(
-          Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, openingBalancePersonal: 777),
+          Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, monthlyTopup: 777, joinedAt: me.joinedAt),
         );
     final after = container.read(membersProvider);
-    expect(after.firstWhere((m) => m.id == kMeId).openingBalancePersonal, 777);
-    expect(after.firstWhere((m) => m.id == kWifeId).openingBalancePersonal, 30000); // 別人的值不變
+    expect(after.firstWhere((m) => m.id == kMeId).monthlyTopup, 777);
+    expect(after.firstWhere((m) => m.id == kWifeId).monthlyTopup, 10000); // 別人的值不變
   });
 
   test('CategoriesNotifier.add/update/remove', () async {
@@ -77,33 +77,26 @@ void main() {
     }
   });
 
-  test('AllocationsNotifier.add/remove', () async {
+  test('AllocationsNotifier.add（v1.4：只有 add，設定後不可改不可刪）', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final notifier = container.read(allocationsProvider.notifier);
     final before = container.read(allocationsProvider).length;
 
+    // 假資料的本月預算已經佔掉 c-food／c-dining…，挑一個還沒設定的分類。
     await notifier.add(BudgetAllocation(
       id: 'al-test',
       ledgerId: kLedgerId,
-      categoryId: 'c-food',
-      amount: -500,
-      occurredOn: DateTime(2026, 5, 20),
+      categoryId: 'c-fun',
+      amount: 500,
+      occurredOn: DateTime(DateTime.now().year, DateTime.now().month, 20),
       createdBy: kMeId,
-      note: '退回',
+      note: '本月娛樂',
     ));
     expect(container.read(allocationsProvider).length, before + 1);
     final added = container.read(allocationsProvider).last;
-    expect(added.amount, -500, reason: '撥款可負');
-    expect(added.note, '退回');
-
-    await notifier.remove('al-test');
-    expect(container.read(allocationsProvider).any((a) => a.id == 'al-test'), isFalse);
-    expect(container.read(allocationsProvider).length, before);
-
-    // 不存在的 id：當沒事發生，不動 state
-    await notifier.remove('does-not-exist');
-    expect(container.read(allocationsProvider).length, before);
+    expect(added.amount, 500);
+    expect(added.note, '本月娛樂');
   });
 
   test('CategoriesNotifier.reorder 索引越界時不動 state', () async {

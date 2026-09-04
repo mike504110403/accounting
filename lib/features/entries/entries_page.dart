@@ -213,6 +213,7 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     final categories = ref.watch(categoriesProvider);
     final all = ref.watch(entriesProvider);
     final settlements = ref.watch(settlementsProvider);
+    final closes = ref.watch(monthClosesProvider);
 
     final filtered = [
       for (final e in all)
@@ -274,8 +275,9 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         !e.isAdjustment && e.id.length >= 8 && reversedTags.contains(e.id.substring(0, 8));
 
     // 沖銷與被沖銷是不可變軌跡：不可編輯也不可刪（Mike 裁示 2026-09-04），整排滑動動作拿掉。
+    // 已清帳月份（含更早月份）的帳目同款處理（v1.4 鎖月）：滑開只會撞上 DB trigger。
     Widget entryRow(Entry e) {
-      final immutable = e.isAdjustment || isReversed(e);
+      final immutable = e.isAdjustment || isReversed(e) || isMonthClosed(closes, e.occurredOn);
       final tile = _EntryTile(
         entry: e,
         categories: categories,

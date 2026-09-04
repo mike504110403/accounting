@@ -71,19 +71,42 @@ Future<T> guard<T>(Future<T> Function() body) async {
   }
 }
 
-/// DB 訊息 → 中文。比對 `docs/specs/db-contract.md`「Trigger（前端要預期的錯誤）」與 RPC 的 raise 清單。
-String _postgrestMessage(PostgrestException e) {
-  final m = e.message;
+String _postgrestMessage(PostgrestException e) => dbMessage(e.message, code: e.code);
 
+/// DB 訊息 → 中文。比對 `docs/specs/db-contract.md`「Trigger（前端要預期的錯誤）」與 RPC 的 raise 清單。
+///
+/// 公開的原因是**記憶體替身也要用它**：`InMemoryLedgerRepository` 的清帳與鎖月守衛
+/// 拿 DB 的英文 raise 逐字餵進來，兩個實作看到的中文才保證是同一句
+/// （契約測試對兩個實作跑同一組訊息斷言）。
+String dbMessage(String m, {String? code}) {
   // check constraint（SQLSTATE 23514）：訊息裡帶 constraint 名稱。
-  if (m.contains('entries_funding_common_wallet_only')) {
-    return '只有共同錢包的共同支出可以從信封（預算）支出，代墊與私人帳目請改成餘額';
-  }
   if (m.contains('entries_amount_sign')) return '負數金額請開啟「修正筆」';
   if (m.contains('entries_private_payer')) return '私人帳目的付款人必須是自己';
   if (m.contains('entries_private_no_split')) return '私人帳目不能分攤';
   if (m.contains('budget_allocation') && m.contains('expense category')) {
-    return '預算撥款只能撥給支出分類';
+    return '預算只能設定在支出分類';
+  }
+  // v1.4：每分類每月只能設定一次（unique 23505），金額必須 > 0。
+  if (m.contains('budget_allocation_one_per_category_month') ||
+      (code == '23505' && m.contains('budget_allocation'))) {
+    return '這個分類本月已設定預算，設定後不可修改';
+  }
+  if (m.contains('budget_allocation_amount_positive')) return '預算金額必須大於 0';
+  if (m.contains('members_monthly_topup_range')) return '每月補入額必須介於 0 與 1 億之間';
+
+  // 鎖月 trigger（v1.4）：訊息帶的是被擋的那筆所屬的月份。
+  if (m.startsWith('month closed:')) return '該月已清帳';
+
+  // 清帳 RPC 的可清條件（`close_month` 與 `month_close_preview` 共用同一組訊息）。
+  if (m.contains('close_month:') || m.contains('month_close_preview:')) {
+    if (m.contains('month not ended')) return '本月尚未結束';
+    if (m.contains('already closed')) return '該月已清帳';
+    if (m.contains('nothing to close')) return '沒有可清的月份';
+    if (m.contains('unsettled entries in month')) return '有拆帳尚未簽完';
+    final mustClose = RegExp(r'must close (\d{4})-(\d{2}) first').firstMatch(m);
+    if (mustClose != null) return '請先清 ${mustClose.group(1)}／${mustClose.group(2)}';
+    if (m.contains('month must be first day')) return '清帳月份格式錯誤，請重新整理後再試';
+    // not a member／not authenticated 落到下面共用的那幾條。
   }
 
   // settled 鎖定（trigger 一律以 `entry settled: ` 開頭）。
@@ -122,7 +145,7 @@ String _postgrestMessage(PostgrestException e) {
   if (m.contains('is immutable')) return '這個欄位不可修改';
 
   // 權限層（比 trigger 更早發生）。
-  if (e.code == '42501' || m.contains('permission denied')) {
+  if (code == '42501' || m.contains('permission denied')) {
     return '沒有權限執行這個操作';
   }
 

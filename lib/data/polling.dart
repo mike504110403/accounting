@@ -43,6 +43,7 @@ Future<void> _refreshAll(Ref ref) => Future.wait([
       ref.read(allocationsProvider.notifier).refresh(),
       ref.read(listItemsProvider.notifier).refresh(),
       ref.read(settlementsProvider.notifier).refresh(),
+      ref.read(monthClosesProvider.notifier).refresh(),
     ]);
 
 /// 生命週期與 Realtime 訂閱同款：`AccountingApp` watch 它，換帳本自動重掛、

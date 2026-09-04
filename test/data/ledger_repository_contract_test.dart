@@ -14,10 +14,12 @@
 /// 記憶體版跟真 DB 行為分岔的地方，就是正式環境會炸而測試全綠的地方。
 library;
 
+import 'package:accounting/data/errors.dart' show requireId;
 import 'package:accounting/data/in_memory_repository.dart';
 import 'package:accounting/data/ledger_repository.dart';
 import 'package:accounting/data/supabase_client.dart';
 import 'package:accounting/data/supabase_repository.dart';
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -50,10 +52,18 @@ class InMemoryEnv implements ContractEnv {
   InMemoryEnv(this._repo);
 
   static Future<InMemoryEnv> create() async {
-    // 清掉波 1 那筆 pending settlement 與帳目：契約測試要從乾淨狀態起跑。
+    // 清掉波 1 那筆 pending settlement、帳目與預算：契約測試要從乾淨狀態起跑
+    // （v1.4 的預算是「每分類每月一筆」，留著 seed 的那幾筆會讓「第一次設定」直接撞 unique）。
     final base = InMemoryLedgerRepository().snapshot;
     return InMemoryEnv(
-      InMemoryLedgerRepository(seed: base.copyWith(entries: const [], settlements: const [])),
+      InMemoryLedgerRepository(
+        seed: base.copyWith(
+          entries: const [],
+          settlements: const [],
+          allocations: const [],
+          closes: const [],
+        ),
+      ),
     );
   }
 
@@ -174,14 +184,12 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
   late ContractEnv env;
   late String expenseCategoryId;
   final createdEntryIds = <String>[];
-  final createdAllocationIds = <String>[];
 
   setUp(() async {
     env = await makeEnv();
     final snap = await env.asA.loadSnapshot(env.ledgerId);
     expenseCategoryId = snap.categories.firstWhere((c) => c.kind == EntryKind.expense).id;
     createdEntryIds.clear();
-    createdAllocationIds.clear();
   });
 
   // 每條測試自己建的資料自己清（結算後鎖住的除外，那是測試本身要驗的狀態）。
@@ -191,11 +199,8 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
         await env.asA.removeEntry(id);
       } catch (_) {}
     }
-    for (final id in createdAllocationIds) {
-      try {
-        await env.asA.removeAllocation(id);
-      } catch (_) {}
-    }
+    // 預算沒得清：v1.4 起 budget_allocation 連 DELETE 授權都收回了（設定即定案）。
+    // 每條測試各自 makeEnv() 一本新帳本，所以不需要清。
     await env.dispose();
   });
 
@@ -211,7 +216,7 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
     SplitMethod splitMethod = SplitMethod.common,
     List<EntrySplit> splits = const [],
     List<LineItem> lineItems = const [],
-    Funding funding = Funding.balance,
+    DateTime? occurredOn,
   }) =>
       Entry(
         id: '',
@@ -220,12 +225,11 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
         scope: EntryScope.shared,
         amount: amount,
         categoryId: expenseCategoryId,
-        occurredOn: today(),
+        occurredOn: occurredOn ?? today(),
         createdBy: env.memberA,
         note: note,
         payerId: payerId,
         splitMethod: splitMethod,
-        funding: funding,
         splits: splits,
         lineItems: lineItems,
       );
@@ -351,49 +355,81 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
     expect(all.where((e) => e.id == saved.id), isEmpty);
   });
 
-  test('代墊筆不可能帶 funding=budget：模型不變式在建構點就擋下來', () {
-    expect(
-      () => Entry(
-        id: '',
-        ledgerId: env.ledgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 500,
-        categoryId: expenseCategoryId,
-        occurredOn: today(),
-        createdBy: env.memberA,
-        payerId: env.memberA, // 代墊
-        splitMethod: SplitMethod.equal,
-        funding: Funding.budget,
-      ),
-      throwsArgumentError,
-    );
+  test('v1.4：帳目不再有資金來源——兩種付款形狀都存得進去，payload 只剩可寫欄', () async {
+    // v1.3 的「代墊不得走信封」不變式隨欄位一起消失；現在所有支出都是餘額支出。
+    // 兩種形狀（代墊、共同錢包）都要存得進去，而且存回來的那份不帶資金來源。
+    final advanced = await save(newSharedExpense(
+      amount: 500,
+      note: '代墊',
+      payerId: env.memberA,
+      splitMethod: SplitMethod.equal,
+      splits: [
+        EntrySplit(entryId: '', memberId: env.memberA, share: 250),
+        EntrySplit(entryId: '', memberId: env.memberB, share: 250),
+      ],
+    ));
+    final wallet = await save(newSharedExpense(amount: 700, note: '共同錢包'));
+
+    expect(advanced.payerId, env.memberA);
+    expect(wallet.payerId, isNull);
+    for (final e in [advanced, wallet]) {
+      expect(e.toUpsertJson().keys.toSet(), {
+        'id',
+        'ledger_id',
+        'kind',
+        'scope',
+        'amount',
+        'category_id',
+        'occurred_on',
+        'note',
+        'payer_id',
+        'split_method',
+        'is_adjustment',
+      }, reason: 'v1.4 drop 掉的資金來源欄不該再出現在寫入 payload 裡');
+    }
   });
 
-  test('撥款：新增與刪除', () async {
+  test('設定本月預算：一分類一月一筆，第二筆被擋、金額必須 > 0（v1.4）', () async {
     final now = DateTime.now();
-    final saved = await env.asA.addAllocation(BudgetAllocation(
-      id: '',
-      ledgerId: env.ledgerId,
-      categoryId: expenseCategoryId,
-      amount: 5000,
-      occurredOn: DateTime(now.year, now.month, 1),
-      createdBy: env.memberA,
-      note: '契約測試撥款',
-    ));
-    createdAllocationIds.add(saved.id);
+    final thisMonth = DateTime(now.year, now.month, 1);
+    BudgetAllocation draft(int amount) => BudgetAllocation(
+          id: '',
+          ledgerId: env.ledgerId,
+          categoryId: expenseCategoryId,
+          amount: amount,
+          occurredOn: thisMonth,
+          createdBy: env.memberA,
+          note: '契約測試預算',
+        );
 
+    final saved = await env.asA.addAllocation(draft(5000));
     expect(saved.id, isNotEmpty);
     expect(saved.amount, 5000);
-    expect(saved.createdBy, env.memberA, reason: '不能以別人的名義撥款');
+    expect(saved.createdBy, env.memberA, reason: '不能以別人的名義設定預算');
 
-    var all = await env.asA.fetchAllocations(env.ledgerId);
+    final all = await env.asA.fetchAllocations(env.ledgerId);
     expect(all.where((a) => a.id == saved.id), hasLength(1));
 
-    await env.asA.removeAllocation(saved.id);
-    createdAllocationIds.remove(saved.id);
-    all = await env.asA.fetchAllocations(env.ledgerId);
-    expect(all.where((a) => a.id == saved.id), isEmpty);
+    // 同分類同月第二筆：DB 是 unique 23505，兩個實作都要變成同一句中文。
+    await expectLater(
+      env.asA.addAllocation(draft(1000)),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('本月已設定'))),
+    );
+
+    // 金額必須 > 0（v1.4 沒有「退回」）。
+    await expectLater(
+      env.asA.addAllocation(BudgetAllocation(
+        id: '',
+        ledgerId: env.ledgerId,
+        categoryId: expenseCategoryId,
+        amount: -1000,
+        occurredOn: DateTime(now.year, now.month + 1, 1),
+        createdBy: env.memberA,
+      )),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('必須大於 0'))),
+    );
   });
 
   test('改帳本設定：只送有 UPDATE 授權的三欄', () async {
@@ -415,7 +451,7 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
     expect(after.inviteCode, before.inviteCode, reason: 'invite_code 不可直接寫，輪替只走 rotate_invite_code');
   });
 
-  test('改自己那列成員：只送 display_name／opening_balance_personal', () async {
+  test('改自己那列成員：只送 display_name／monthly_topup（v1.4）', () async {
     final members = await env.asA.fetchMembers(env.ledgerId);
     final me = members.firstWhere((m) => m.id == env.memberA);
 
@@ -424,14 +460,50 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
       ledgerId: me.ledgerId,
       userId: me.userId,
       displayName: '改過的暱稱',
-      openingBalancePersonal: 12345,
+      monthlyTopup: 12345,
+      openingBalancePersonal: me.openingBalancePersonal,
+      joinedAt: me.joinedAt,
     ));
 
     final after = (await env.asA.fetchMembers(env.ledgerId)).firstWhere((m) => m.id == env.memberA);
     expect(after.displayName, '改過的暱稱');
-    expect(after.openingBalancePersonal, 12345);
+    expect(after.monthlyTopup, 12345);
     expect(after.ledgerId, me.ledgerId, reason: 'ledger_id 不可變');
     expect(after.userId, me.userId, reason: 'user_id 不可變');
+  });
+
+  test('每月補入額有上下界：0 與 1 億剛好過、−1 與 1 億零 1 被擋（兩實作同一句）', () async {
+    final me = (await env.asA.fetchMembers(env.ledgerId)).firstWhere((m) => m.id == env.memberA);
+    Member withTopup(int v) => Member(
+          id: me.id,
+          ledgerId: me.ledgerId,
+          userId: me.userId,
+          displayName: me.displayName,
+          monthlyTopup: v,
+          openingBalancePersonal: me.openingBalancePersonal,
+          joinedAt: me.joinedAt,
+        );
+
+    // 邊界剛好在界上：兩端都要放行，不然「介於 0 與 1 億之間」是假的。
+    for (final ok in [0, 100000000]) {
+      await env.asA.updateMember(withTopup(ok));
+      final after = (await env.asA.fetchMembers(env.ledgerId)).firstWhere((m) => m.id == me.id);
+      expect(after.monthlyTopup, ok);
+    }
+
+    // 界外：DB check `members_monthly_topup_range`；記憶體版比照，訊息走 errors.dart 同一張表。
+    for (final bad in [-1, 100000001]) {
+      await expectLater(
+        env.asA.updateMember(withTopup(bad)),
+        throwsA(isA<LedgerException>()
+            .having((e) => e.message, 'message', '每月補入額必須介於 0 與 1 億之間')),
+        reason: '$bad 應該被擋下來',
+      );
+    }
+
+    // 被擋下來的那次不留半套：值仍是最後一次成功寫入的 1 億。
+    final after = (await env.asA.fetchMembers(env.ledgerId)).firstWhere((m) => m.id == me.id);
+    expect(after.monthlyTopup, 100000000);
   });
 
   test('結算：發起 → 對方簽核 → settled，涵蓋帳目鎖住', () async {
@@ -561,6 +633,216 @@ void contractTests(Future<ContractEnv> Function() makeEnv) {
     );
   });
 
+  // ── 月清帳（v1.4／ADR-0008）────────────────────────────────────────
+
+  DateTime thisMonth() {
+    final n = DateTime.now();
+    return DateTime(n.year, n.month, 1);
+  }
+
+  /// 上個月的某一天（帳目用）。
+  DateTime lastMonthDay(int day) {
+    final m = prevMonth(thisMonth());
+    return DateTime(m.year, m.month, day);
+  }
+
+  /// 上個月的一筆代墊（均分兩人），清帳測試的共同 fixture。
+  Future<Entry> saveLastMonthAdvance() => save(newSharedExpense(
+        amount: 1000,
+        note: '上月代墊',
+        payerId: env.memberA,
+        splitMethod: SplitMethod.equal,
+        occurredOn: lastMonthDay(10),
+        splits: [
+          EntrySplit(entryId: '', memberId: env.memberA, share: 500),
+          EntrySplit(entryId: '', memberId: env.memberB, share: 500),
+        ],
+      ));
+
+  test('清帳：當月清不了（月份還沒結束）', () async {
+    await expectLater(
+      env.asA.closeMonth(env.ledgerId, thisMonth()),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('尚未結束'))),
+    );
+    expect(await env.asA.fetchMonthCloses(env.ledgerId), isEmpty);
+  });
+
+  test('清帳：月份不是月初 → 內部錯誤（可清條件第一條，兩個實作同一句）', () async {
+    // 前端一律只送月初，送到這裡代表 bug；repository 不代為正規化，
+    // 否則 DB 的第一條可清條件永遠打不到、兩個實作也會分岔。
+    await expectLater(
+      env.asA.closeMonth(env.ledgerId, lastMonthDay(15)),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('格式錯誤'))),
+    );
+    expect(await env.asA.fetchMonthCloses(env.ledgerId), isEmpty);
+  });
+
+  test('清帳：上月有未結算的拆帳 → 擋下來（尚未簽完）', () async {
+    await saveLastMonthAdvance();
+    final month = prevMonth(thisMonth());
+
+    await expectLater(
+      env.asA.monthClosePreview(env.ledgerId, month),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('尚未簽完'))),
+    );
+    await expectLater(
+      env.asA.closeMonth(env.ledgerId, month),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('尚未簽完'))),
+    );
+    expect(await env.asA.fetchMonthCloses(env.ledgerId), isEmpty);
+  });
+
+  test('清帳：簽完之後預覽明細手算一致 → 清帳落地 → 同月不可再清、該月鎖住', () async {
+    final entry = await saveLastMonthAdvance();
+    final month = prevMonth(thisMonth());
+
+    final pending = await env.asA.initiateSettlement(env.ledgerId);
+    await env.asB.approveSettlement(pending.id);
+    createdEntryIds.remove(entry.id); // 已結帳，清不掉
+
+    // 同月再補一筆「payer 非 null、split_method 非 common、但沒有任何分攤列」的代墊。
+    // 結算撿不到它（DB 的 `exists entry_splits`），可清條件也刻意放行——
+    // 但它會由付款人全額承擔，所以 preview 必須發 unsplit_advances 提醒。
+    // **順序很重要**：要在結算之後才建，否則它會被這一輪結算掃進去。
+    final loose = await save(newSharedExpense(
+      amount: 300,
+      note: '上月沒拆帳的代墊',
+      payerId: env.memberA,
+      splitMethod: SplitMethod.equal,
+      occurredOn: lastMonthDay(12),
+    ));
+    expect(loose.splits, isEmpty);
+
+    // 明細手算：每人 topup（加入月 ≤ 該月才有）＋ net。
+    // A：已結算份額 −500 ＋ 未結算代墊全額 −300；B：只有份額 −500。
+    final members = await env.asA.fetchMembers(env.ledgerId);
+    final expectedNet = {env.memberA: -800, env.memberB: -500};
+    final expectedEnding = {
+      for (final m in members)
+        m.id: (monthOf(m.joinedAt).isAfter(month) ? 0 : m.monthlyTopup) + expectedNet[m.id]!,
+    };
+
+    final preview = await env.asA.monthClosePreview(env.ledgerId, month);
+    expect(preview.month, month);
+    expect(preview.members.map((l) => l.memberId).toSet(), members.map((m) => m.id).toSet());
+    for (final line in preview.members) {
+      expect(line.net, expectedNet[line.memberId], reason: '結算後扛自己的份額，沒拆帳的代墊扛全額');
+      expect(line.ending, expectedEnding[line.memberId], reason: '月末餘額＝補入額＋淨變動');
+      expect(line.ending, line.topup + line.net);
+    }
+    expect(preview.sharedDelta, 0, reason: '代墊不動共同餘額');
+    expect(preview.warnings, hasLength(1));
+    expect(preview.warnings.single.code, 'unsplit_advances');
+    expect(preview.warnings.single.count, 1);
+
+    final closed = await env.asA.closeMonth(env.ledgerId, month);
+    expect(closed.month, month);
+    expect(closed.closedBy, env.memberA);
+    expect(closed.details.warnings, isEmpty, reason: '落地的快照不帶 warnings');
+    expect(
+      closed.details.members.map((l) => l.ending).toList(),
+      preview.members.map((l) => l.ending).toList(),
+      reason: '預覽與落地是同一段算式',
+    );
+
+    final rows = await env.asA.fetchMonthCloses(env.ledgerId);
+    expect(rows, hasLength(1));
+    expect(rows.single.month, month);
+
+    // 同月只能清一次。
+    await expectLater(
+      env.asA.closeMonth(env.ledgerId, month),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('已清帳'))),
+    );
+
+    // 該月（與更早月份）鎖住：新增／修改都擋。
+    createdEntryIds.remove(loose.id); // 該月已鎖，清不掉
+    await expectLater(
+      env.asA.upsertEntry(newSharedExpense(
+        amount: 300,
+        note: '補記到已清帳的月份',
+        occurredOn: lastMonthDay(5),
+      )),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('該月已清帳'))),
+    );
+
+    // 已清月的帳目連細項都不能動（DB 的 `a_line_items_month_closed_trg` 看父筆的 occurred_on）。
+    // ADR-0002 允許已結帳的帳目改細項，但鎖月比它更外層。
+    await expectLater(
+      env.asA.replaceLineItems(entry.id, const [
+        LineItem(id: '', entryId: '', name: '清帳後才想補的細項', amount: 100, sort: 0),
+      ]),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('該月已清帳'))),
+    );
+
+    // 同一筆同時踩到「已結帳」與「已清帳」時，兩個實作要吐同一句——順序照真 DB：
+    // `upsert_entry` RPC 自己的子表守衛在 UPDATE 之前，所以先看到 settled；
+    final settledEntry =
+        (await env.asA.fetchEntries(env.ledgerId)).firstWhere((e) => e.id == entry.id);
+    expect(settledEntry.settledState, SettledState.settled);
+    await expectLater(
+      env.asA.upsertEntry(settledEntry.copyWith(note: '改備註順便重寫子表')),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', '這筆已結帳，只能改分類與備註')),
+    );
+    // ……不碰子表時才走到 UPDATE，這時鎖月的 `a_` trigger 排在欄位鎖定之前。
+    await expectLater(
+      env.asA.upsertEntry(settledEntry.copyWith(amount: 2000),
+          writeSplits: false, writeLineItems: false),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', contains('該月已清帳'))),
+    );
+  });
+
+  test('清帳組裝：清完上月之後 monthSummary 的個人餘額回到「每月補入額」', () async {
+    // 這條是「repository 的兩支清帳方法真的接到 month_summary 上」的唯一守衛：
+    // 清帳把整個月從個人餘額公式裡移除，畫面上的數字必須跟著回到補入額。
+    final me = (await env.asA.fetchMembers(env.ledgerId)).firstWhere((m) => m.id == env.memberA);
+    await env.asA.updateMember(Member(
+      id: me.id,
+      ledgerId: me.ledgerId,
+      userId: me.userId,
+      displayName: me.displayName,
+      monthlyTopup: 10000,
+      openingBalancePersonal: me.openingBalancePersonal,
+      joinedAt: me.joinedAt,
+    ));
+
+    final entry = await saveLastMonthAdvance();
+    final month = prevMonth(thisMonth());
+    final pending = await env.asA.initiateSettlement(env.ledgerId);
+    await env.asB.approveSettlement(pending.id);
+    createdEntryIds.remove(entry.id);
+
+    // 清帳前的補入額月份數：[加入月, 本月] 兩端含（記憶體替身的假資料是上月加入、
+    // Supabase 版是這條測試當場建的帳本＝本月加入，所以這裡照 joined_at 算，不寫死）。
+    var months = 0;
+    for (var m = monthOf(me.joinedAt); !m.isAfter(thisMonth()); m = nextMonth(m)) {
+      months++;
+    }
+
+    final endOfThisMonth = DateTime(thisMonth().year, thisMonth().month + 1, 0);
+    final before = await env.asA.monthSummary(env.ledgerId, endOfThisMonth);
+    expect(before.memberId, env.memberA);
+    expect(before.monthlyTopup, 10000);
+    expect(before.personalBalance, 10000 * months - 500,
+        reason: '上月的份額還在公式裡（本月沒有任何帳目）');
+
+    await env.asA.closeMonth(env.ledgerId, month);
+
+    final after = await env.asA.monthSummary(env.ledgerId, endOfThisMonth);
+    expect(after.personalBalance, 10000, reason: '上月整段移出公式，只剩本月的補入額');
+    expect(after.monthNet, 0, reason: '本月沒有任何帳目');
+    expect(after.sharedBalance, before.sharedBalance, reason: '清帳不動共同餘額');
+  });
+
   test('非成員讀不到別人的帳本', () async {
     if (!env.enforcesMembership) {
       markTestSkipped('記憶體實作沒有 RLS，這條只在 Supabase 契約下有意義');
@@ -592,12 +874,9 @@ void strangerTests() {
   });
 }
 
-/// Supabase 專屬：DB 的 check constraint 打回來時要變成看得懂的中文。
-///
-/// 模型的不變式讓「代墊＋budget」根本組不出 [Entry]，所以這裡直接對 RPC 送壞 payload，
-/// 驗的是**錯誤轉譯**這一段（第二道防線真的被踩到時使用者看到什麼）。
+/// Supabase 專屬：直接對 RPC 送 payload，驗前端模型層看不到的那一段 DB 行為。
 void supabaseOnlyTests() {
-  test('代墊＋funding=budget 被 DB 打回，轉成可讀的中文錯誤', () async {
+  test('v1.4：舊 build 送出多餘的鍵時 DB 直接忽略（jsonb 多餘鍵不影響 upsert_entry）', () async {
     final env = await SupabaseEnv.create();
     addTearDown(env.dispose);
     final snap = await env.asA.loadSnapshot(env.ledgerId);
@@ -606,44 +885,27 @@ void supabaseOnlyTests() {
     final occurredOn =
         '${now.year.toString().padLeft(4, '0')}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
 
-    Object? caught;
-    try {
-      await env.clientA.rpc<dynamic>('upsert_entry', params: {
-        'p_entry': {
-          'ledger_id': env.ledgerId,
-          'kind': 'expense',
-          'scope': 'shared',
-          'amount': 500,
-          'category_id': categoryId,
-          'occurred_on': occurredOn,
-          'note': '代墊卻想吃信封',
-          'payer_id': env.memberA,
-          'split_method': 'equal',
-          'funding': 'budget',
-        },
-      });
-    } on PostgrestException catch (e) {
-      caught = e;
-    }
-    expect(caught, isNotNull, reason: 'DB 必須擋下代墊筆走信封');
-    expect((caught! as PostgrestException).message,
-        contains('entries_funding_common_wallet_only'));
-
-    // 對照組：共同錢包的共同支出走信封是合法的，不該被同一條 check 擋住。
-    final legal = await env.asA.upsertEntry(Entry(
-      id: '',
-      ledgerId: env.ledgerId,
-      kind: EntryKind.expense,
-      scope: EntryScope.shared,
-      amount: 500,
-      categoryId: categoryId,
-      occurredOn: DateTime(now.year, now.month, now.day),
-      createdBy: env.memberA,
-      note: '共同錢包吃信封（合法）',
-      funding: Funding.budget,
-    ));
-    expect(legal.funding, Funding.budget);
-    await env.asA.removeEntry(legal.id);
+    // 資金來源欄與它的 enum 在 0027 已 drop；雲端逐支套用期間，
+    // 舊版 build 還是可能送已經不存在的欄位——jsonb 的多餘鍵本來就不影響，這條把它釘住。
+    final row = await env.clientA.rpc<dynamic>('upsert_entry', params: {
+      'p_entry': {
+        'ledger_id': env.ledgerId,
+        'kind': 'expense',
+        'scope': 'shared',
+        'amount': 500,
+        'category_id': categoryId,
+        'occurred_on': occurredOn,
+        'note': '舊 build 還在送已經不存在的欄位',
+        'payer_id': env.memberA,
+        'split_method': 'common',
+        'obsolete_column': 'budget',
+      },
+    });
+    final id = requireId(row);
+    final saved = (await env.asA.fetchEntries(env.ledgerId)).firstWhere((e) => e.id == id);
+    expect(saved.amount, 500);
+    expect(saved.toJson().containsKey('obsolete_column'), isFalse);
+    await env.asA.removeEntry(id);
   });
 }
 

@@ -1,3 +1,4 @@
+import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/stats/pie_card.dart';
 import 'package:accounting/features/stats/stats_colors.dart';
 import 'package:accounting/features/stats/trend_card.dart';
@@ -50,12 +51,17 @@ void main() {
 
   group('TrendLine', () {
     test('legend 順序固定，餘額預設收起、其餘預設展開', () {
-      // balance 標籤不依視角變：家庭與個人都叫「可用餘額」（spec：個人視角＝
-      // 個人可用餘額），見 stats_page_test.dart 對「線別過濾拿掉」變異的守衛。
-      expect(TrendLine.values.map((l) => l.label).toList(), ['花費', '超支', '可用餘額']);
+      expect(TrendLine.values, [TrendLine.spend, TrendLine.over, TrendLine.balance]);
       expect(TrendLine.spend.initiallyVisible, isTrue);
       expect(TrendLine.over.initiallyVisible, isTrue);
       expect(TrendLine.balance.initiallyVisible, isFalse);
+    });
+
+    test('balance 標籤依視角變（v1.4，ADR-0008）：家庭「共同餘額」、個人「個人餘額」', () {
+      expect(TrendLine.values.map((l) => l.labelFor(ViewMode.family)).toList(),
+          ['花費', '超支', '共同餘額']);
+      expect(TrendLine.values.map((l) => l.labelFor(ViewMode.personal)).toList(),
+          ['花費', '超支', '個人餘額']);
     });
   });
 

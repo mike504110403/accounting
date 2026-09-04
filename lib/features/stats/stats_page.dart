@@ -13,7 +13,8 @@ import 'trend_card.dart';
 import 'trend_math.dart';
 import 'view_math.dart';
 
-/// 統計頁：月摘要、支出圓餅、三條趨勢線；家庭／個人兩視角（ADR-0003、ADR-0007）。
+/// 統計頁：月摘要、支出圓餅、趨勢線；家庭三條（花費／共同餘額／超支）、個人兩條
+/// （花費／個人餘額）（ADR-0003、ADR-0008）。
 class StatsPage extends ConsumerStatefulWidget {
   const StatsPage({super.key});
 
@@ -64,7 +65,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final categories = ref.watch(categoriesProvider);
     final entries = ref.watch(entriesProvider);
     final allocations = ref.watch(allocationsProvider);
-    final settlements = ref.watch(settlementsProvider);
+    final closes = ref.watch(monthClosesProvider);
 
     Member? found;
     for (final m in members) {
@@ -76,31 +77,65 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final personal = _mode == ViewMode.personal;
     final items = viewEntries(entries, _mode, me, ledger.defaultRatio);
 
-    // 可用餘額（ADR-0007，v1.3）：家庭＝共同可用餘額、個人＝個人可用餘額。
-    // 月摘要與趨勢的餘額線吃同一個函式，避免兩處各自判斷視角、算出兩套答案。
-    final int Function(DateTime until) balanceAt = personal
-        ? (until) => meMember == null
-            ? 0
-            : personalAvailable(
-                member: meMember,
-                entries: entries,
-                settlements: settlements,
-                until: until,
-              )
-        : (until) => sharedAvailable(
-              ledger: ledger,
-              entries: entries,
-              allocations: allocations,
-              until: until,
-            );
+    // 餘額（ADR-0008，v1.4）：家庭＝共同餘額、個人＝個人餘額（額度制）。
+    //
+    // 個人餘額有一個 DB 模型必然的月份語意（spec v1.4「個人餘額」「清帳」）：清帳把
+    // 該月從公式移除，所以問「已清帳月份」不管是即時公式還是 server `month_summary`
+    // 恆得到 0——這不是 bug，是清帳的定義；該月唯一還留著的事實是清帳當下寫進
+    // `MonthClose.details` 的快照（`ending`）。**只有這個月真的有一列清帳紀錄時**才
+    // 改讀快照，蓋過即時公式與 server 值；快照裡找不到本人（有列，但那一列沒有本人
+    // 這一行——資料異常）不假裝有一個算得出來的數字。
+    //
+    // 「≤ 最後清帳月但這個月本身沒有列」（帳本開始前的前史月份）刻意不算「有清帳」：
+    // 落回即時公式，公式自己會因為 `isMonthClosed` 的級聯定義把這種月份的 N 與淨變動
+    // 都算成 0——「這個月你根本還沒存在」跟「這個月清過帳、找不到你」是兩回事，
+    // 前者該顯示 0，後者才顯示「—」。
+    int familyBalanceAt(DateTime until) =>
+        sharedBalance(ledger: ledger, entries: entries, until: until);
+    int personalFormulaAt(DateTime until) => meMember == null
+        ? 0
+        : personalBalance(
+            member: meMember,
+            entries: entries,
+            closes: closes,
+            until: until,
+            joinedMonth: monthOf(meMember.joinedAt),
+          );
+    bool hasCloseRow(DateTime until) => closes.any((c) => sameMonth(c.month, until));
 
-    // 月摘要卡的可用餘額改吃 DB month_summary（Mike 裁示 2026-09-03）；趨勢線的
+    // 月摘要卡永遠是「月」層級。
+    final cardUntil = lastDayOfMonth(_month);
+    final cardClosed = personal && meMember != null && hasCloseRow(cardUntil);
+
+    // 月摘要卡的餘額改吃 DB month_summary（Mike 裁示 2026-09-03）；趨勢線的
     // 逐桶餘額仍是前端依 server 列現算（逐桶打 RPC 成本過高，已記驗證債）。
-    final server = ref.watch(monthSummaryProvider(lastDayOfMonth(_month))).value;
-    final int Function(DateTime until) cardBalanceAt = server == null
-        ? balanceAt
-        : (_) => personal ? (server.personalBalance ?? 0) : server.sharedAvailable;
-    final summary = monthSummary(items: items, month: _month, balanceAt: cardBalanceAt);
+    final server = ref.watch(monthSummaryProvider(cardUntil)).value;
+    // null＝已清帳但快照裡找不到本人，_SummaryCard 直接讀 summary.balance == null
+    // 顯示「—」，不另外傳一個獨立的 dash 旗標。
+    final int? cardBalance = !personal
+        ? (server?.sharedBalance ?? familyBalanceAt(cardUntil))
+        : cardClosed
+            ? closedEndingFor(closes, meMember.id, cardUntil)
+            : (server?.personalBalance ?? personalFormulaAt(cardUntil));
+    final summary = monthSummary(items: items, month: _month, balance: cardBalance);
+    // 看未來月：個人餘額（即時公式與 server 皆同）以「今天所在月」為上界，等於
+    // 「不含未來補入額」的保守投影（spec v1.4「個人餘額」N 的定義）；卡片加一行小字
+    // 提醒，不是另一套算法。家庭視角未來月無小字（共同餘額沒有「未來補入額」這回事）。
+    final showProjectionNote = personal && _month.isAfter(monthOf(DateTime.now()));
+
+    // 趨勢線的餘額：家庭恆用即時公式；個人「這個月有清帳列」時只有「月」顆粒度用
+    // 快照——日／週／年顆粒度落在那個月的桶不畫點（`null`＝線斷開，見
+    // Bucket.balance），快照是整月一筆事實，硬塞進更細的顆粒度會變成同一個數字
+    // 連續畫好幾點，誤導使用者。前史月份（沒有清帳列）一律落回即時公式（見上）。
+    final int? Function(DateTime until) trendBalanceAt = personal
+        ? (until) {
+            if (meMember != null && hasCloseRow(until)) {
+              if (_granularity != Granularity.month) return null;
+              return closedEndingFor(closes, meMember.id, until);
+            }
+            return personalFormulaAt(until);
+          }
+        : familyBalanceAt;
 
     final weeks = weekRangesOfMonth(_month);
     final week = _resolveWeek(weeks);
@@ -119,12 +154,11 @@ class _StatsPageState extends ConsumerState<StatsPage> {
         if (c.kind == EntryKind.expense) c,
     ];
 
-    // 超支線的視角差異（ADR-0007）：家庭＝當月超支合計；個人沒有信封，恆 0。
-    // 餘額線與月摘要共用上面算好的 balanceAt。
+    // 超支線的視角差異（ADR-0008，v1.4）：家庭＝當月超支合計；個人沒有預算，恆 0。
     final trendInput = TrendInput(
       items: items,
       categories: categories,
-      balanceAt: balanceAt,
+      balanceAt: trendBalanceAt,
       overspendAt: personal
           ? (_) => 0
           : (until) => totalOverspend(
@@ -157,7 +191,11 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           // 左右留白由 theme 的 cardTheme.margin（h16）提供，這裡只給上下。
           padding: const EdgeInsets.fromLTRB(0, 10, 0, 32),
           children: [
-            _SummaryCard(summary: summary),
+            _SummaryCard(
+              summary: summary,
+              mode: _mode,
+              showProjectionNote: showProjectionNote,
+            ),
             PieCard(
               // 月模式不給副標：期間就是 AppBar 那個月，而「整月」已寫在切換鍵上。
               periodLabel: _weekly ? weekRangeLabel(week) : null,
@@ -214,6 +252,27 @@ class _StatsPageState extends ConsumerState<StatsPage> {
   }
 }
 
+/// [until] 所在月的清帳快照裡，[memberId] 的月末餘額（spec v1.4「個人餘額」
+/// 「清帳」，ADR-0008）。
+///
+/// **只能在確定 [until] 所在月真的有一列清帳紀錄時呼叫**（呼叫端自己先判斷，
+/// 例如 `closes.any((c) => sameMonth(c.month, until))`）——這裡不重新判斷「有沒有
+/// 清帳」，只管「那一列裡有沒有這個人」。首次可清月之前的前史月份沒有列，那是
+/// 呼叫端該用即時公式（自然算出 0）的情況，不歸這個函式管，見呼叫端註解。
+///
+/// 找不到本人（有列，但那一列沒有這個人這一行——資料異常，理論上不會發生）回傳
+/// null，呼叫端顯示「—」，不假裝有一個算得出來的數字。
+int? closedEndingFor(List<MonthClose> closes, String memberId, DateTime until) {
+  for (final c in closes) {
+    if (!sameMonth(c.month, until)) continue;
+    for (final line in c.details.members) {
+      if (line.memberId == memberId) return line.ending;
+    }
+    return null; // 找到列，但那一列沒有本人
+  }
+  return null; // 防禦性寫法：呼叫端理論上已保證這裡一定找得到列
+}
+
 /// 桌面寬度不爆版：內容置中並限寬 560。
 class _Centered extends StatelessWidget {
   const _Centered({required this.child});
@@ -228,9 +287,20 @@ class _Centered extends StatelessWidget {
 }
 
 class _SummaryCard extends StatelessWidget {
-  const _SummaryCard({required this.summary});
+  const _SummaryCard({
+    required this.summary,
+    required this.mode,
+    required this.showProjectionNote,
+  });
 
   final MonthSummary summary;
+
+  /// balance 格的字面依視角借用趨勢 legend 的同一個 label（v1.4）：家庭「共同餘額」、
+  /// 個人「個人餘額」——兩處同一個量、同一個 source，不會各自漂移。
+  final ViewMode mode;
+
+  /// 看未來月時加一行小字提醒：這個數字不含未來月的補入額（見 [_StatsPageState.build]）。
+  final bool showProjectionNote;
 
   @override
   Widget build(BuildContext context) {
@@ -238,7 +308,7 @@ class _SummaryCard extends StatelessWidget {
     final cs = theme.colorScheme;
     return StatsCard(
       title: '月摘要',
-      // 兩行各兩格（Mike 裁示 2026-09-03）：上行收入／支出、下行損益／可用餘額。
+      // 兩行各兩格（Mike 裁示 2026-09-03）：上行收入／支出、下行損益／餘額。
       child: Column(
         key: const Key('month-summary'),
         children: [
@@ -256,11 +326,24 @@ class _SummaryCard extends StatelessWidget {
                 value: summary.net,
                 color: summary.net >= 0 ? cs.primary : cs.error,
               ),
-              // 標籤字只留一份：直接借趨勢餘額線的 label，不依視角變（個人視角也是
-              // 「個人可用餘額」），兩處同字用同一個 source，不會各自漂移。
-              _Figure(label: TrendLine.balance.label, value: summary.balance, color: cs.onSurface),
+              _Figure(
+                label: TrendLine.balance.labelFor(mode),
+                value: summary.balance,
+                color: cs.onSurface,
+              ),
             ],
           ),
+          if (showProjectionNote) ...[
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                '投影（不含未來補入額）',
+                key: const Key('personal-balance-projection-note'),
+                style: theme.textTheme.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -271,7 +354,9 @@ class _Figure extends StatelessWidget {
   const _Figure({required this.label, required this.value, required this.color});
 
   final String label;
-  final int value;
+
+  /// `null`＝顯示「—」代替一個數字（已清帳月快照裡找不到本人，資料異常）。
+  final int? value;
   final Color color;
 
   @override
@@ -291,7 +376,7 @@ class _Figure extends StatelessWidget {
             fit: BoxFit.scaleDown,
             alignment: Alignment.centerLeft,
             child: Text(
-              fmtAmount(value),
+              value == null ? '—' : fmtAmount(value!),
               style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w700, color: color, fontFeatures: kTabularFigures),
             ),

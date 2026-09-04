@@ -12,9 +12,6 @@ enum SettledState { open, settling, settled }
 
 enum SettlementStatus { pending, settled, void_ }
 
-/// 資金來源（v1.3／ADR-0007）：共同錢包的共同支出可從信封（budget）出，其餘一律走餘額。
-enum Funding { balance, budget }
-
 /// 統計視角：家庭（僅 shared）／個人（private ＋ 我在 shared 的份額）。
 enum ViewMode { family, personal }
 
@@ -116,6 +113,8 @@ class Member {
     required this.ledgerId,
     required this.userId,
     required this.displayName,
+    required this.joinedAt,
+    this.monthlyTopup = 0,
     this.openingBalancePersonal = 0,
   });
 
@@ -124,21 +123,37 @@ class Member {
         ledgerId: j['ledger_id'] as String,
         userId: j['user_id'] as String,
         displayName: j['display_name'] as String,
+        // 缺鍵當 0：DB 有 default 0，但舊版 build／記憶體替身可能不帶這個鍵。
+        monthlyTopup: (j['monthly_topup'] as num?)?.toInt() ?? 0,
         openingBalancePersonal: (j['opening_balance_personal'] as num?)?.toInt() ?? 0,
+        // `members.joined_at` 是 not null，缺鍵只會是「舊 build／替身沒帶」。
+        // fallback 取 epoch 而不是 now()：加入月落在遠古 ＝ 每個月都有補入額，
+        // 寧可多算也不要因為「今天」而讓歷史月份的補入額整批消失（少算才是對不平的那一邊）。
+        joinedAt: _tsOrNull(j['joined_at']) ?? DateTime(1970),
       );
 
   final String id;
   final String ledgerId;
   final String userId;
   final String displayName;
+
+  /// 每月補入額（v1.4／ADR-0008）：從加入帳本那個月起，每個未清帳月份加一次。
+  final int monthlyTopup;
+
+  /// **v1.4 起廢用**：欄位仍在 DB（跨版本並存），但不進任何公式、也不再送 update。
   final int openingBalancePersonal;
+
+  /// `members.joined_at`；補入額從這個月開始算（呼叫端以本地時區取月初）。
+  final DateTime joinedAt;
 
   Map<String, dynamic> toJson() => {
         'id': id,
         'ledger_id': ledgerId,
         'user_id': userId,
         'display_name': displayName,
+        'monthly_topup': monthlyTopup,
         'opening_balance_personal': openingBalancePersonal,
+        'joined_at': joinedAt.toIso8601String(),
       };
 }
 
@@ -238,10 +253,8 @@ class EntrySplit {
 }
 
 class Entry {
-  /// 不變式（ADR-0007，DB 也有 check）：`funding == budget` 只允許共同錢包
-  /// （`payerId == null`）的共同支出（`scope == shared && kind == expense`）。
-  /// 前端先擋，違反直接丟 [ArgumentError]——讓錯誤停在建構點，不要流到 DB 才炸。
-  Entry({
+  /// v1.4（ADR-0008）起沒有「資金來源」：所有支出都是餘額支出，預算只是影子紀錄。
+  const Entry({
     required this.id,
     required this.ledgerId,
     required this.kind,
@@ -255,20 +268,10 @@ class Entry {
     this.splitMethod = SplitMethod.common,
     this.settledState = SettledState.open,
     this.isAdjustment = false,
-    this.funding = Funding.balance,
     this.createdAt,
     this.lineItems = const [],
     this.splits = const [],
-  }) {
-    if (funding == Funding.budget &&
-        !(payerId == null && scope == EntryScope.shared && kind == EntryKind.expense)) {
-      throw ArgumentError.value(
-        funding,
-        'funding',
-        'funding=budget 只允許共同錢包（payer 為空）的共同支出',
-      );
-    }
-  }
+  });
 
   factory Entry.fromJson(Map<String, dynamic> j) => Entry(
         id: j['id'] as String,
@@ -284,7 +287,6 @@ class Entry {
         splitMethod: _enumOf(SplitMethod.values, j['split_method'], 'split_method'),
         settledState: _enumOf(SettledState.values, j['settled_state'], 'settled_state'),
         isAdjustment: (j['is_adjustment'] as bool?) ?? false,
-        funding: _enumOf(Funding.values, j['funding'] ?? 'balance', 'funding'),
         createdAt: j['created_at'] == null ? null : DateTime.tryParse(j['created_at'] as String),
         // Supabase select 的巢狀寫法：`entries(*, line_items(*), entry_splits(*))`。
         lineItems: [
@@ -315,9 +317,6 @@ class Entry {
   final SettledState settledState;
   final bool isAdjustment;
 
-  /// 資金來源：從信封出還是從共同可用餘額出（ADR-0007）。
-  final Funding funding;
-
   /// DB 的 created_at（列表預設排序鍵：建立時間倒序）；記憶體 mock／未回傳時為 null。
   final DateTime? createdAt;
   final List<LineItem> lineItems;
@@ -325,9 +324,6 @@ class Entry {
 
   bool get isExpense => kind == EntryKind.expense;
   bool get fromCommonWallet => payerId == null || splitMethod == SplitMethod.common;
-
-  /// 從信封（預算）出的共同支出；不變式保證它必然是共同錢包的共同支出。
-  bool get fromBudget => funding == Funding.budget;
 
   /// settled 後金額／payer／split 鎖住（ADR-0002）。
   bool get amountLocked => settledState == SettledState.settled;
@@ -346,7 +342,6 @@ class Entry {
         'split_method': _enumName(splitMethod),
         'settled_state': _enumName(settledState),
         'is_adjustment': isAdjustment,
-        'funding': _enumName(funding),
         'line_items': [for (final x in lineItems) x.toJson()],
         'entry_splits': [for (final x in splits) x.toJson()],
       };
@@ -367,7 +362,6 @@ class Entry {
         'payer_id': payerId,
         'split_method': _enumName(splitMethod),
         'is_adjustment': isAdjustment,
-        'funding': _enumName(funding),
       };
 
   Entry copyWith({
@@ -380,7 +374,6 @@ class Entry {
     SplitMethod? splitMethod,
     SettledState? settledState,
     EntryScope? scope,
-    Funding? funding,
     List<LineItem>? lineItems,
     List<EntrySplit>? splits,
   }) {
@@ -398,7 +391,6 @@ class Entry {
       splitMethod: splitMethod ?? this.splitMethod,
       settledState: settledState ?? this.settledState,
       isAdjustment: isAdjustment,
-      funding: funding ?? this.funding,
       lineItems: lineItems ?? this.lineItems,
       splits: splits ?? this.splits,
     );
@@ -467,8 +459,8 @@ class Settlement {
       };
 }
 
-/// 一次手動撥款／退回（ADR-0007，取代 `Budget`）。[amount] 可負（＝退回）。
-/// 信封只看當月：同分類同月的所有列相加＝該月撥款，不跨月。
+/// 一個分類某個月的預算（v1.4／ADR-0008：影子紀錄，不是錢）。
+/// **每分類每月至多一列**、[amount] 必須 > 0，設定後不可改、不可刪、不可退回；不跨月。
 class BudgetAllocation {
   const BudgetAllocation({
     required this.id,
@@ -494,7 +486,7 @@ class BudgetAllocation {
   final String ledgerId;
   final String categoryId;
 
-  /// 整數元，可負（退回），DB check 保證 ≠ 0。
+  /// 整數元，DB check 保證 > 0。
   final int amount;
   final DateTime occurredOn;
   final String note;
@@ -570,5 +562,145 @@ class ListItem {
         'done_at': _tsStrOrNull(doneAt),
         'entry_id': entryId,
         'sort': sort,
+      };
+}
+
+// ── 月清帳（v1.4／ADR-0008）─────────────────────────────────────────────
+
+/// 清帳預覽的結構化提醒（`month_close_preview` 的 `warnings`，DB 不回中文句子）。
+class CloseWarning {
+  const CloseWarning({required this.code, required this.count});
+
+  factory CloseWarning.fromJson(Map<String, dynamic> j) => CloseWarning(
+        code: j['code'] as String,
+        count: (j['count'] as num).toInt(),
+      );
+
+  /// 目前只有 `unsplit_advances`（該月有幾筆沒有分攤列的代墊）。
+  final String code;
+  final int count;
+
+  Map<String, dynamic> toJson() => {'code': code, 'count': count};
+}
+
+/// 清帳明細裡的一位成員（`month_closes.details.members[]`）。
+///
+/// [net]／[ending] 在 DB 是 bigint（一個月的加總越得過 int 上界），Dart 的 int 是 64-bit，照收。
+class MonthCloseMemberLine {
+  const MonthCloseMemberLine({
+    required this.memberId,
+    required this.displayName,
+    required this.topup,
+    required this.net,
+    required this.ending,
+  });
+
+  factory MonthCloseMemberLine.fromJson(Map<String, dynamic> j) => MonthCloseMemberLine(
+        memberId: j['member_id'] as String,
+        displayName: j['display_name'] as String,
+        topup: (j['topup'] as num).toInt(),
+        net: (j['net'] as num).toInt(),
+        ending: (j['ending'] as num).toInt(),
+      );
+
+  final String memberId;
+  final String displayName;
+
+  /// 該月補入額（加入月之前為 0）。
+  final int topup;
+
+  /// 該月淨變動。
+  final int net;
+
+  /// 月末餘額＝[topup] ＋ [net]。> 0 → 該成員轉錢給共同帳戶；< 0 → 共同帳戶補他。
+  final int ending;
+
+  Map<String, dynamic> toJson() => {
+        'member_id': memberId,
+        'display_name': displayName,
+        'topup': topup,
+        'net': net,
+        'ending': ending,
+      };
+}
+
+/// 一份清帳明細：`month_close_preview` 的回傳，也是 `month_closes.details` 的形狀。
+///
+/// [warnings] 只出現在預覽（落地的 `details` 不帶）；缺鍵時是空清單。
+class MonthCloseDetails {
+  const MonthCloseDetails({
+    required this.month,
+    required this.members,
+    required this.sharedDelta,
+    this.warnings = const [],
+  });
+
+  factory MonthCloseDetails.fromJson(Map<String, dynamic> j) => MonthCloseDetails(
+        month: _date(j['month']),
+        members: [
+          for (final x in (j['members'] as List?) ?? const [])
+            MonthCloseMemberLine.fromJson(Map<String, dynamic>.from(x as Map)),
+        ],
+        sharedDelta: (j['shared_delta'] as num?)?.toInt() ?? 0,
+        warnings: [
+          for (final x in (j['warnings'] as List?) ?? const [])
+            CloseWarning.fromJson(Map<String, dynamic>.from(x as Map)),
+        ],
+      );
+
+  /// 被清的那個月（月初）。
+  final DateTime month;
+  final List<MonthCloseMemberLine> members;
+
+  /// 該月共同餘額變動（僅供對照，清帳不動共同餘額）。
+  final int sharedDelta;
+  final List<CloseWarning> warnings;
+
+  Map<String, dynamic> toJson() => {
+        'month': _dateStr(month),
+        'members': [for (final m in members) m.toJson()],
+        'shared_delta': sharedDelta,
+        'warnings': [for (final w in warnings) w.toJson()],
+      };
+}
+
+/// 一次清帳（`month_closes` 一列）。前端只讀，只能經 `close_month` RPC 寫入、不可撤銷。
+class MonthClose {
+  const MonthClose({
+    required this.id,
+    required this.ledgerId,
+    required this.month,
+    required this.closedBy,
+    required this.closedAt,
+    required this.details,
+  });
+
+  factory MonthClose.fromJson(Map<String, dynamic> j) => MonthClose(
+        id: j['id'] as String,
+        ledgerId: j['ledger_id'] as String,
+        month: _date(j['month']),
+        closedBy: j['closed_by'] as String,
+        closedAt: _ts(j['closed_at']),
+        details: MonthCloseDetails.fromJson(Map<String, dynamic>.from(j['details'] as Map)),
+      );
+
+  final String id;
+  final String ledgerId;
+
+  /// 被清的那個月（月初）。
+  final DateTime month;
+  final String closedBy;
+  final DateTime closedAt;
+
+  /// 清帳當下的事實快照（之後改補入額也不動它）。
+  final MonthCloseDetails details;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'ledger_id': ledgerId,
+        'month': _dateStr(month),
+        'closed_by': closedBy,
+        'closed_at': closedAt.toIso8601String(),
+        'details': details.toJson()..remove('warnings'),
       };
 }

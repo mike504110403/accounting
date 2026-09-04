@@ -25,10 +25,10 @@ void main() {
   group('buildEntryFromItems', () {
     final date = DateTime(2026, 9, 2);
 
-    const me = Member(id: 'm-1', ledgerId: 'ledger', userId: 'u1', displayName: 'Mike');
-    const wife = Member(id: 'm-2', ledgerId: 'ledger', userId: 'u2', displayName: '老婆');
+    final me = Member(id: 'm-1', ledgerId: 'ledger', userId: 'u1', displayName: 'Mike', joinedAt: DateTime(1970));
+    final wife = Member(id: 'm-2', ledgerId: 'ledger', userId: 'u2', displayName: '老婆', joinedAt: DateTime(1970));
 
-    test('結帳方式：成員代墊＋均分 → payer/splits/method 正確、funding 一律 balance', () {
+    test('結帳方式：成員代墊＋均分 → payer/splits/method 正確', () {
       final entry = buildEntryFromItems(
         items: [l1, l2],
         actuals: {'l1': 100, 'l2': 100},
@@ -37,17 +37,12 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-1',
-        allocations: [
-          // 該月有撥款：若 funding 沒被強制 balance，這裡會誤判成 budget
-          BudgetAllocation(id: 'a1', ledgerId: 'ledger', categoryId: 'c-food', amount: 1000, occurredOn: date, createdBy: 'm-1'),
-        ],
         payerId: 'm-1',
         splitMethod: SplitMethod.equal,
-        members: const [me, wife],
+        members: [me, wife],
       );
       expect(entry.payerId, 'm-1');
       expect(entry.splitMethod, SplitMethod.equal);
-      expect(entry.funding, Funding.balance, reason: '代墊不可走預算（Entry 不變式）');
       expect(entry.splits.length, 2);
       expect(entry.splits.map((s) => s.share).reduce((a, b) => a + b), 200);
     });
@@ -61,32 +56,13 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-1',
-        allocations: const [],
         payerId: 'm-2',
         splitMethod: SplitMethod.amount,
-        members: const [me, wife],
+        members: [me, wife],
         manual: const {'m-1': 120, 'm-2': 180},
       );
       expect(entry.splits.firstWhere((s) => s.memberId == 'm-1').share, 120);
       expect(entry.splits.firstWhere((s) => s.memberId == 'm-2').share, 180);
-    });
-
-    test('結帳方式：共同錢包可指定 funding（覆蓋 defaultFunding）', () {
-      final entry = buildEntryFromItems(
-        items: [l1],
-        actuals: {'l1': 100},
-        total: 100,
-        categoryId: 'c-food',
-        date: date,
-        ledgerId: 'ledger',
-        me: 'm-1',
-        allocations: const [], // 無撥款 → default 是 balance
-        funding: Funding.budget, // 但 DB check 擋不擋是後端的事；這裡驗參數會被帶上
-      );
-      expect(entry.payerId, isNull);
-      expect(entry.splitMethod, SplitMethod.common);
-      expect(entry.funding, Funding.budget);
-      expect(entry.splits, isEmpty);
     });
 
     test('組裝共同支出：金額用 actuals，缺項回退 estimated，note 用店家名', () {
@@ -98,7 +74,6 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
-        allocations: const [],
       );
       expect(entry.kind, EntryKind.expense);
       expect(entry.scope, EntryScope.shared);
@@ -126,7 +101,6 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
-        allocations: const [],
       );
       expect(entry.note, '購物');
     });
@@ -141,15 +115,13 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
-        allocations: const [],
       );
       expect(entry.lineItems.single.amount, 0);
     });
 
-    test('分類本月有撥款 → funding=budget', () {
-      final allocations = [
-        BudgetAllocation(id: 'a-1', ledgerId: 'ledger', categoryId: 'c-food', amount: 3000, occurredOn: DateTime(2026, 9, 1), createdBy: 'm-mike'),
-      ];
+    test('v1.4：不再吃 allocations 參數，也不再有資金來源（ADR-0008）', () {
+      // 舊版靠 `allocations` 參數判斷該分類本月是否有撥款來決定資金來源；
+      // v1.4 起參數與欄位都整個拿掉，這裡驗證組裝結果不再帶它。
       final entry = buildEntryFromItems(
         items: [l1, l2],
         actuals: {'l1': 100},
@@ -158,26 +130,9 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
-        allocations: allocations,
       );
-      expect(entry.funding, Funding.budget);
-    });
-
-    test('分類本月無撥款 → funding=balance', () {
-      final allocations = [
-        BudgetAllocation(id: 'a-1', ledgerId: 'ledger', categoryId: 'c-daily', amount: 3000, occurredOn: DateTime(2026, 9, 1), createdBy: 'm-mike'),
-      ];
-      final entry = buildEntryFromItems(
-        items: [l1, l2],
-        actuals: {'l1': 100},
-        total: 180,
-        categoryId: 'c-food',
-        date: date,
-        ledgerId: 'ledger',
-        me: 'm-mike',
-        allocations: allocations,
-      );
-      expect(entry.funding, Funding.balance);
+      expect(entry.categoryId, 'c-food');
+      expect(entry.amount, 180);
     });
   });
 

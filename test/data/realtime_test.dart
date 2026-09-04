@@ -122,10 +122,11 @@ void main() {
   test('budget_allocation 事件 → 重抓撥款', () async {
     final before = container.read(allocationsProvider).length;
     final now = DateTime.now();
+    // 每分類每月只能設定一次：假資料本月的食品／餐飲…都設過了，挑一個沒設過的分類。
     await repo.addAllocation(BudgetAllocation(
       id: '',
       ledgerId: kLedgerId,
-      categoryId: 'c-food',
+      categoryId: 'c-fun',
       amount: 1234,
       occurredOn: DateTime(now.year, now.month, 1),
       createdBy: kMeId,
@@ -137,6 +138,24 @@ void main() {
 
     expect(container.read(allocationsProvider).length, before + 1);
     expect(container.read(allocationsProvider).any((a) => a.note == '遠端撥款'), isTrue);
+  });
+
+  test('month_closes 事件 → 重抓清帳紀錄，並連帳目一起重抓（清完那幾個月就鎖住了）', () async {
+    expect(container.read(monthClosesProvider), isEmpty);
+    final now = DateTime.now();
+    final lastMonth = DateTime(now.year, now.month - 1, 1);
+
+    // 模擬「老婆那台按了清帳」：直接動 repository，不經過 notifier。
+    await repo.closeMonth(kLedgerId, lastMonth);
+    expect(container.read(monthClosesProvider), isEmpty, reason: '事件還沒到，本機不該自己知道');
+
+    fake.emit(LedgerTable.monthCloses);
+    await pumpEventQueue();
+
+    expect(container.read(monthClosesProvider), hasLength(1));
+    expect(container.read(monthClosesProvider).single.month, lastMonth);
+    // 連帳目一起重抓：鎖月之後列表能不能改由 entries 的內容決定，不能只更新 closes。
+    expect(container.read(entriesProvider), isNotEmpty);
   });
 
   test('重抓失敗不會變成 uncaught（背景刷新不該打斷使用者）', () async {

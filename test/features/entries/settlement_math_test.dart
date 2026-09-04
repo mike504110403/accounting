@@ -5,9 +5,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const members = [
-    Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike'),
-    Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆'),
+  // 這組測試只算結算淨額，跟加入月無關：一律「很久以前就加入」。
+  final epoch = DateTime(1970);
+  final members = [
+    Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: epoch),
+    Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: epoch),
   ];
 
   Entry exp({

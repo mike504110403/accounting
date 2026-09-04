@@ -1,4 +1,5 @@
-/// 趨勢圖分桶純函式：把視角資料切成日／週／月／年桶，每桶算出花費、超支、可用餘額。
+/// 趨勢圖分桶純函式：把視角資料切成日／週／月／年桶，每桶算出花費、超支、餘額
+/// （家庭＝共同餘額、個人＝個人餘額，v1.4）。
 library;
 
 import '../../domain/balance_math.dart';
@@ -24,17 +25,23 @@ class Bucket {
   /// 桶內支出合計（視角金額），不分付款人與資金來源。
   final int spend;
 
-  /// 桶末日的超支（家庭＝當月超支合計；個人視角沒有信封，恆 0）。
+  /// 桶末日的超支（家庭＝當月超支合計；個人視角沒有預算，恆 0）。
   final int over;
 
-  /// 桶末日的可用餘額（家庭＝共同可用餘額、個人＝個人餘額）。
-  final int balance;
+  /// 桶末日的餘額（家庭＝共同餘額、個人＝個人餘額，v1.4）。
+  ///
+  /// `null`＝這個點不畫（線斷開）：已清帳月份的個人餘額只在「月」快照上有意義
+  /// （`MonthClose.details` 是整月一筆事實），日／週／年顆粒度落在已清帳月的桶
+  /// 沒有對應的快照可用，硬塞同一個月快照值會變成連續好幾點同一個數字、誤導
+  /// 使用者，所以呼叫端在這種情況下回傳 null（spec v1.4「個人餘額的月份語意」）。
+  /// 家庭線（共同餘額）不受影響，恆非 null。
+  final int? balance;
 }
 
 /// [bucketize] 的輸入。
 ///
 /// 餘額與超支不吃原始資料而吃兩個「算到某日」的函式（v1.3）：這兩條線的算式住在
-/// `balance_math`，家庭與個人視角餵的參數也不同（共同可用餘額 vs 個人餘額）。
+/// `balance_math`，家庭與個人視角餵的參數也不同（共同餘額 vs 個人餘額）。
 /// 由呼叫端把視角決定好包成函式，分桶這裡就只管切時間、不管帳務規則。
 class TrendInput {
   const TrendInput({
@@ -51,8 +58,8 @@ class TrendInput {
   /// 帳本分類；只有 `kind == expense` 的有花費線。
   final List<Category> categories;
 
-  /// 桶末日（含）的可用餘額。
-  final int Function(DateTime until) balanceAt;
+  /// 桶末日（含）的餘額（家庭＝共同餘額、個人＝個人餘額，v1.4）；`null` 見 [Bucket.balance]。
+  final int? Function(DateTime until) balanceAt;
 
   /// 桶末日（含）的超支合計。
   final int Function(DateTime until) overspendAt;
@@ -91,7 +98,8 @@ List<Bucket> bucketize(TrendInput input, Granularity granularity, DateTime ancho
 /// 每個支出分類各一組桶（趨勢圖「依分類」用），key 是 categoryId。
 ///
 /// 桶的範圍與 [bucketize] 完全一致，花費與超支都收斂到單一分類。
-/// **`balance` 一律 0**：分類沒有「餘額」這回事（餘額是帳本層級的期初＋收支累計），UI 不得讀它。
+/// **`balance` 一律 `null`**：分類沒有「餘額」這回事（餘額是帳本層級的期初＋收支累計），
+/// UI 不得讀它；用 `null` 而不是 `0`，跟「這個帳本真的算出餘額是 0」區分開。
 Map<String, List<Bucket>> bucketizeByCategory(
   TrendInput input,
   Granularity granularity,
@@ -118,7 +126,7 @@ Map<String, List<Bucket>> bucketizeByCategory(
         end: r.end,
         spend: spend,
         over: input.categoryOverspendAt(c.id, r.end),
-        balance: 0, // 分類無餘額概念，見上方說明
+        balance: null, // 分類無餘額概念，見上方說明
       ));
     }
     out[c.id] = list;

@@ -7,7 +7,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/category_wheel.dart';
 import '../../app/format.dart';
-import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import '../entries/split_math.dart';
@@ -45,8 +44,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
   // 結帳方式（Mike 裁示 2026-09-04：與支出表單同一組選項與規則）。
   String? _payerId; // null＝共同錢包
   SplitMethod _method = SplitMethod.common;
-  Funding _funding = Funding.balance;
-  bool _fundingTouched = false;
   final _ratioCtrls = <String, TextEditingController>{};
   final _manualCtrls = <String, TextEditingController>{};
 
@@ -62,21 +59,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
   Map<String, int> get _manualValues =>
       {for (final e in _manualCtrls.entries) e.key: int.tryParse(e.value.text.trim()) ?? 0};
   int get _ratioTotal => _ratioValues.values.fold(0, (a, b) => a + b);
-
-  /// 同支出表單 `_syncFunding` 的精簡版：代墊一律 balance；共同錢包未手動選過就吃預設。
-  void _syncFunding() {
-    if (_payerId != null || _categoryId == null) {
-      _funding = Funding.balance;
-      _fundingTouched = false;
-      return;
-    }
-    if (_fundingTouched) return;
-    _funding = defaultFunding(
-      allocations: ref.read(allocationsProvider),
-      categoryId: _categoryId!,
-      month: _date,
-    );
-  }
 
   /// 分攤驗證（擋確認鈕）：比例合計 100、金額分攤合計＝總計。
   String? get _splitError {
@@ -102,7 +84,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     _categoryId = widget.items.first.categoryId;
     final now = DateTime.now();
     _date = DateTime(now.year, now.month, now.day); // date-only：occurred_on 是 date-only 欄位
-    _syncFunding();
   }
 
   /// 多項結帳的「總計」是唯讀自動加總，跟著任一項金額變動即時更新；也連動確認鈕的可按狀態。
@@ -156,7 +137,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     if (picked != null) {
       setState(() {
         _date = picked;
-        _syncFunding();
       });
     }
   }
@@ -179,10 +159,8 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
         date: DateTime(_date.year, _date.month, _date.day),
         ledgerId: ref.read(ledgerProvider).id,
         me: ref.read(currentMemberIdProvider),
-        allocations: ref.read(allocationsProvider),
         payerId: _payerId,
         splitMethod: _payerId == null ? SplitMethod.common : _method,
-        funding: _payerId == null ? _funding : null,
         members: ref.read(membersProvider),
         ratio: _ratioValues,
         manual: _manualValues,
@@ -223,7 +201,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     }
   }
 
-  /// 結帳方式區（與支出表單同規則）：付款（共同錢包／成員代墊）、分攤、資金來源。
+  /// 結帳方式區（與支出表單同規則）：付款（共同錢包／成員代墊）、分攤。
   List<Widget> _paymentSection(BuildContext context) {
     final t = Theme.of(context);
     final members = ref.watch(membersProvider);
@@ -254,26 +232,13 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
         chip('共同錢包', _payerId == null, key: const Key('checkout-payer-common'), () => setState(() {
               _payerId = null;
               _method = SplitMethod.common;
-              _syncFunding();
             })),
         for (final m in members)
           chip(m.displayName, _payerId == m.id, key: Key('checkout-payer-${m.id}'), () => setState(() {
                 _payerId = m.id;
                 if (_method == SplitMethod.common) _method = SplitMethod.equal;
-                _syncFunding();
               })),
       ]),
-      if (_payerId == null && _categoryId != null)
-        row('資金', [
-          chip('預算', _funding == Funding.budget, key: const Key('checkout-funding-budget'), () => setState(() {
-                _funding = Funding.budget;
-                _fundingTouched = true;
-              })),
-          chip('餘額', _funding == Funding.balance, key: const Key('checkout-funding-balance'), () => setState(() {
-                _funding = Funding.balance;
-                _fundingTouched = true;
-              })),
-        ]),
       if (_payerId != null) ...[
         row('分攤', [
           for (final e in const {
@@ -398,7 +363,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               selectedId: _categoryId,
               onSelected: (id) => setState(() {
                 _categoryId = id;
-                _syncFunding();
               }),
             ),
             _dateFieldRow('日期', fmtDate(_date), _pickDate, key: const Key('checkout-date-row')),

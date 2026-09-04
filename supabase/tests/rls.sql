@@ -41,7 +41,14 @@ declare
   v_allowed constant text[] := array[
     'create_ledger', 'join_ledger', 'initiate_settlement', 'approve_settlement',
     'cancel_settlement', 'required_signers', 'search_items', 'upsert_entry',
-    'rotate_invite_code', 'is_member', 'my_member_id', 'month_summary'];
+    'rotate_invite_code', 'is_member', 'my_member_id', 'month_summary',
+    -- v1.4 清帳（ADR-0008）：只有預覽與執行進白名單，
+    -- month_close_details／month_close_guard／raise_if_month_closed 是內部 helper，一律不給前端。
+    'close_month', 'month_close_preview',
+    -- taipei_month／topup_for 是**純函式**：不讀任何表、只做日期與大小比較，
+    -- 給前端執行洩不出任何資料。它們在白名單裡是因為 month_summary（security invoker）
+    -- 要呼叫得動——invoker 函式裡的權限檢查是以原呼叫者身分做的。
+    'taipei_month', 'topup_for'];
 begin
   -- 掃 public 底下「全部」函式，不是只掃我列得出來的那幾支。
   select string_agg(format('%s→%s', p.proname, coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC')), ', ')
@@ -98,6 +105,36 @@ begin
 end;
 $$;
 
+\echo '== rls: 前置檢查 public 不准放 matview、view 一律 security_invoker（security review n1）=='
+do $$
+declare
+  v_matviews text;
+  v_bad text;
+begin
+  -- matview 沒有 security_invoker 這個選項（它的內容是實體化好的、與呼叫者無關），
+  -- 所以它在 public 就是「一份繞過 RLS 的資料副本」——直接禁止，不是要求它帶什麼旗標。
+  select string_agg(c.relname, ', ') into v_matviews
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public' and c.relkind = 'm';
+  assert v_matviews is null,
+    format('public 不該有 materialized view（沒有 security_invoker，內容是繞過 RLS 的副本）：%s', v_matviews);
+
+  -- 一般 view 預設是 security **definer**（以 view 擁有者身分讀底層表 → 完全繞過 RLS）。
+  -- 我們的 view 建在 public、又 grant 給 authenticated，漏掉這個選項就是把整張
+  -- entries／entry_splits 對所有登入者敞開（別人的私人筆都讀得到）。
+  -- 掃**每一個** view，不是只掃我列得出來的那幾個——形狀比照上面的函式白名單。
+  select string_agg(format('%s(%s)', c.relname, coalesce(array_to_string(c.reloptions, ','), '無 reloptions')), ', ')
+    into v_bad
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public'
+    and c.relkind = 'v'
+    and not (coalesce(c.reloptions, '{}') @> array['security_invoker=true']);
+  assert v_bad is null,
+    format('這些 view 沒帶 security_invoker=true（會以擁有者身分繞過 RLS）：%s', v_bad);
+end;
+$$;
+
 \echo '== rls: 前置檢查 entries 的 INSERT／UPDATE 都是欄位級授權（review 3／A）=='
 do $$
 declare
@@ -128,18 +165,28 @@ begin
 end;
 $$;
 
-\echo '== rls: 前置檢查 budget_allocation 的 INSERT／UPDATE 都是欄位級授權（ADR-0007）=='
+\echo '== rls: 前置檢查 budget_allocation 的 INSERT 是欄位級授權、UPDATE／DELETE 全收回（ADR-0008）=='
 do $$
 declare
   v_cols text;
+  v_verbs text;
 begin
-  -- UPDATE：只有這三欄（改 ledger_id／category_id／created_by ＝ 換一筆撥款，請刪掉重開）。
+  -- v1.4：預算影子紀錄設定後不可改不可刪。
+  -- 表層級只剩 SELECT（INSERT 是欄位級的，不會出現在 table_privileges）。
+  select string_agg(distinct tp.privilege_type, ', ' order by tp.privilege_type) into v_verbs
+  from information_schema.table_privileges tp
+  where tp.table_schema = 'public' and tp.table_name = 'budget_allocation'
+    and tp.grantee = 'authenticated';
+  assert v_verbs = 'SELECT',
+    format('budget_allocation 表層級對前端應只剩 SELECT，實際 %s', coalesce(v_verbs, '（完全沒有）'));
+
+  -- 欄位級也不能剩半欄 UPDATE（0024 開過 amount／note／occurred_on 三欄）。
   select string_agg(cp.column_name, ', ' order by cp.column_name) into v_cols
   from information_schema.column_privileges cp
   where cp.table_schema = 'public' and cp.table_name = 'budget_allocation'
-    and cp.grantee = 'authenticated' and cp.privilege_type = 'UPDATE';
-  assert v_cols = 'amount, note, occurred_on',
-    format('budget_allocation 的 UPDATE 欄位應是 amount, note, occurred_on，實際 %s', coalesce(v_cols, '（一欄都沒有）'));
+    and cp.grantee = 'authenticated' and cp.privilege_type in ('UPDATE', 'DELETE');
+  assert v_cols is null,
+    format('budget_allocation 不該剩任何 UPDATE／DELETE 授權：%s', v_cols);
 
   -- INSERT：id 與 created_at 不給前端填（比照 entries）。
   select string_agg(cp.column_name, ', ' order by cp.column_name) into v_cols
@@ -165,13 +212,13 @@ begin
   assert v_cols = 'default_ratio, name, opening_balance_shared',
     format('ledgers 的可寫欄位應只有 name／default_ratio／opening_balance_shared，實際：%s', v_cols);
 
-  -- members：只開暱稱與個人期初。
+  -- members：只開暱稱、每月補入額與（已廢用但欄位還在的）個人期初。
   select string_agg(cp.column_name, ', ' order by cp.column_name) into v_cols
   from information_schema.column_privileges cp
   where cp.table_schema = 'public' and cp.table_name = 'members'
     and cp.grantee = 'authenticated' and cp.privilege_type = 'UPDATE';
-  assert v_cols = 'display_name, opening_balance_personal',
-    format('members 的可寫欄位應只有 display_name／opening_balance_personal，實際：%s', v_cols);
+  assert v_cols = 'display_name, monthly_topup, opening_balance_personal',
+    format('members 的可寫欄位應只有 display_name／monthly_topup／opening_balance_personal，實際：%s', v_cols);
 end;
 $$;
 

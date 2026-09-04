@@ -59,12 +59,12 @@ const tutorialSteps = <TutorialStep>[
     target: 'tab-budget',
     advanceRoutePrefix: '/budget',
     title: '點「預算」',
-    body: '點亮起的「預算」分頁，看看信封預算長什麼樣。',
+    body: '點亮起的「預算」分頁，看看本月預算長什麼樣。',
   ),
   TutorialStep(
     target: 'budget-summary',
-    title: '信封預算',
-    body: '把錢撥進各分類的信封；記共同支出時資金來源選「預算」就從信封扣，超支一眼看得到。',
+    title: '本月預算',
+    body: '設定各分類的本月預算；所有共同支出都會扣，超支一眼看得到。',
   ),
   TutorialStep(
     target: 'tab-lists',
@@ -92,7 +92,7 @@ const tutorialSteps = <TutorialStep>[
   TutorialStep(
     target: 'view-toggle',
     title: '家庭與個人',
-    body: '家庭視角看共同帳（共同錢包與信封）；個人視角看自己的份額與私人帳。代墊先動個人餘額，結算簽核完成就歸位。',
+    body: '家庭視角看共同帳（共同錢包與預算）；個人視角看自己的份額與私人帳。代墊先動個人餘額，結算簽核完成就歸位。',
   ),
   TutorialStep(
     target: 'settings-gear',
@@ -108,7 +108,7 @@ const tutorialSteps = <TutorialStep>[
   ),
   TutorialStep(
     title: '分類管理',
-    body: '這裡可以新增分類、拖曳排序；左滑任一列＝編輯／刪除。分攤比例與期初餘額也都在設定裡。',
+    body: '這裡可以新增分類、拖曳排序；左滑任一列＝編輯／刪除。分攤比例、餘額設定與清帳也都在設定裡。',
   ),
   TutorialStep(
     title: '準備好了！',

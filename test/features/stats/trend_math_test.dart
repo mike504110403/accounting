@@ -51,7 +51,7 @@ void main() {
     exp('e-4', 800, DateTime(2026, 2, 10)),
   ];
 
-  /// 家庭視角的輸入：餘額＝共同可用餘額、超支＝當月超支合計。
+  /// 家庭視角的輸入：餘額＝共同餘額（v1.4 不再預扣預算）、超支＝當月超支合計。
   TrendInput familyInput(
     List<Entry> es, {
     List<BudgetAllocation> allocations = const [],
@@ -60,8 +60,7 @@ void main() {
       TrendInput(
         items: viewEntries(es, ViewMode.family, 'm', const {'m': 100}),
         categories: categories,
-        balanceAt: (until) =>
-            sharedAvailable(ledger: ledger, entries: es, allocations: allocations, until: until),
+        balanceAt: (until) => sharedBalance(ledger: ledger, entries: es, until: until),
         overspendAt: (until) =>
             totalOverspend(entries: es, allocations: allocations, until: until),
         categoryOverspendAt: (categoryId, until) => overspend(
@@ -134,7 +133,9 @@ void main() {
     expect(m.first.label, '4月');
 
     expect(m.last.spend, 1700);
-    expect(m.last.over, 0);
+    // v1.4：超支＝max(0, 已花 − 預算)，沒設預算就是預算 0 → 已花全額都算超支
+    //（v1.3 只算「從信封出」的那種支出，所以這裡以前是 0）。
+    expect(m.last.over, 1700);
     expect(m.last.balance, 7500);
 
     final feb = m.firstWhere((x) => x.start == DateTime(2026, 2, 1));
@@ -175,7 +176,7 @@ void main() {
     expect(seen.last, DateTime(2026, 3, 31));
   });
 
-  test('超支線吃 totalOverspend：撥款 1000 花 1500 → 該月起 500', () {
+  test('超支線吃 totalOverspend：預算 1000、3 月已花 3200 → 超支 2200', () {
     final es = [
       ...entries,
       Entry(
@@ -187,7 +188,6 @@ void main() {
         categoryId: 'c1',
         occurredOn: DateTime(2026, 3, 20),
         createdBy: 'm',
-        funding: Funding.budget,
       ),
     ];
     final allocations = [
@@ -200,11 +200,70 @@ void main() {
           createdBy: 'm'),
     ];
     final m = bucketize(familyInput(es, allocations: allocations), Granularity.month, anchor);
-    expect(m.last.over, 500);
-    // 3 月花費含這筆 1500
+    // 3 月花費含這筆 1500 → 已花 3200、預算 1000 → 超支 2200
     expect(m.last.spend, 3200);
-    // 上月桶末（2/28）沒有信封活動 → 超支 0（不跨月）
-    expect(m.firstWhere((x) => x.start == DateTime(2026, 2, 1)).over, 0);
+    expect(m.last.over, 2200);
+    // 2 月只有一筆 800、沒有預算 → 超支 800（預算不跨月，3 月那筆撥款不會回頭蓋 2 月）
+    expect(m.firstWhere((x) => x.start == DateTime(2026, 2, 1)).over, 800);
+  });
+
+  test('家庭趨勢餘額線＝sharedBalance：不吃 allocations，撥款再多也不變（v1.3 會變、v1.4 不會）', () {
+    final withoutAlloc = bucketize(familyInput(entries), Granularity.month, anchor);
+    final withAlloc = bucketize(
+      familyInput(entries, allocations: [
+        BudgetAllocation(
+            id: 'al-x',
+            ledgerId: 'l',
+            categoryId: 'c1',
+            amount: 999999,
+            occurredOn: DateTime(2026, 3, 1),
+            createdBy: 'm'),
+      ]),
+      Granularity.month,
+      anchor,
+    );
+    for (var i = 0; i < withoutAlloc.length; i++) {
+      expect(withAlloc[i].balance, withoutAlloc[i].balance, reason: '第 $i 桶');
+    }
+    // 手算對照沿用上面「月顆粒度：最近 12 個月」測試的算式：本月桶末＝7500
+    expect(withAlloc.last.balance, 7500);
+  });
+
+  test('超支計入代墊（v1.4）：payer 非 null、非 common 的共同支出照樣算已花（v1.3 不計）', () {
+    final advance = Entry(
+      id: 'adv-1',
+      ledgerId: 'l',
+      kind: EntryKind.expense,
+      scope: EntryScope.shared,
+      amount: 1000,
+      categoryId: 'c1',
+      occurredOn: DateTime(2026, 3, 8),
+      createdBy: 'm',
+      payerId: 'm',
+      splitMethod: SplitMethod.equal,
+      splits: const [
+        EntrySplit(entryId: 'adv-1', memberId: 'm', share: 500),
+        EntrySplit(entryId: 'adv-1', memberId: 'w', share: 500),
+      ],
+    );
+    final allocations = [
+      BudgetAllocation(
+          id: 'al-2',
+          ledgerId: 'l',
+          categoryId: 'c1',
+          amount: 500,
+          occurredOn: DateTime(2026, 3, 1),
+          createdBy: 'm'),
+    ];
+    final m = bucketize(
+      familyInput([...entries, advance], allocations: allocations),
+      Granularity.month,
+      anchor,
+    );
+    // 3 月已花：原本 1700（500+200+1000）＋代墊 1000＝2700；預算 500 → 超支 2200
+    // （v1.3 只算從共同錢包出的支出，代墊 1000 不會進已花，超支只會是 1200）。
+    expect(m.last.spend, 2700);
+    expect(m.last.over, 2200);
   });
 
   test('個人視角：桶內金額用我的份額、超支恆 0', () {
@@ -226,21 +285,104 @@ void main() {
         ],
       ),
     ];
-    const me = Member(
-        id: 'm', ledgerId: 'l', userId: 'u', displayName: 'Mike', openingBalancePersonal: 1000);
+    // v1.4：個人餘額＝每月補入額 × 未清帳月份數 ＋ 淨變動（期初個人餘額已廢用）。
+    final me = Member(
+        id: 'm',
+        ledgerId: 'l',
+        userId: 'u',
+        displayName: 'Mike',
+        monthlyTopup: 1000,
+        joinedAt: DateTime(2026, 3, 1),
+      );
     final in3 = TrendInput(
       items: viewEntries(shared, ViewMode.personal, 'm', const {'m': 50, 'w': 50}),
       categories: const [c1],
-      // 個人視角：個人餘額（代墊當下扣全額）、沒有信封所以超支恆 0
-      balanceAt: (until) =>
-          personalBalance(member: me, entries: shared, settlements: const [], until: until),
+      // 個人視角：個人餘額（代墊當下扣全額）、沒有預算所以超支恆 0
+      // `today` 釘死在固定資料集的月份內，不吃 `DateTime.now()`——這條測試的其他
+      // 日期全是寫死的 2026-03，若不釘 today，本檔案在真正的 2026-03 之前執行會因為
+      // 「今天所在月」把 N 的上界拉到比 2026-03 更早而變成別的答案。
+      balanceAt: (until) => personalBalance(
+        member: me,
+        entries: shared,
+        closes: const [],
+        until: until,
+        joinedMonth: DateTime(2026, 3, 1),
+        today: DateTime(2026, 3, 31),
+      ),
       overspendAt: (_) => 0,
       categoryOverspendAt: (_, _) => 0,
     );
     final m = bucketize(in3, Granularity.month, anchor);
     expect(m.last.spend, 500, reason: '花費是我的份額');
-    expect(m.last.balance, 0, reason: '期初 1000 − 代墊全額 1000');
+    expect(m.last.balance, 0, reason: '3 月補入額 1000 − 代墊全額 1000');
     expect(m.last.over, 0);
+  });
+
+  test('個人餘額純函式手算：與 stats_page_test.dart「closes 含上月」widget 測試同一組 fixture 對得起來', () {
+    // stats_page_test.dart 那條 widget 測試因為 flutter_riverpod 的 ProviderScope
+    // 在同一顆 tree 上重複 pumpWidget 會重用既有 container（見該檔案的說明），
+    // 沒辦法在同一條測試裡先驗「清帳前」再驗「清帳後」，只能把「清帳前應該是
+    // 多少」寫死在註解當手算依據。這裡直接呼叫 personalBalance 這個純函式，把
+    // 700／1550 這兩個數字釘死成真正被驗證過的事實，不是註解裡的空話。
+    final lastMonth = DateTime(2026, 2, 1);
+    final thisMonth = DateTime(2026, 3, 1);
+    final me = Member(
+      id: 'm',
+      ledgerId: 'l',
+      userId: 'u',
+      displayName: 'Mike',
+      monthlyTopup: 1000,
+      joinedAt: lastMonth, // 加入月＝上月，N=1 的邊界情況（見 stats_page_test.dart 註解）
+    );
+    final entries = [
+      Entry(
+        id: 'ce-1',
+        ledgerId: 'l',
+        kind: EntryKind.expense,
+        scope: EntryScope.private,
+        amount: 300,
+        categoryId: 'c1',
+        occurredOn: DateTime(lastMonth.year, lastMonth.month, 10),
+        createdBy: 'm',
+        payerId: 'm',
+      ),
+      Entry(
+        id: 'ce-2',
+        ledgerId: 'l',
+        kind: EntryKind.expense,
+        scope: EntryScope.private,
+        amount: 150,
+        categoryId: 'c1',
+        occurredOn: DateTime(thisMonth.year, thisMonth.month, 10),
+        createdBy: 'm',
+        payerId: 'm',
+      ),
+    ];
+
+    // 上月（加入月，N=1）：補入額 1000 − 私人支出 300 ＝ 700。
+    expect(
+      personalBalance(
+        member: me,
+        entries: entries,
+        closes: const [],
+        until: DateTime(lastMonth.year, lastMonth.month + 1, 0),
+        joinedMonth: lastMonth,
+        today: thisMonth,
+      ),
+      700,
+    );
+    // 本月（N=2，累計）：補入額 1000×2 − 300 − 150 ＝ 1550。
+    expect(
+      personalBalance(
+        member: me,
+        entries: entries,
+        closes: const [],
+        until: DateTime(thisMonth.year, thisMonth.month + 1, 0),
+        joinedMonth: lastMonth,
+        today: thisMonth,
+      ),
+      1550,
+    );
   });
 
   group('bucketizeByCategory', () {
@@ -272,17 +414,17 @@ void main() {
       expect(m['c1']!.last.spend + m['c2']!.last.spend, all.last.spend);
     });
 
-    test('balance 一律 0：分類沒有餘額概念', () {
+    test('balance 一律 null：分類沒有餘額概念，跟「算出來是 0」區分開', () {
       for (final g in Granularity.values) {
         final m = bucketizeByCategory(in2, g, anchor);
         for (final list in m.values) {
-          expect(list.every((b) => b.balance == 0), isTrue, reason: '$g');
+          expect(list.every((b) => b.balance == null), isTrue, reason: '$g');
         }
       }
     });
 
     test('over 是該分類自己的超支，不是帳本合計', () {
-      // c1 撥款 1000、預算支出 1500 → 超支 500；c2 沒撥款也沒預算支出 → 0
+      // c1 預算 1000、3 月已花 3200 → 超支 2200；c2 沒預算、已花 300 → 超支 300
       final es = [
         ...entries,
         Entry(
@@ -294,7 +436,6 @@ void main() {
           categoryId: 'c1',
           occurredOn: DateTime(2026, 3, 20),
           createdBy: 'm',
-          funding: Funding.budget,
         ),
         exp('t-1', 300, DateTime(2026, 3, 5), 'c2'),
       ];
@@ -309,10 +450,11 @@ void main() {
       ];
       final in3 = familyInput(es, allocations: allocations, categories: const [c1, c2, cIncome]);
       final m = bucketizeByCategory(in3, Granularity.month, anchor);
-      expect(m['c1']!.last.over, 500);
-      expect(m['c2']!.last.over, 0);
-      // 帳本合計也是 500，但那是總覽桶的事，分類桶各算各的
-      expect(bucketize(in3, Granularity.month, anchor).last.over, 500);
+      // c1：已花 3200 − 預算 1000 ＝ 2200；c2：已花 300、沒預算 → 全額算超支
+      expect(m['c1']!.last.over, 2200);
+      expect(m['c2']!.last.over, 300);
+      // 帳本合計是兩者相加，但那是總覽桶的事，分類桶各算各的
+      expect(bucketize(in3, Granularity.month, anchor).last.over, 2500);
     });
 
     test('四種顆粒度的桶數與總覽一致', () {

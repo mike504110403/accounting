@@ -76,4 +76,5 @@ void main() {
     expect(hasReversal([settled], settled), isFalse);
     expect(hasReversal([settled, r], settled), isTrue);
   });
+
 }

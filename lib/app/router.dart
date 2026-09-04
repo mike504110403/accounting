@@ -12,6 +12,7 @@ import '../features/entries/entries_page.dart';
 import '../features/entries/entry_form_page.dart';
 import '../features/lists/lists_page.dart';
 import '../features/settings/category_page.dart';
+import '../features/settings/closes_page.dart';
 import '../features/settings/settings_page.dart';
 import '../features/stats/stats_page.dart';
 import 'shell.dart';
@@ -86,7 +87,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/settings',
         builder: (_, _) => const SettingsPage(),
-        routes: [GoRoute(path: 'categories', builder: (_, _) => const CategoryPage())],
+        routes: [
+          GoRoute(path: 'categories', builder: (_, _) => const CategoryPage()),
+          GoRoute(path: 'closes', builder: (_, _) => const ClosesPage()),
+        ],
       ),
     ],
   );

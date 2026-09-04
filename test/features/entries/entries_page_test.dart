@@ -1,3 +1,4 @@
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/app/month_app_bar.dart';
@@ -21,7 +22,7 @@ final twoSignerSettlement = Settlement(
   approvedBy: const {},
 );
 
-const kidMember = Member(id: 'm-kid', ledgerId: kLedgerId, userId: 'u3', displayName: '小孩');
+final kidMember = Member(id: 'm-kid', ledgerId: kLedgerId, userId: 'u3', displayName: '小孩', joinedAt: DateTime(1970));
 
 /// 兩筆互相抵銷的代墊：淨額全為 0。
 List<Entry> balancedEntries() => [
@@ -272,9 +273,9 @@ void main() {
     final c = await pumpApp(
       tester,
       containerFor(repoWith(
-        members: const [
-          Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike'),
-          Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆'),
+        members: [
+          Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: DateTime(1970)),
+          Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: DateTime(1970)),
           kidMember,
         ],
         settlements: [twoSignerSettlement],
@@ -432,5 +433,53 @@ void main() {
     await tester.tap(find.byKey(const Key('month-picker-today')));
     await tester.pumpAndSettle();
     expect(find.text('菜市場'), findsOneWidget);
+  });
+
+  // ── 鎖月（v1.4／ADR-0008）────────────────────────────────────────────
+
+  testWidgets('已清帳月份的帳目：左滑沒有編輯／刪除；同一份資料裡未清月的照常', (tester) async {
+    final cur = monthOf(DateTime.now());
+    final prev = prevMonth(cur);
+    // 共同錢包支出：家庭視角（列表預設）看得到，也不牽扯結算與分攤。
+    Entry wallet(String id, String note, DateTime on) => Entry(
+          id: id,
+          ledgerId: kLedgerId,
+          kind: EntryKind.expense,
+          scope: EntryScope.shared,
+          amount: 300,
+          categoryId: 'c-food',
+          occurredOn: on,
+          createdBy: kMeId,
+          note: note,
+        );
+
+    await pumpApp(
+      tester,
+      containerFor(repoWith(
+        entries: [
+          wallet('e-locked', '上月鎖住', DateTime(prev.year, prev.month, 10)),
+          wallet('e-open', '本月照常', DateTime(cur.year, cur.month, 10)),
+        ],
+        settlements: const [],
+        closes: [closeFixture(month: prev)],
+      )),
+    );
+
+    // 本月（未清）：滑得開，編輯／刪除都在。
+    expect(find.byKey(const ValueKey('slide-e-open')), findsOneWidget);
+    await tester.drag(find.text('本月照常'), const Offset(-220, 0));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.edit_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+
+    // 切到上個月（已清）：整排滑動動作拿掉。
+    await tester.fling(find.byKey(const Key('month-title')), const Offset(300, 0), 1000);
+    await tester.pumpAndSettle();
+    expect(find.text('上月鎖住'), findsOneWidget);
+    expect(find.byKey(const ValueKey('slide-e-locked')), findsNothing);
+    await tester.drag(find.text('上月鎖住'), const Offset(-220, 0));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.edit_outlined), findsNothing);
+    expect(find.byIcon(Icons.delete_outline), findsNothing);
   });
 }

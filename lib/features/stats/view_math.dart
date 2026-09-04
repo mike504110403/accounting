@@ -90,10 +90,14 @@ class MonthSummary {
   /// 該月支出合計（視角金額）。
   final int expense;
 
-  /// 該月最後一天（含）的可用餘額（ADR-0007，v1.3）：
-  /// 家庭＝`sharedAvailable`（共同可用餘額）、個人＝`personalBalance`（個人餘額）。
-  /// 由呼叫端把視角決定好包成 [monthSummary] 的 `balanceAt`，這裡不判斷視角。
-  final int balance;
+  /// 該月最後一天（含）的餘額（ADR-0008，v1.4）：
+  /// 家庭＝`sharedBalance`（共同餘額）、個人＝`personalBalance`（個人餘額）。
+  /// 由呼叫端把視角與已清帳月語意都決定好，這裡只管收（單一固定 until，不是
+  /// 逐桶算式，不需要 callback）。
+  ///
+  /// `null`＝已清帳月份有清帳列、但快照裡找不到本人（資料異常）——月摘要卡顯示
+  /// 「—」，不是一個算得出來的數字；跟「這個月根本沒清過帳」（顯示 0）是兩回事。
+  final int? balance;
 
   int get net => income - expense;
 }
@@ -101,7 +105,7 @@ class MonthSummary {
 MonthSummary monthSummary({
   required List<ViewEntry> items,
   required DateTime month,
-  required int Function(DateTime until) balanceAt,
+  required int? balance,
 }) {
   var income = 0;
   var expense = 0;
@@ -113,11 +117,7 @@ MonthSummary monthSummary({
       income += i.amount;
     }
   }
-  return MonthSummary(
-    income: income,
-    expense: expense,
-    balance: balanceAt(lastDayOfMonth(month)),
-  );
+  return MonthSummary(income: income, expense: expense, balance: balance);
 }
 
 // ── 圓餅 ──────────────────────────────────────────────────────────────

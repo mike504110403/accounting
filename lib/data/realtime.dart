@@ -1,4 +1,4 @@
-/// Realtime：訂閱四張進 publication 的表，事件到達就重抓該表。
+/// Realtime：訂閱五張進 publication 的表，事件到達就重抓該表。
 ///
 /// 只送「哪張表變了」，不吃 payload——payload 仍吃 RLS 也仍可能漏（批次寫入合併事件），
 /// 重抓整表才是唯一能保證與 DB 一致的做法。
@@ -11,13 +11,14 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../domain/mock_data.dart';
 import 'current_ledger.dart';
 
-enum LedgerTable { entries, settlements, listItems, budgetAllocation }
+enum LedgerTable { entries, settlements, listItems, budgetAllocation, monthCloses }
 
 const _tableNames = {
   LedgerTable.entries: 'entries',
   LedgerTable.settlements: 'settlements',
   LedgerTable.listItems: 'list_items',
   LedgerTable.budgetAllocation: 'budget_allocation',
+  LedgerTable.monthCloses: 'month_closes',
 };
 
 abstract class RealtimeSource {
@@ -46,7 +47,7 @@ class SupabaseRealtimeSource implements RealtimeSource {
   void subscribe(String ledgerId, void Function(LedgerTable table) onChange) {
     var channel = _client.channel('ledger:$ledgerId');
     for (final entry in _tableNames.entries) {
-      // migration 0026 起四表 replica identity full：DELETE payload 也帶 ledger_id，
+      // migration 0026／0027 起五表 replica identity full：DELETE payload 也帶 ledger_id，
       // 單一帶 filter 的訂閱就收得到刪除事件（原「不帶 filter 的 DELETE 補丁」已拆）。
       channel = channel.onPostgresChanges(
         event: PostgresChangeEvent.all,
@@ -77,6 +78,9 @@ final realtimeSourceProvider = Provider<RealtimeSource>((ref) => const NoopRealt
 ///
 /// 結算事件連帶重抓 entries：多簽落地時 `settled_state` 是 trigger 改的，
 /// 只重抓 settlements 的話對方那邊金額不會變成鎖住。
+///
+/// 清帳事件同理連帶重抓 entries：清完之後那個月（與更早的月份）整段鎖住，
+/// 只重抓 closes 的話對方那台的列表還以為那些帳目可以改。
 Future<void> applyRealtimeChange(Ref ref, LedgerTable table) async {
   try {
     switch (table) {
@@ -89,6 +93,9 @@ Future<void> applyRealtimeChange(Ref ref, LedgerTable table) async {
         await ref.read(listItemsProvider.notifier).refresh();
       case LedgerTable.budgetAllocation:
         await ref.read(allocationsProvider.notifier).refresh();
+      case LedgerTable.monthCloses:
+        await ref.read(monthClosesProvider.notifier).refresh();
+        await ref.read(entriesProvider.notifier).refresh();
     }
   } catch (e, st) {
     // 背景刷新失敗不能變成 uncaught，也不該打斷使用者當下的操作。

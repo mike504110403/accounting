@@ -6,10 +6,13 @@
 /// （那樣 state 有假資料、repository 沒有，一寫入就對不上）。
 library;
 
+import 'dart:async';
+
 import 'package:accounting/data/in_memory_repository.dart';
 import 'package:accounting/data/ledger_repository.dart';
 import 'package:accounting/data/realtime.dart';
 import 'package:accounting/domain/models.dart';
+import 'package:accounting/domain/month_summary.dart';
 
 /// 波 1 那組假資料的快照。
 LedgerSnapshot seedSnapshot() => InMemoryLedgerRepository().snapshot;
@@ -23,6 +26,7 @@ LedgerSnapshot snapshotWith({
   List<BudgetAllocation>? allocations,
   List<ListItem>? listItems,
   List<Settlement>? settlements,
+  List<MonthClose>? closes,
   String? currentMemberId,
 }) =>
     seedSnapshot().copyWith(
@@ -33,6 +37,7 @@ LedgerSnapshot snapshotWith({
       allocations: allocations,
       listItems: listItems,
       settlements: settlements,
+      closes: closes,
       currentMemberId: currentMemberId,
     );
 
@@ -45,6 +50,7 @@ InMemoryLedgerRepository repoWith({
   List<BudgetAllocation>? allocations,
   List<ListItem>? listItems,
   List<Settlement>? settlements,
+  List<MonthClose>? closes,
   String? currentMemberId,
 }) =>
     InMemoryLedgerRepository(
@@ -56,8 +62,43 @@ InMemoryLedgerRepository repoWith({
         allocations: allocations,
         listItems: listItems,
         settlements: settlements,
+        closes: closes,
         currentMemberId: currentMemberId,
       ),
+    );
+
+/// 一筆清帳紀錄（v1.4）。`details` 是清帳當下的事實快照，測試要什麼數字就給什麼數字。
+MonthClose closeFixture({
+  required DateTime month,
+  String? id,
+  String closedBy = kMeId,
+  DateTime? closedAt,
+  List<MonthCloseMemberLine> members = const [],
+  int sharedDelta = 0,
+}) =>
+    MonthClose(
+      id: id ?? 'mc-${month.year}-${month.month.toString().padLeft(2, '0')}',
+      ledgerId: kLedgerId,
+      month: month,
+      closedBy: closedBy,
+      closedAt: closedAt ?? DateTime(month.year, month.month + 1, 3, 9),
+      details: MonthCloseDetails(month: month, members: members, sharedDelta: sharedDelta),
+    );
+
+/// 清帳明細裡的一位成員：`ending` 一律＝`topup + net`（DB 那側也是這樣算的，
+/// 測試自己編一個對不上的 ending 只會測到不存在的世界）。
+MonthCloseMemberLine closeLine({
+  required String memberId,
+  required String displayName,
+  int topup = 0,
+  int net = 0,
+}) =>
+    MonthCloseMemberLine(
+      memberId: memberId,
+      displayName: displayName,
+      topup: topup,
+      net: net,
+      ending: topup + net,
     );
 
 /// 讓指定的寫入操作一律失敗，其餘照常——用來驗「失敗路徑不留半套狀態」。
@@ -77,7 +118,6 @@ class FailingRepository extends InMemoryLedgerRepository {
     this.failRemoveListItem = false,
     this.failUpdateListItemOnCall = -1,
     this.failAddAllocation = false,
-    this.failRemoveAllocation = false,
     this.failUpdateLedger = false,
     this.failUpdateMember = false,
     this.failInitiateSettlement = false,
@@ -85,6 +125,8 @@ class FailingRepository extends InMemoryLedgerRepository {
     this.failMyLedgers = false,
     this.failJoinLedger = false,
     this.failCreateLedger = false,
+    this.failMonthClosePreview = false,
+    this.failCloseMonth = false,
   });
 
   final bool failUpsertEntry;
@@ -103,7 +145,6 @@ class FailingRepository extends InMemoryLedgerRepository {
   /// 復原本身也會被打中，測到的就變成「連補償都救不回來」那個更極端的情境。
   final int failUpdateListItemOnCall;
   final bool failAddAllocation;
-  final bool failRemoveAllocation;
   final bool failUpdateLedger;
   final bool failUpdateMember;
   final bool failInitiateSettlement;
@@ -111,6 +152,10 @@ class FailingRepository extends InMemoryLedgerRepository {
   final bool failMyLedgers;
   final bool failJoinLedger;
   final bool failCreateLedger;
+
+  /// 清帳的兩條 await：預覽炸掉 → 頁內錯誤行不開 sheet；清帳炸掉 → sheet 內錯誤行不 pop。
+  final bool failMonthClosePreview;
+  final bool failCloseMonth;
 
   int _updateListItemCalls = 0;
 
@@ -158,10 +203,6 @@ class FailingRepository extends InMemoryLedgerRepository {
       failAddAllocation ? _boom() : super.addAllocation(a);
 
   @override
-  Future<void> removeAllocation(String id) =>
-      failRemoveAllocation ? _boom() : super.removeAllocation(id);
-
-  @override
   Future<void> updateLedger(Ledger l) => failUpdateLedger ? _boom() : super.updateLedger(l);
 
   @override
@@ -183,6 +224,14 @@ class FailingRepository extends InMemoryLedgerRepository {
 
   @override
   Future<Ledger> createLedger(String name) => failCreateLedger ? _boom() : super.createLedger(name);
+
+  @override
+  Future<MonthCloseDetails> monthClosePreview(String ledgerId, DateTime month) =>
+      failMonthClosePreview ? _boom() : super.monthClosePreview(ledgerId, month);
+
+  @override
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month) =>
+      failCloseMonth ? _boom() : super.closeMonth(ledgerId, month);
 }
 
 /// 「這個帳號還沒有任何帳本」的 repository：首登流程用。
@@ -247,4 +296,15 @@ class FlakyLoadRepository extends InMemoryLedgerRepository {
     if (failLoad) throw const LedgerException('連線失敗，請檢查網路後再試');
     return super.loadSnapshot(ledgerId);
   }
+}
+
+/// `monthSummary`（`month_summary` RPC）永遠不 resolve：用來驗「server 還沒回應時
+/// 畫面吃前端本地公式的 fallback 值」（`monthSummaryProvider(...).value` 永遠是
+/// null，不是「resolve 成某個值」，兩者對呼叫端的意義不同，這裡要驗的是前者）。
+class NeverRespondingMonthSummaryRepository extends InMemoryLedgerRepository {
+  NeverRespondingMonthSummaryRepository({super.seed});
+
+  @override
+  Future<MonthSummary> monthSummary(String ledgerId, DateTime until) =>
+      Completer<MonthSummary>().future;
 }

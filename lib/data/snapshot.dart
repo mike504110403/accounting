@@ -17,6 +17,7 @@ class LedgerSnapshot {
     required this.allocations,
     required this.listItems,
     required this.settlements,
+    required this.closes,
     required this.currentMemberId,
   });
 
@@ -32,6 +33,7 @@ class LedgerSnapshot {
         allocations: [],
         listItems: [],
         settlements: [],
+        closes: [],
         currentMemberId: '',
       );
 
@@ -42,6 +44,9 @@ class LedgerSnapshot {
   final List<BudgetAllocation> allocations;
   final List<ListItem> listItems;
   final List<Settlement> settlements;
+
+  /// 這本帳本的清帳紀錄（v1.4／ADR-0008），前端只讀。
+  final List<MonthClose> closes;
 
   /// 目前登入者在這本帳本的 member id。
   final String currentMemberId;
@@ -56,6 +61,7 @@ class LedgerSnapshot {
     List<BudgetAllocation>? allocations,
     List<ListItem>? listItems,
     List<Settlement>? settlements,
+    List<MonthClose>? closes,
     String? currentMemberId,
   }) =>
       LedgerSnapshot(
@@ -66,6 +72,7 @@ class LedgerSnapshot {
         allocations: allocations ?? this.allocations,
         listItems: listItems ?? this.listItems,
         settlements: settlements ?? this.settlements,
+        closes: closes ?? this.closes,
         currentMemberId: currentMemberId ?? this.currentMemberId,
       );
 }

@@ -1,4 +1,4 @@
-/// 預算頁的純呈現元件（v1.3／ADR-0007 版面）：只吃已算好的數字，不碰 provider、不呼叫 balance_math。
+/// 預算頁的純呈現元件（版面沿用 v1.3）：只吃已算好的數字，不碰 provider、不呼叫 balance_math。
 library;
 
 import 'dart:math' as math;
@@ -17,7 +17,7 @@ bool get _wavesEnabled => WidgetsBinding.instance is WidgetsFlutterBinding;
 TextStyle tabularStyle([TextStyle? style]) =>
     (style ?? const TextStyle()).merge(const TextStyle(fontFeatures: [FontFeature.tabularFigures()]));
 
-/// 一個分類在該月的信封狀態（畫面層資料，算式仍在 `balance_math`）。
+/// 一個分類在該月的預算狀態（畫面層資料，算式仍在 `balance_math`）。
 class CategoryRowData {
   const CategoryRowData({
     required this.category,
@@ -29,24 +29,38 @@ class CategoryRowData {
 
   final Category category;
 
-  /// 當月撥款合計（可負＝退回多於撥款）。
+  /// 當月預算（v1.4：每分類每月一筆）。
   final int allocated;
 
-  /// 當月預算支出（`funding == budget` 的共同錢包支出）。
+  /// 當月該分類的所有共同支出（不分 payer）。
   final int spent;
   final int remaining;
   final int over;
 
-  /// 沒撥款也沒預算支出：顯示「未撥款」，不畫三個數字與進度條（仍可點開 sheet）。
+  /// 沒預算也沒共同支出：顯示「未設定」，不畫三個數字與進度條（仍可點開 sheet）。
   bool get noActivity => allocated == 0 && spent == 0;
 }
 
-/// 頂部摘要卡（單卡兩列）：可用餘額大字；第二列左信封總額、右本月超支（0 時顯示「—」不上紅）。
+/// 頂部摘要卡（v1.4／ADR-0008，四格）：共同餘額大字；第二列本月預算／本月共同支出／
+/// 本月超支（0 時顯示「—」不上紅）。
 class SummaryCard extends StatelessWidget {
-  const SummaryCard({super.key, required this.available, required this.envelopes, required this.overspend});
-  final int available;
-  final int envelopes;
-  final int overspend;
+  const SummaryCard({
+    super.key,
+    required this.sharedBalance,
+    required this.budgetTotal,
+    required this.spentTotal,
+    required this.overspendTotal,
+  });
+
+  /// 共同餘額＝共同期初 ＋ Σ共同收入 − Σ共同錢包支出（預算不再預扣）。
+  final int sharedBalance;
+
+  /// 本月所有分類的預算合計。
+  final int budgetTotal;
+
+  /// 本月所有共同支出合計（不分 payer）。
+  final int spentTotal;
+  final int overspendTotal;
 
   @override
   Widget build(BuildContext context) {
@@ -58,21 +72,22 @@ class SummaryCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('可用餘額', style: textTheme.bodySmall),
+            Text('共同餘額', style: textTheme.bodySmall),
             Text(
-              fmtMoney(available),
-              style: tabularStyle(textTheme.headlineMedium?.copyWith(color: available < 0 ? scheme.error : null)),
+              fmtMoney(sharedBalance),
+              style: tabularStyle(textTheme.headlineMedium?.copyWith(color: sharedBalance < 0 ? scheme.error : null)),
             ),
             const SizedBox(height: 12),
             Row(
               children: [
-                Expanded(child: _stat(context, '信封總額', fmtMoney(envelopes))),
+                Expanded(child: _stat(context, '本月預算', fmtMoney(budgetTotal))),
+                Expanded(child: _stat(context, '本月共同支出', fmtMoney(spentTotal))),
                 Expanded(
                   child: _stat(
                     context,
                     '本月超支',
-                    overspend > 0 ? fmtMoney(overspend) : '—',
-                    color: overspend > 0 ? scheme.error : null,
+                    overspendTotal > 0 ? fmtMoney(overspendTotal) : '—',
+                    color: overspendTotal > 0 ? scheme.error : null,
                   ),
                 ),
               ],
@@ -87,18 +102,35 @@ class SummaryCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label, style: Theme.of(context).textTheme.bodySmall),
-        Text(value, style: tabularStyle(Theme.of(context).textTheme.titleMedium?.copyWith(color: color))),
+        Text(label, style: Theme.of(context).textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+        // 金額不能用省略號截斷（Mike 裁示：截斷會讓人看錯錢）——三欄版面在六位數金額
+        // 下縮字級頂住，不犧牲位數。`SizedBox(width: infinity)` 給 FittedBox 一個確定
+        // 寬度可以縮放，`alignment: centerLeft` 配合 Column 的 `crossAxisAlignment.start`。
+        SizedBox(
+          width: double.infinity,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value,
+              maxLines: 1,
+              style: tabularStyle(Theme.of(context).textTheme.titleMedium?.copyWith(color: color)),
+            ),
+          ),
+        ),
       ],
     );
   }
 }
 
-/// 「設定本月預算」提示：只在當月／未來月且該月沒有任何撥款時由呼叫端決定是否顯示。
-/// [canCopy] 為 false（上月也沒有撥款）時按鈕 disabled，文字換成「上月沒有撥款」。
+/// 「設定本月預算」提示：只在當月／未來月且該月完全沒有任何預算時由呼叫端決定是否顯示
+/// （spec 口徑）。[canCopy] 與 [busy] 刻意分開：[canCopy] 為 false（上月也沒有預算可複製）
+/// 決定文字換成「上月沒有預算」，[busy]（複製進行中）只影響按鈕是否 disabled、不影響文字
+/// ——複製正在跑的時候明明有東西可複製，不能被誤判成「上月沒有預算」。
 class SetBudgetPrompt extends StatelessWidget {
-  const SetBudgetPrompt({super.key, required this.canCopy, required this.onCopy});
+  const SetBudgetPrompt({super.key, required this.canCopy, required this.busy, required this.onCopy});
   final bool canCopy;
+  final bool busy;
   final VoidCallback onCopy;
 
   @override
@@ -110,7 +142,7 @@ class SetBudgetPrompt extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                canCopy ? '設定本月預算' : '上月沒有撥款',
+                canCopy ? '設定本月預算' : '上月沒有預算',
                 style: Theme.of(context).textTheme.bodyMedium,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -119,7 +151,7 @@ class SetBudgetPrompt extends StatelessWidget {
             const SizedBox(width: 8),
             FilledButton.tonal(
               key: const Key('copy-last-month-btn'),
-              onPressed: canCopy ? onCopy : null,
+              onPressed: (canCopy && !busy) ? onCopy : null,
               child: const Text('複製上月'),
             ),
           ],
@@ -130,9 +162,9 @@ class SetBudgetPrompt extends StatelessWidget {
 }
 
 /// 分類水位長條（Mike 手測回饋 2026-09-03：卡片換長條圖、一目瞭然、要水位動畫）。
-/// 整列是一根橫向長條：填充寬度＝剩餘／撥款（信封還剩多少水，花錢水位下降），
+/// 整列是一根橫向長條：填充寬度＝剩餘／預算（預算還剩多少水，花錢水位下降），
 /// 超支＝滿條錯誤色；水位變化用 [TweenAnimationBuilder] 補間（首繪從 0 漲到位）。
-/// 條上左 icon＋名稱、右主行「剩餘／超支＋金額」與次行「已花・撥款」；未撥款畫空條灰字。
+/// 條上左 icon＋名稱、右主行「剩餘／超支＋金額」與次行「已花・預算」；未設定畫空條灰字。
 class CategoryRow extends StatelessWidget {
   const CategoryRow({super.key, required this.row, required this.onTap});
   final CategoryRowData row;
@@ -174,7 +206,7 @@ class CategoryRow extends StatelessWidget {
                           color: over ? scheme.errorContainer : scheme.primaryContainer,
                           seed: category.id.hashCode,
                         )
-                      // widget test：波浪動畫永不停會卡死 pumpAndSettle，退回靜態填充
+                      // widget test：波浪動畫永不停會卡死 pumpAndSettle，改用靜態填充
                       //（測試斷言的 water-fill key／widthFactor 走這條路）。
                       : Align(
                           alignment: Alignment.centerLeft,
@@ -200,7 +232,37 @@ class CategoryRow extends StatelessWidget {
                       ),
                       const SizedBox(width: 8),
                       if (row.noActivity)
-                        Text('未撥款', style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
+                        Text('未設定', style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
+                      else if (row.allocated == 0)
+                        // 沒設預算但有共同支出（如 seed 住房）：仍要標「未設定」——這不是
+                        // 「設了預算又花超」，是「根本沒設」；但已花不可藏（spec：已花＝
+                        // 所有共同支出，含沖銷後的負數淨額，一樣不能假裝沒發生）；超支只在
+                        // over > 0 才畫——沖銷把這個分類的當月淨額沖成 0 或負數時，
+                        // balance_math 把 over 夾在 0，這裡不畫一行「超支 0」誤導人。
+                        Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text('未設定', style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                            if (row.spent != 0 || row.over > 0)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (row.spent != 0) ...[
+                                    Text('已花', style: secondary),
+                                    const SizedBox(width: 4),
+                                    Text(fmtAmount(row.spent), style: tabularStyle(secondary)),
+                                  ],
+                                  if (row.spent != 0 && row.over > 0) const SizedBox(width: 8),
+                                  if (row.over > 0) ...[
+                                    Text('超支', style: secondary?.copyWith(color: scheme.error)),
+                                    const SizedBox(width: 4),
+                                    Text(fmtAmount(row.over), style: tabularStyle(secondary?.copyWith(color: scheme.error))),
+                                  ],
+                                ],
+                              ),
+                          ],
+                        )
                       else
                         Column(
                           mainAxisAlignment: MainAxisAlignment.center,
@@ -227,7 +289,7 @@ class CategoryRow extends StatelessWidget {
                                 const SizedBox(width: 4),
                                 Text(fmtAmount(row.spent), style: tabularStyle(secondary)),
                                 const SizedBox(width: 8),
-                                Text('撥款', style: secondary),
+                                Text('預算', style: secondary),
                                 const SizedBox(width: 4),
                                 Text(fmtAmount(row.allocated), style: tabularStyle(secondary)),
                               ],

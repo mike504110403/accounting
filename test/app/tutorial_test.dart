@@ -120,6 +120,78 @@ void main() {
     expect(find.byKey(const Key('tutorial-card')), findsNothing);
   });
 
+  testWidgets('預算步文案：v1.4 影子預算字串（直接斷言字串，不拿 tutorialSteps 當期望值）', (tester) async {
+    final c = await pumpApp(tester);
+    c.read(tutorialProvider.notifier).start();
+    await tester.pumpAndSettle();
+
+    // 0 記帳入口（說明步）→ 下一步
+    await tester.tap(find.byKey(const Key('tutorial-next')));
+    await tester.pumpAndSettle();
+
+    // 1 互動：點亮起的「預算」tab → 導頁自動前進到步驟 2
+    await tester.tap(find.byIcon(Icons.savings_outlined));
+    await tester.pumpAndSettle();
+
+    // 2 預算頁說明：literal 斷言新文案（限定卡片內找，避免撞到底層 BudgetPage 同字的
+    // 「本月預算」stat label——tutorial 高亮需要底層頁面真的建出來，兩處會同框）。
+    final card = find.byKey(const Key('tutorial-card'));
+    expect(find.descendant(of: card, matching: find.text('本月預算')), findsOneWidget);
+    expect(
+      find.descendant(of: card, matching: find.text('設定各分類的本月預算；所有共同支出都會扣，超支一眼看得到。')),
+      findsOneWidget,
+    );
+    expect(find.descendant(of: card, matching: find.textContaining('信封')), findsNothing);
+  });
+
+  testWidgets('分類管理步文案：v1.4 餘額設定與清帳字串（直接斷言字串，不拿 tutorialSteps 當期望值）', (tester) async {
+    final c = await pumpApp(tester);
+    c.read(tutorialProvider.notifier).start();
+    await tester.pumpAndSettle();
+
+    // 0 記帳入口 → 下一步
+    await tester.tap(find.byKey(const Key('tutorial-next')));
+    await tester.pumpAndSettle();
+    // 1 互動：點「預算」tab
+    await tester.tap(find.byIcon(Icons.savings_outlined));
+    await tester.pumpAndSettle();
+    // 2 預算頁說明 → 下一步
+    await tester.tap(find.byKey(const Key('tutorial-next')));
+    await tester.pumpAndSettle();
+    // 3 互動：點「清單」
+    await tester.tap(find.byIcon(Icons.checklist_outlined));
+    await tester.pumpAndSettle();
+    // 4 互動：點清單「＋」→ 真的開 sheet 並自動前進
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    // 5 說明（sheet 開著）→ 下一步順手收掉 sheet
+    await tester.tap(find.byKey(const Key('tutorial-next')));
+    await tester.pumpAndSettle();
+    // 6 互動：回「帳目」
+    await tester.tap(find.byIcon(Icons.receipt_long_outlined));
+    await tester.pumpAndSettle();
+    // 7 家庭與個人（說明）→ 下一步
+    await tester.tap(find.byKey(const Key('tutorial-next')));
+    await tester.pumpAndSettle();
+    // 8 互動：點齒輪進設定
+    await tester.tap(find.byIcon(Icons.settings_outlined));
+    await tester.pumpAndSettle();
+    // 9 互動：點「分類管理」進子頁
+    await tester.tap(find.text('分類管理'));
+    await tester.pumpAndSettle();
+
+    // 10 分類頁說明：literal 斷言新文案（限定卡片內找）。
+    final card = find.byKey(const Key('tutorial-card'));
+    expect(
+      find.descendant(
+          of: card,
+          matching:
+              find.text('這裡可以新增分類、拖曳排序；左滑任一列＝編輯／刪除。分攤比例、餘額設定與清帳也都在設定裡。')),
+      findsOneWidget,
+    );
+    expect(find.descendant(of: card, matching: find.textContaining('期初餘額')), findsNothing);
+  });
+
   testWidgets('maybeStart 在 widget test binding 下不自動開（既有測試不被劫持）', (tester) async {
     final c = await pumpApp(tester);
     c.read(tutorialProvider.notifier).maybeStart();

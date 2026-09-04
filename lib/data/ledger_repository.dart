@@ -36,7 +36,7 @@ abstract class LedgerRepository {
   void clearSnapshot();
 
   // ── 月摘要（DB 端計算）───────────────────────────────────────────────
-  /// 衍生數字（共同餘額／可用餘額／信封／超支／個人餘額）一律由後端依 Supabase
+  /// 衍生數字（共同餘額／預算／已花／超支／個人餘額）一律由後端依 Supabase
   /// 資料計算（Mike 裁示 2026-09-03）；`until` 只取日期分量。
   Future<MonthSummary> monthSummary(String ledgerId, DateTime until);
 
@@ -50,7 +50,10 @@ abstract class LedgerRepository {
   /// 只送 `name, default_ratio, opening_balance_shared`（其餘欄位沒有 update 授權）。
   Future<void> updateLedger(Ledger ledger);
 
-  /// 只送 `display_name, opening_balance_personal`，且只能是自己那列。
+  /// 只送 `display_name, monthly_topup`，且只能是自己那列。
+  ///
+  /// `opening_balance_personal` v1.4 起廢用（欄位仍在 DB、仍有 update 授權，
+  /// 但不入任何公式），所以不再送。
   Future<void> updateMember(Member member);
 
   Future<Ledger> fetchLedger(String ledgerId);
@@ -84,10 +87,12 @@ abstract class LedgerRepository {
   /// `line_items` 表本身對成員是全權（select/insert/update/delete），跟隨父 entry 的 RLS。
   Future<List<LineItem>> replaceLineItems(String entryId, List<LineItem> items);
 
-  // ── 預算撥款 ────────────────────────────────────────────────────────
+  // ── 預算（影子紀錄）──────────────────────────────────────────────────
   Future<List<BudgetAllocation>> fetchAllocations(String ledgerId);
+
+  /// 設定某分類某月的預算。**每分類每月至多一筆、金額 > 0、設定後不可改不可刪**
+  /// （v1.4／ADR-0008；DB 連 UPDATE／DELETE 授權都收回了，所以沒有對應的 remove）。
   Future<BudgetAllocation> addAllocation(BudgetAllocation allocation);
-  Future<void> removeAllocation(String id);
 
   // ── 清單／待辦 ──────────────────────────────────────────────────────
   Future<List<ListItem>> fetchListItems(String ledgerId);
@@ -100,6 +105,16 @@ abstract class LedgerRepository {
   Future<Settlement> initiateSettlement(String ledgerId);
   Future<Settlement> approveSettlement(String settlementId);
   Future<Settlement> cancelSettlement(String settlementId);
+
+  // ── 月清帳（v1.4，只讀 ＋ 兩支 RPC）──────────────────────────────────
+  Future<List<MonthClose>> fetchMonthCloses(String ledgerId);
+
+  /// 清帳預覽：可清條件不過就丟 [LedgerException]（中文），過了回和落地
+  /// `details` 相同的明細，外加 `warnings`（落地的快照不帶）。
+  Future<MonthCloseDetails> monthClosePreview(String ledgerId, DateTime month);
+
+  /// 執行清帳。任一成員可執行、不需多簽、**不可撤銷**；失敗一律丟 [LedgerException]。
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month);
 }
 
 /// 目前使用的資料來源。預設是記憶體實作——測試與 `--dart-define=USE_MOCK=true` 直接可用；

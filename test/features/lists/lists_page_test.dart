@@ -115,6 +115,7 @@ void main() {
     expect(newEntry.kind, EntryKind.expense);
     expect(newEntry.scope, EntryScope.shared);
     expect(newEntry.splitMethod, SplitMethod.common);
+    expect(newEntry.payerId, isNull, reason: 'v1.4：共同錢包路徑，付款人為空');
 
     final item = container.read(listItemsProvider).firstWhere((i) => i.id == 'l-2');
     expect(item.isDone, isTrue);
@@ -257,8 +258,7 @@ void main() {
 
     await tester.tap(find.byKey(const Key('checkout-payer-$kMeId')));
     await tester.pumpAndSettle();
-    // 代墊不走預算：資金列消失
-    expect(find.byKey(const Key('checkout-funding-budget')), findsNothing);
+    // v1.4：結帳 sheet 沒有資金來源那一列，切成代墊之後只剩分攤方式。
     expect(find.byKey(const Key('checkout-split-equal')), findsOneWidget);
 
     await tester.tap(find.widgetWithText(FilledButton, '確認'));
@@ -268,7 +268,6 @@ void main() {
         (e) => e.lineItems.length == 1 && e.lineItems.single.name == '酸奶');
     expect(entry.payerId, kMeId);
     expect(entry.splitMethod, SplitMethod.equal);
-    expect(entry.funding, Funding.balance);
     expect(entry.splits.map((s) => s.share).reduce((a, b) => a + b), entry.amount);
   });
 

@@ -13,8 +13,9 @@ import '../../data/current_ledger.dart';
 import '../../data/ledger_repository.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
+import 'closes_page.dart' show lastClosedMonth;
 
-/// 設定：帳本、外觀、成員、期初餘額、分類管理入口（波 1 工人實作，替換本檔內容）。
+/// 設定：帳本、外觀、成員、餘額設定、清帳與分類管理入口（波 1 工人實作，替換本檔內容）。
 /// 緊湊單頁：每個項目一行，點進去才開 bottom sheet 編輯（spec v1.1 UI 互動原則：表單一律 bottom sheet）。
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
@@ -483,8 +484,10 @@ class _MembersCard extends ConsumerWidget {
 
     final namesSummary = members.map((m) => m.displayName).join('、');
     final ratioSummary = members.map((m) => '${m.displayName} ${ledger.defaultRatio[m.id] ?? 0}%').join('・');
-    // 不留空格：390px 下這行是最緊的樣本，「共同 120,000／我 50,000」帶空格量過會被截斷，拿掉空格才塞得下。
-    final balanceSummary = '共同${fmtAmount(ledger.openingBalanceShared)}／我${fmtAmount(me?.openingBalancePersonal ?? 0)}';
+    // 兩筆餘額拆成兩列（Mike 裁示 2026-09-05）：390px 下 value 的可用寬只有 247px，
+    // 「共同 120,000・我每月 10,000」量過要 299px，擠在一列一定截斷（MAJOR-1）。
+    // 兩列都開同一個「餘額設定」sheet。
+    void openBalanceSheet() => _openSheet(context, (_) => const _BalanceSettingsSheet());
 
     return Card(
       child: Column(
@@ -500,9 +503,16 @@ class _MembersCard extends ConsumerWidget {
             onTap: () => _openSheet(context, (_) => const _RatioSheet()),
           ),
           _SettingsRow(
-            label: '期初餘額',
-            value: balanceSummary,
-            onTap: () => _openSheet(context, (_) => const _OpeningBalanceSheet()),
+            key: const Key('shared-opening-row'),
+            label: '共同期初餘額',
+            value: fmtAmount(ledger.openingBalanceShared),
+            onTap: openBalanceSheet,
+          ),
+          _SettingsRow(
+            key: const Key('monthly-topup-row'),
+            label: '我的每月補入額',
+            value: fmtAmount(me?.monthlyTopup ?? 0),
+            onTap: openBalanceSheet,
           ),
         ],
       ),
@@ -640,16 +650,18 @@ class _RatioSheetState extends ConsumerState<_RatioSheet> {
   }
 }
 
-class _OpeningBalanceSheet extends ConsumerStatefulWidget {
-  const _OpeningBalanceSheet();
+/// 餘額設定（v1.4）：共同期初餘額一個 ＋ 我的每月補入額一個。
+/// `opening_balance_personal` 已廢用，欄位從 UI 整個拿掉（只在寫入時原樣帶過去）。
+class _BalanceSettingsSheet extends ConsumerStatefulWidget {
+  const _BalanceSettingsSheet();
 
   @override
-  ConsumerState<_OpeningBalanceSheet> createState() => _OpeningBalanceSheetState();
+  ConsumerState<_BalanceSettingsSheet> createState() => _BalanceSettingsSheetState();
 }
 
-class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
+class _BalanceSettingsSheetState extends ConsumerState<_BalanceSettingsSheet> {
   late final TextEditingController _sharedController;
-  late final TextEditingController _personalController;
+  late final TextEditingController _topupController;
   String? _error;
   bool _saving = false;
 
@@ -660,17 +672,17 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
     final meId = ref.read(currentMemberIdProvider);
     final me = _findMember(ref.read(membersProvider), meId);
     _sharedController = TextEditingController(text: ledger.openingBalanceShared.toString());
-    _personalController = TextEditingController(text: (me?.openingBalancePersonal ?? 0).toString());
+    _topupController = TextEditingController(text: (me?.monthlyTopup ?? 0).toString());
   }
 
   @override
   void dispose() {
     _sharedController.dispose();
-    _personalController.dispose();
+    _topupController.dispose();
     super.dispose();
   }
 
-  // 一顆「儲存」同時存共同與個人兩欄（任一失敗都停在 sheet 內顯示錯誤，不半途 pop）。
+  // 一顆「儲存」同時存兩欄（任一失敗都停在 sheet 內顯示錯誤，不半途 pop）。
   // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功先 pop 再補 SnackBar。
   Future<void> _save(Ledger ledger, Member? me) async {
     if (_saving) return;
@@ -679,8 +691,8 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
       setState(() => _error = '請輸入有效金額');
       return;
     }
-    final personalV = me == null ? null : int.tryParse(_personalController.text.trim());
-    if (me != null && personalV == null) {
+    final topupV = me == null ? null : int.tryParse(_topupController.text.trim());
+    if (me != null && topupV == null) {
       setState(() => _error = '請輸入有效金額');
       return;
     }
@@ -702,7 +714,17 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
     }
     if (me != null) {
       try {
-        await ref.read(membersStateProvider.notifier).update(Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, openingBalancePersonal: personalV!));
+        // v1.4：只改「每月補入額」。廢用的 `openingBalancePersonal` 原樣帶過去
+        // ——Supabase 版根本不送這一欄，這裡只是別讓一次更新把成員資料洗掉。
+        await ref.read(membersStateProvider.notifier).update(Member(
+              id: me.id,
+              ledgerId: me.ledgerId,
+              userId: me.userId,
+              displayName: me.displayName,
+              monthlyTopup: topupV!,
+              openingBalancePersonal: me.openingBalancePersonal,
+              joinedAt: me.joinedAt,
+            ));
       } catch (e) {
         // 兩張表沒有共同交易，個人欄寫入失敗時把已寫進去的共同欄退回原值，
         // 讓「儲存失敗」文案與事實一致（兩欄都沒存）。
@@ -736,23 +758,25 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('期初餘額', style: Theme.of(context).textTheme.titleLarge),
+          Text('餘額設定', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 12),
           TextField(
-            key: const ValueKey('opening-shared-field'),
+            key: const ValueKey('balance-shared-field'),
             controller: _sharedController,
             keyboardType: TextInputType.number,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: '共同'),
+            decoration: const InputDecoration(labelText: '共同期初餘額'),
           ),
           if (me != null) ...[
             const SizedBox(height: 8),
             TextField(
-              key: const ValueKey('opening-personal-field'),
-              controller: _personalController,
+              key: const ValueKey('balance-topup-field'),
+              controller: _topupController,
               keyboardType: TextInputType.number,
+              // 負數由 digitsOnly 擋在輸入端；上界（1 億）由 DB check
+              // `members_monthly_topup_range` 擋，訊息走 errors.dart 顯示在下面那行。
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(labelText: '我的個人'),
+              decoration: const InputDecoration(labelText: '我的每月補入額'),
             ),
           ] else
             const Padding(padding: EdgeInsets.only(top: 8), child: Text('尚無成員資料')),
@@ -765,7 +789,7 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
           SizedBox(
             width: double.infinity,
             child: FilledButton(
-              key: const ValueKey('save-opening-button'),
+              key: const ValueKey('save-balance-button'),
               onPressed: _saving ? null : () => _save(ledger, me),
               child: Text(_saving ? '儲存中…' : '儲存'),
             ),
@@ -795,9 +819,16 @@ class _OtherCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final last = lastClosedMonth(ref.watch(monthClosesProvider));
     return Card(
       child: Column(
         children: [
+          _SettingsRow(
+            key: const Key('closes-row'),
+            label: '清帳',
+            value: last == null ? '尚未清帳' : '上次清帳 ${fmtYearMonth(last)}',
+            onTap: () => context.push('/settings/closes'),
+          ),
           KeyedSubtree(
             key: tutorialKey('settings-categories'),
             child: _SettingsRow(

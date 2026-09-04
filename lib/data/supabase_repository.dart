@@ -46,6 +46,7 @@ class SupabaseLedgerRepository implements LedgerRepository {
           _client.from('budget_allocation').select().eq('ledger_id', ledgerId),
           _client.from('list_items').select().eq('ledger_id', ledgerId),
           _client.from('settlements').select(_settlementSelect).eq('ledger_id', ledgerId),
+          _client.from('month_closes').select().eq('ledger_id', ledgerId),
         ]);
 
         final ledger = parseRow('ledgers', Map<String, dynamic>.from(results[0] as Map), Ledger.fromJson);
@@ -61,6 +62,7 @@ class SupabaseLedgerRepository implements LedgerRepository {
           allocations: parseRows('budget_allocation', results[4] as List, BudgetAllocation.fromJson),
           listItems: parseRows('list_items', results[5] as List, ListItem.fromJson),
           settlements: parseRows('settlements', results[6] as List, Settlement.fromJson),
+          closes: parseRows('month_closes', results[7] as List, MonthClose.fromJson),
           currentMemberId: me.first.id,
         );
         return _snapshot;
@@ -77,8 +79,7 @@ class SupabaseLedgerRepository implements LedgerRepository {
   Future<MonthSummary> monthSummary(String ledgerId, DateTime until) => guard(() async {
         final json = await _client.rpc('month_summary', params: {
           'p_ledger': ledgerId,
-          'p_until':
-              '${until.year.toString().padLeft(4, '0')}-${until.month.toString().padLeft(2, '0')}-${until.day.toString().padLeft(2, '0')}',
+          'p_until': _dateParam(until),
         });
         return MonthSummary.fromJson((json as Map).cast<String, dynamic>());
       });
@@ -125,9 +126,11 @@ class SupabaseLedgerRepository implements LedgerRepository {
 
   @override
   Future<void> updateMember(Member member) => guard(() async {
+        // v1.4：只送這兩欄。`opening_balance_personal` 已廢用（欄位與授權還在，
+        // 但不入公式），送了只會把一個沒人讀的欄位寫花。
         await _client.from('members').update({
           'display_name': member.displayName,
-          'opening_balance_personal': member.openingBalancePersonal,
+          'monthly_topup': member.monthlyTopup,
         }).eq('id', member.id);
       });
 
@@ -248,15 +251,10 @@ class SupabaseLedgerRepository implements LedgerRepository {
   Future<BudgetAllocation> addAllocation(BudgetAllocation allocation) => guard(() async {
         final payload = allocation.toJson()
           ..remove('id')
-          // 不能以別人的名義撥款：created_by 一律強制成自己。
+          // 不能以別人的名義設定預算：created_by 一律強制成自己。
           ..['created_by'] = _myMemberId;
         final row = await _client.from('budget_allocation').insert(payload).select().single();
         return parseRow('budget_allocation', row, BudgetAllocation.fromJson);
-      });
-
-  @override
-  Future<void> removeAllocation(String id) => guard(() async {
-        await _client.from('budget_allocation').delete().eq('id', id);
       });
 
   // ── 清單／待辦 ──────────────────────────────────────────────────────
@@ -318,4 +316,37 @@ class SupabaseLedgerRepository implements LedgerRepository {
         return parseRow('settlements', full, Settlement.fromJson);
       });
 
+  // ── 月清帳 ──────────────────────────────────────────────────────────
+
+  @override
+  Future<List<MonthClose>> fetchMonthCloses(String ledgerId) => guard(() async {
+        final rows = await _client.from('month_closes').select().eq('ledger_id', ledgerId);
+        return parseRows('month_closes', rows, MonthClose.fromJson);
+      });
+
+  @override
+  Future<MonthCloseDetails> monthClosePreview(String ledgerId, DateTime month) => guard(() async {
+        final json = await _client.rpc('month_close_preview', params: {
+          'p_ledger': ledgerId,
+          // 不代為正規化成月初：DB 的第一條可清條件就是「必須是月初」，
+          // 前端偷偷改掉的話那條 raise 永遠打不到，兩個實作也會分岔。
+          'p_month': _dateParam(month),
+        });
+        return parseRow('month_close_preview', (json as Map).cast<String, dynamic>(),
+            MonthCloseDetails.fromJson);
+      });
+
+  @override
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month) => guard(() async {
+        final row = await _client.rpc<dynamic>('close_month', params: {
+          'p_ledger': ledgerId,
+          'p_month': _dateParam(month),
+        });
+        return parseRow('month_closes', asRowMap(row), MonthClose.fromJson);
+      });
 }
+
+/// `date` 參數一律送 `YYYY-MM-DD`（PostgREST 走具名參數，型別由 DB 那側決定）。
+String _dateParam(DateTime d) =>
+    '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+

@@ -184,7 +184,8 @@ class EntriesNotifier extends Notifier<List<Entry>> {
 
 final entriesProvider = NotifierProvider<EntriesNotifier, List<Entry>>(EntriesNotifier.new);
 
-/// 撥款狀態（ADR-0007）：一列＝一次手動撥款／退回，信封只看當月。
+/// 預算狀態（v1.4／ADR-0008）：一列＝某分類某月的預算影子紀錄。
+/// **只有 add**——設定後不可改、不可刪、不可退回（DB 連 UPDATE／DELETE 授權都收回了）。
 class AllocationsNotifier extends Notifier<List<BudgetAllocation>> {
   @override
   List<BudgetAllocation> build() => ref.watch(snapshotProvider).allocations;
@@ -196,11 +197,6 @@ class AllocationsNotifier extends Notifier<List<BudgetAllocation>> {
     final saved = await _repo.addAllocation(a);
     state = [...state, saved];
     return saved;
-  }
-
-  Future<void> remove(String id) async {
-    await _repo.removeAllocation(id);
-    state = state.where((x) => x.id != id).toList();
   }
 
   Future<void> refresh() async {
@@ -285,3 +281,19 @@ class SettlementsNotifier extends Notifier<List<Settlement>> {
 
 final settlementsProvider =
     NotifierProvider<SettlementsNotifier, List<Settlement>>(SettlementsNotifier.new);
+
+/// 清帳紀錄（v1.4／ADR-0008）。前端只讀：清帳只能經 `close_month` RPC，
+/// 成功之後由呼叫端（或 Realtime 的 `month_closes` 事件）`refresh()` 把列表換掉。
+class MonthClosesNotifier extends Notifier<List<MonthClose>> {
+  @override
+  List<MonthClose> build() => ref.watch(snapshotProvider).closes;
+
+  LedgerRepository get _repo => ref.read(ledgerRepositoryProvider);
+
+  Future<void> refresh() async {
+    state = await _repo.fetchMonthCloses(ref.read(snapshotProvider).ledger.id);
+  }
+}
+
+final monthClosesProvider =
+    NotifierProvider<MonthClosesNotifier, List<MonthClose>>(MonthClosesNotifier.new);

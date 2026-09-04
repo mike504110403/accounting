@@ -10,8 +10,9 @@ import '../../domain/models.dart';
 import 'allocation_sheet.dart';
 import 'budget_widgets.dart';
 
-/// 預算 Tab（v1.3／ADR-0007）：頂部可用餘額＋信封總額／本月超支，每分類一列
-/// 撥款／已花／剩餘／超支，點列開 sheet 撥款或退回；當月無撥款時提示可複製上月。
+/// 預算 Tab（v1.4／ADR-0008）：頂部四數字（共同餘額／本月預算／本月共同支出／本月超支），
+/// 每分類一列預算／已花／剩餘／超支，點列開 sheet 設定本月預算；本月完全沒有任何預算時
+/// 提示可複製上月（只補上月有值且本月尚未設定的分類）。
 class BudgetPage extends ConsumerStatefulWidget {
   const BudgetPage({super.key});
 
@@ -35,15 +36,16 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
 
     final expenseCats = categories.where((c) => c.kind == EntryKind.expense).toList()..sort((a, b) => a.sort.compareTo(b.sort));
 
-    // 信封只看當月，一律算到該月最後一天（本月尚未發生的日子沒有帳，算到月底與算到今天同值）。
+    // 預算只看當月，一律算到該月最後一天（本月尚未發生的日子沒有帳，算到月底與算到今天同值）。
     final until = DateTime(_month.year, _month.month + 1, 0);
 
     // 衍生數字一律吃 DB month_summary（Mike 裁示 2026-09-03）；重刷期間沿用上一份
     // server 值（AsyncValue 預設 skipLoadingOnRefresh），首載前先畫 0。
     final summary = ref.watch(monthSummaryProvider(until)).value;
-    final available = summary?.sharedAvailable ?? 0;
-    final envelopes = summary?.envelopeTotal ?? 0;
-    final overAll = summary?.overspendTotal ?? 0;
+    final topBalance = summary?.sharedBalance ?? 0;
+    final topBudget = summary?.budgetTotal ?? 0;
+    final topSpent = summary?.spentTotal ?? 0;
+    final topOver = summary?.overspendTotal ?? 0;
 
     final rows = [
       for (final c in expenseCats)
@@ -59,25 +61,41 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
         }(),
     ];
 
-    // 「設定本月預算」提示：只在看的是當月或未來月、且該月完全沒有任何撥款紀錄時出現。
+    // 「設定本月預算」提示：只在看的是當月或未來月、summary 已經首載完成、且該月完全
+    // 沒有任何預算時出現（spec 口徑）。「已設定」判定一律看 monthSummary.envelopeOf(id)
+    // .allocated（與頁面其他數字同源），不回頭重算 allocations 原始清單。
+    // summary == null（首載還沒回來）時一律不顯示：不然會先閃一次「假的全空」提示，
+    // 使用者這時按下複製，事後 summary 回來才發現其實已經設定過，白白撞 23505。
+    bool isSetThisMonth(Category c) => (summary?.envelopeOf(c.id).allocated ?? 0) > 0;
     final isCurrentOrFuture = !_month.isBefore(monthOf(DateTime.now()));
-    final hasAllocationsThisMonth = allocations.any((a) => sameMonth(a.occurredOn, _month));
-    final showPrompt = isCurrentOrFuture && !hasAllocationsThisMonth;
+    final hasAllocationsThisMonth = expenseCats.any(isSetThisMonth);
+    final showPrompt = summary != null && isCurrentOrFuture && !hasAllocationsThisMonth;
 
-    // 複製上月候選：上月每個「撥款合計 > 0」的分類；退回後淨額歸零的分類不建（DB check 也不許 amount==0）。
+    // 複製上月候選：上月有預算、**且本月尚未設定**的分類（每分類每月只能設定一次，
+    // 已設定的再送一次會被 unique 擋成 23505）。showPrompt 已經保證本月全空，這裡的
+    // 「本月未設定」再判一次是防禦性寫法（同 isSetThisMonth 同源）。
     var copyPairs = const <(Category, int)>[];
     if (showPrompt) {
-      final prevUntil = DateTime(_month.year, _month.month, 0); // 上月最後一天
+      final prevMonthStart = prevMonth(_month);
       copyPairs = [
         for (final c in expenseCats)
-          if (allocatedIn(allocations: allocations, categoryId: c.id, until: prevUntil) > 0)
-            (c, allocatedIn(allocations: allocations, categoryId: c.id, until: prevUntil)),
+          if (allocatedIn(allocations: allocations, categoryId: c.id, month: prevMonthStart) > 0 &&
+              !isSetThisMonth(c))
+            (c, allocatedIn(allocations: allocations, categoryId: c.id, month: prevMonthStart)),
       ];
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: MonthTitle(month: _month, onChanged: (m) => setState(() => _month = m)),
+        title: MonthTitle(
+          month: _month,
+          onChanged: (m) => setState(() {
+            _month = m;
+            // 切月等於看另一個月的複製上月狀態；上一個月殘留的錯誤訊息在新月份下
+            // 已經文不對題，一併清掉。
+            _copyError = null;
+          }),
+        ),
       ),
       body: Center(
         child: ConstrainedBox(
@@ -87,12 +105,18 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
             children: [
               KeyedSubtree(
                 key: tutorialKey('budget-summary'),
-                child: SummaryCard(available: available, envelopes: envelopes, overspend: overAll),
+                child: SummaryCard(
+                  sharedBalance: topBalance,
+                  budgetTotal: topBudget,
+                  spentTotal: topSpent,
+                  overspendTotal: topOver,
+                ),
               ),
               if (showPrompt) ...[
                 const SizedBox(height: 8),
                 SetBudgetPrompt(
-                  canCopy: copyPairs.isNotEmpty && !_copying,
+                  canCopy: copyPairs.isNotEmpty,
+                  busy: _copying,
                   onCopy: () => _copyLastMonth(copyPairs),
                 ),
               ],
@@ -127,10 +151,11 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
     );
   }
 
-  /// 對上月每個有撥款的分類，各建一筆本月 1 號、金額＝上月該分類撥款合計的撥款（備註「複製上月」）。
+  /// 對上月有預算、本月尚未設定的分類，各建一筆本月 1 號、金額＝上月該分類預算的預算
+  /// （備註「複製上月」）。
   ///
-  /// 沒有批次寫入的入口（`budget_allocation` 一列＝一次撥款），所以逐筆寫；
-  /// 中途失敗就停在那裡並顯示錯誤——已經寫進去的幾筆是有效撥款，不回頭刪。
+  /// 沒有批次寫入的入口（`budget_allocation` 一列＝一個分類一個月），所以逐筆寫；
+  /// 中途失敗就停在那裡並顯示錯誤——已經寫進去的幾筆是有效預算，設定後不可刪。
   Future<void> _copyLastMonth(List<(Category, int)> pairs) async {
     if (_copying) return;
     setState(() {
@@ -157,9 +182,9 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
         done++;
       }
     } catch (e) {
-      // 一列＝一次撥款，沒有批次入口，中途失敗就是「已建 N 筆、剩下沒建」。
-      // 已建的那幾筆是有效撥款，不回頭刪；但一定要把數字講清楚，
-      // 否則使用者只看到信封多了一半，不知道還缺什麼、也不知道能不能再按一次。
+      // 一列＝一個分類一個月，沒有批次入口，中途失敗就是「已建 N 筆、剩下沒建」。
+      // 已建的那幾筆是有效預算，設定後不可刪；但一定要把數字講清楚，
+      // 否則使用者只看到預算多了一半，不知道還缺什麼、也不知道能不能再按一次。
       if (mounted) {
         setState(() => _copyError =
             '已建 $done／${pairs.length} 筆，失敗：${e is LedgerException ? e.message : '請稍後再試'}');

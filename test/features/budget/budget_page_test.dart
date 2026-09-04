@@ -27,7 +27,8 @@ class _FixedAllocations extends AllocationsNotifier {
   List<BudgetAllocation> build() => seed;
 }
 
-/// add 一律丟例外，用來驗儲存失敗路徑（sheet 仍要開著、內部顯示錯誤，不能被 pop 掉）。
+/// add 一律丟通用例外（非 [LedgerException]）：驗「儲存失敗，請重試」那條 fallback 訊息、
+/// loading 解除、sheet 不 pop。
 class _ThrowingAllocations extends AllocationsNotifier {
   _ThrowingAllocations(this.seed);
   final List<BudgetAllocation> seed;
@@ -77,6 +78,16 @@ void main() {
   ];
 
   const ledger10k = Ledger(id: kLedgerId, name: '測試帳本', inviteCode: 'ABC123', defaultRatio: {kMeId: 100}, openingBalanceShared: 10000);
+  const ledger7500 = Ledger(id: kLedgerId, name: '測試帳本', inviteCode: 'ABC123', defaultRatio: {kMeId: 100}, openingBalanceShared: 7500);
+
+  MonthClose closeOf(DateTime month) => MonthClose(
+        id: 'mc-${month.year}-${month.month}',
+        ledgerId: kLedgerId,
+        month: month,
+        closedBy: kMeId,
+        closedAt: month,
+        details: MonthCloseDetails(month: month, members: const [], sharedDelta: 0),
+      );
 
   // 回傳型別交給推論：flutter_riverpod 3 沒有匯出 `Override` 這個型別名（同 stats_page_test.dart 慣例）。
   overridesFor({
@@ -86,6 +97,7 @@ void main() {
     Ledger ledger = ledger10k,
     bool throwing = false,
     AllocationsNotifier Function()? allocationsNotifier,
+    InMemoryLedgerRepository? repository,
   }) => [
         categoriesProvider.overrideWithValue(categories),
         ledgerProvider.overrideWithValue(ledger),
@@ -94,12 +106,9 @@ void main() {
             () => throwing ? _ThrowingAllocations(allocations) : _FixedAllocations(allocations)),
         // month_summary（衍生數字改吃 DB）：InMemory repo 餵同一份 fixture，
         // 讓 monthSummaryProvider 算出與畫面 fixture 一致的 server 值。
-        ledgerRepositoryProvider.overrideWithValue(repoWith(
-          ledger: ledger,
-          categories: categories,
-          entries: entries,
-          allocations: allocations,
-        )),
+        ledgerRepositoryProvider.overrideWithValue(
+          repository ?? repoWith(ledger: ledger, categories: categories, entries: entries, allocations: allocations),
+        ),
       ];
 
   Future<ProviderContainer> pumpBudget(
@@ -108,9 +117,10 @@ void main() {
     List<Entry> entries = const [],
     List<BudgetAllocation> allocations = const [],
     Ledger ledger = ledger10k,
-    bool throwing = false,
     ThemeData? theme,
+    bool throwing = false,
     AllocationsNotifier Function()? allocationsNotifier,
+    InMemoryLedgerRepository? repository,
   }) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1.0;
@@ -123,6 +133,7 @@ void main() {
         ledger: ledger,
         throwing: throwing,
         allocationsNotifier: allocationsNotifier,
+        repository: repository,
       ),
     );
     addTearDown(container.dispose);
@@ -136,7 +147,7 @@ void main() {
 
   Finder inRow(String categoryId, Finder f) => find.descendant(of: find.byKey(ValueKey('category-row-$categoryId')), matching: f);
 
-  testWidgets('真實組裝：AccountingApp 根啟動點「預算」，頂部可用餘額／信封總額與 seed 手算一致', (tester) async {
+  testWidgets('真實組裝：AccountingApp 根啟動點「預算」tab → 點住房列（seed 本月未設定）→ 設定金額 → 存 → 列顯示金額且再點開沒有輸入欄', (tester) async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     await tester.pumpWidget(UncontrolledProviderScope(container: container, child: const AccountingApp()));
@@ -145,31 +156,96 @@ void main() {
     container.read(routerProvider).go('/budget');
     await tester.pumpAndSettle();
 
-    // 手算同舊版檔頭：可用餘額 154,800（共同餘額）− 10,500（信封剩餘）＝ 144,300。
-    expect(find.text('可用餘額'), findsOneWidget);
-    expect(find.text(fmtMoney(144300)), findsOneWidget);
-    expect(find.text('信封總額'), findsOneWidget);
-    expect(find.text(fmtMoney(10500)), findsOneWidget);
-    expect(find.text('食品'), findsOneWidget);
+    // v1.4 手算：本月預算合計＝6,000＋4,000＋1,500＋3,000＋2,000＝16,500
+    //（食品／餐飲／日常用品／水電／交通五個分類都有預算，住房與娛樂沒有）。
+    expect(find.text(fmtMoney(16500)), findsOneWidget, reason: '本月預算合計（頂部四格）');
 
-    // 整合回歸：切到上月，食品撥款 5,500／預算支出 6,200 → 超支 700（紅字），可用餘額同步扣成 134,700。
+    // 住房在波 1 假資料裡本月已有共同支出（房租 26,000）但從沒設過預算：
+    // allocated==0 && spent>0，顯示「未設定」＋已花／超支兩數字（不是真空的 noActivity），
+    // 沒設過預算就仍是可編輯表單（過去有花費不代表本月已設定）。
+    expect(inRow('c-house', find.text('未設定')), findsOneWidget);
+    expect(inRow('c-house', find.text('超支')), findsOneWidget);
+
+    await tester.tap(find.text('住房').first);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget);
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '30000');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsNothing, reason: 'sheet 應已關閉');
+    expect(inRow('c-house', find.text(fmtAmount(30000))), findsOneWidget, reason: '列上顯示剛設定的預算');
+
+    await tester.tap(find.text('住房').first);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsNothing, reason: '已設定，不該再有輸入欄');
+    expect(find.text(fmtAmount(30000)), findsWidgets, reason: '唯讀明細顯示金額');
+  });
+
+  testWidgets('真實組裝：切上月數字回歸（seed 手算基準）', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(UncontrolledProviderScope(container: container, child: const AccountingApp()));
+    await tester.pumpAndSettle();
+
+    container.read(routerProvider).go('/budget');
+    await tester.pumpAndSettle();
+
+    // 整合回歸：切到上月，食品預算 5,500／已花 6,200 → 超支 700（紅字），共同餘額 134,800。
     await tester.fling(find.byKey(const Key('month-title')), const Offset(200, 0), 1000);
     await tester.pumpAndSettle();
 
     expect(inRow('c-food', find.text(fmtAmount(700))), findsOneWidget, reason: '上月食品超支 700');
     final overText = tester.widget<Text>(inRow('c-food', find.text(fmtAmount(700))));
     expect(overText.style?.color, Theme.of(tester.element(find.byType(BudgetPage))).colorScheme.error);
-    expect(find.text(fmtMoney(134700)), findsOneWidget, reason: '可用餘額同步扣');
+    expect(find.text(fmtMoney(134800)), findsOneWidget, reason: '上月底的共同餘額');
   });
 
-  testWidgets('頂部三數字：可用餘額／信封總額／本月超支；分類列三數字（撥款／已花／剩餘，超支時剩餘換成紅字超支）；未撥款列灰字', (tester) async {
-    // 食品：撥款 5,000、預算支出 3,000 → 剩餘 2,000、超支 0 → 顯示「剩餘」
-    // 餐飲：撥款 1,000、預算支出 1,500 → 剩餘 0、超支 500 → 那格換顯示紅字「超支」
-    // 水電：無撥款無預算支出 → 未撥款
-    // 共同餘額＝10,000 − (3,000＋1,500) ＝ 5,500；信封總額＝2,000＋0＝2,000；可用餘額＝5,500−2,000＝3,500
+  testWidgets('頂部四格文字與數字：共同餘額／本月預算／本月共同支出／本月超支', (tester) async {
     final entries = [
-      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 3000, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
-      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1500, categoryId: 'c-dining', occurredOn: day(12), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 4000, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, payerId: kMeId, splitMethod: SplitMethod.equal),
+      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1500, categoryId: 'c-dining', occurredOn: day(12), createdBy: kMeId, payerId: kMeId, splitMethod: SplitMethod.equal),
+    ];
+    final allocations = [
+      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 6000, occurredOn: day(1), createdBy: kMeId),
+    ];
+    await pumpBudget(tester, entries: entries, allocations: allocations, ledger: ledger7500);
+
+    expect(find.text('共同餘額'), findsOneWidget);
+    expect(find.text(fmtMoney(7500)), findsOneWidget, reason: '共同錢包沒動（兩筆都是代墊 payerId=kMeId）');
+    expect(find.text('本月預算'), findsOneWidget);
+    expect(find.text(fmtMoney(6000)), findsOneWidget);
+    expect(find.text('本月共同支出'), findsOneWidget);
+    expect(find.text(fmtMoney(5500)), findsOneWidget, reason: '4,000 + 1,500，不分 payer');
+    expect(find.text('本月超支'), findsOneWidget);
+    expect(find.text(fmtMoney(1500)), findsOneWidget, reason: '食品不超支；餐飲無預算，1,500 全記超支');
+  });
+
+  testWidgets('全無預算無共同支出時本月超支顯示「—」不上紅', (tester) async {
+    await pumpBudget(tester);
+
+    // 限定在「本月超支」那一格找（_stat 的 Column：label 在上、值在下，同一個 Column
+    // 底下才是同一格），不是隨便哪裡出現一個「—」都算數。
+    final overStat = find.ancestor(of: find.text('本月超支'), matching: find.byType(Column)).first;
+    final dash = find.descendant(of: overStat, matching: find.text('—'));
+    expect(dash, findsOneWidget);
+    // 不能斷言 `style?.color` 為 null：`_stat` 用 `titleMedium?.copyWith(color: color)`，
+    // `color` 傳 null 時 `copyWith` 語意是「不覆蓋」而非「清成 null」，resolve 出來的
+    // color 恆是 titleMedium 本來的顏色（近黑），不會是字面 null——用「不等於 error 色」
+    // 才是這裡真正要守的事（不上紅），照同檔 c-dining 紅字那條的驗證方向。
+    final scheme = Theme.of(tester.element(find.byType(BudgetPage))).colorScheme;
+    expect(tester.widget<Text>(dash).style?.color, isNot(scheme.error), reason: '0 時不上紅');
+  });
+
+  testWidgets('分類列文案：已設定顯示「預算／已花／剩餘」，超支顯示「超支」，未設定顯示「未設定」且不畫三數字', (tester) async {
+    // 食品：預算 5,000、共同支出 3,000 → 剩餘 2,000。
+    // 餐飲：預算 1,000、共同支出 1,500 → 超支 500（那格換顯示紅字「超支」，「剩餘」不出現）。
+    // 水電：無預算無共同支出 → 未設定。
+    final entries = [
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 3000, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, splitMethod: SplitMethod.common),
+      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1500, categoryId: 'c-dining', occurredOn: day(12), createdBy: kMeId, splitMethod: SplitMethod.common),
     ];
     final allocations = [
       BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: day(1), createdBy: kMeId),
@@ -177,36 +253,72 @@ void main() {
     ];
     await pumpBudget(tester, entries: entries, allocations: allocations);
 
-    expect(find.text(fmtMoney(3500)), findsOneWidget, reason: '可用餘額');
-    expect(find.text(fmtMoney(2000)), findsOneWidget, reason: '信封總額');
-    expect(find.text(fmtMoney(500)), findsOneWidget, reason: '本月超支');
+    expect(inRow('c-food', find.text('預算')), findsOneWidget);
+    expect(inRow('c-food', find.text(fmtAmount(5000))), findsOneWidget);
+    expect(inRow('c-food', find.text('已花')), findsOneWidget);
+    expect(inRow('c-food', find.text(fmtAmount(3000))), findsOneWidget);
+    expect(inRow('c-food', find.text('剩餘')), findsOneWidget);
+    expect(inRow('c-food', find.text(fmtAmount(2000))), findsOneWidget);
+    expect(inRow('c-food', find.text('超支')), findsNothing);
 
-    expect(inRow('c-food', find.text(fmtAmount(5000))), findsOneWidget, reason: '食品撥款');
-    expect(inRow('c-food', find.text(fmtAmount(3000))), findsOneWidget, reason: '食品已花');
-    expect(inRow('c-food', find.text(fmtAmount(2000))), findsOneWidget, reason: '食品剩餘');
-    expect(inRow('c-food', find.text('超支')), findsNothing, reason: '食品沒超支，不該出現超支欄');
-
-    expect(inRow('c-dining', find.text(fmtAmount(1000))), findsOneWidget, reason: '餐飲撥款');
-    expect(inRow('c-dining', find.text(fmtAmount(1500))), findsOneWidget, reason: '餐飲已花');
-    expect(inRow('c-dining', find.text(fmtAmount(500))), findsOneWidget, reason: '餐飲超支＝500（紅字，取代剩餘那格）');
-    expect(inRow('c-dining', find.text('剩餘')), findsNothing, reason: '超支時不該再顯示剩餘欄');
+    expect(inRow('c-dining', find.text('超支')), findsOneWidget);
+    expect(inRow('c-dining', find.text(fmtAmount(500))), findsOneWidget);
+    expect(inRow('c-dining', find.text('剩餘')), findsNothing);
     final overText = tester.widget<Text>(inRow('c-dining', find.text(fmtAmount(500))));
     expect(overText.style?.color, Theme.of(tester.element(find.byType(BudgetPage))).colorScheme.error);
 
-    expect(inRow('c-util', find.text('未撥款')), findsOneWidget, reason: '水電沒撥款也沒預算支出');
+    expect(inRow('c-util', find.text('未設定')), findsOneWidget);
+    expect(inRow('c-util', find.text('預算')), findsNothing, reason: '未設定不畫三數字標籤');
   });
 
-  testWidgets('全無撥款無預算支出時本月超支顯示「—」不上紅', (tester) async {
-    await pumpBudget(tester);
-    expect(find.text('—'), findsOneWidget);
-  });
-
-  testWidgets('水位比例＝剩餘／撥款；超支時滿條錯誤色', (tester) async {
-    // 食品：撥款 4,000、已花 1,000 → 剩餘 3,000、水位 0.75、不紅。
-    // 餐飲：撥款 1,000、已花 1,500 → 超支、滿條 errorContainer。
+  testWidgets('無預算但有共同支出的分類：列顯示「未設定」＋已花與超支兩數字，且頂部超支含它', (tester) async {
+    // 水電從沒設過預算，但本月已有共同支出 8,000（allocated==0 && spent>0）：
+    // 不是真空的 noActivity（allocated0 && spent0），不可藏成「未設定」四字了事，
+    // 要把已花與超支都攤出來——它照樣計入頂部本月超支。
+    // 食品另設預算 5,000、花 3,000（沒超支），純粹讓頂部「本月共同支出」（11,000）
+    // 與「本月超支」（8,000，只來自水電）數字不同，斷言才不會撞號。
     final entries = [
-      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1000, categoryId: 'c-food', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
-      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1500, categoryId: 'c-dining', occurredOn: day(6), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 8000, categoryId: 'c-util', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common),
+      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 3000, categoryId: 'c-food', occurredOn: day(6), createdBy: kMeId, splitMethod: SplitMethod.common),
+    ];
+    final allocations = [
+      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: day(1), createdBy: kMeId),
+    ];
+    await pumpBudget(tester, entries: entries, allocations: allocations);
+
+    expect(inRow('c-util', find.text('未設定')), findsOneWidget);
+    expect(inRow('c-util', find.text('已花')), findsOneWidget);
+    expect(inRow('c-util', find.text('超支')), findsOneWidget);
+    expect(inRow('c-util', find.text(fmtAmount(8000))), findsWidgets, reason: '已花與超支都是 8,000（allocated=0）');
+
+    expect(find.text('本月共同支出'), findsOneWidget);
+    expect(find.text(fmtMoney(11000)), findsOneWidget, reason: '8,000（水電）＋3,000（食品）');
+    expect(find.text('本月超支'), findsOneWidget);
+    expect(find.text(fmtMoney(8000)), findsOneWidget, reason: '頂部本月超支只來自水電（食品有預算沒超支）');
+  });
+
+  testWidgets('無預算、當月淨額被沖銷成負數的分類：列顯示「未設定」＋已花負數，不畫「超支」', (tester) async {
+    // 水電從沒設過預算；當月唯一一筆是沖銷筆（負 26,000，模擬「原筆在別的統計範圍、
+    // 這裡只看得到反向那筆淨額」的邊界情況）：allocated=0、spent=-26,000、over 被
+    // balance_math 夾在 0。已花是「所有共同支出」的事實，負數也不能藏；超支沒有意義
+    // （over<=0）就不該再畫一行「超支 0」。
+    final entries = [
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: -26000, categoryId: 'c-util', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common, isAdjustment: true),
+    ];
+    await pumpBudget(tester, entries: entries);
+
+    expect(inRow('c-util', find.text('未設定')), findsOneWidget);
+    expect(inRow('c-util', find.text('已花')), findsOneWidget);
+    expect(inRow('c-util', find.text(fmtAmount(-26000))), findsOneWidget, reason: '已花 -26,000 不可藏');
+    expect(inRow('c-util', find.text('超支')), findsNothing, reason: 'over 被夾在 0，不畫超支那組');
+  });
+
+  testWidgets('水位比例＝剩餘／預算；超支時滿條錯誤色', (tester) async {
+    // 食品：預算 4,000、已花 1,000 → 剩餘 3,000、水位 0.75、不紅。
+    // 餐飲：預算 1,000、已花 1,500 → 超支、滿條 errorContainer。
+    final entries = [
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1000, categoryId: 'c-food', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common),
+      Entry(id: 'e-2', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1500, categoryId: 'c-dining', occurredOn: day(6), createdBy: kMeId, splitMethod: SplitMethod.common),
     ];
     final allocations = [
       BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 4000, occurredOn: day(1), createdBy: kMeId),
@@ -227,24 +339,24 @@ void main() {
     expect(boxOf('c-dining').color, scheme.errorContainer);
   });
 
-  testWidgets('sheet 首列顯示「本月：撥款 N・已花 N・剩餘 N」', (tester) async {
-    final entries = [
-      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 800, categoryId: 'c-food', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
-    ];
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: day(1), createdBy: kMeId)];
-    await pumpBudget(tester, entries: entries, allocations: allocations);
+  testWidgets('本月未設定：sheet 有金額欄、備註欄與「設定」鈕，抬頭吃當月月份字串', (tester) async {
+    await pumpBudget(tester);
 
-    await tester.tap(find.text('食品').first);
+    await tester.tap(find.text('水電').first);
     await tester.pumpAndSettle();
 
-    expect(find.text('本月：撥款 ${fmtAmount(3000)}・已花 ${fmtAmount(800)}・剩餘 ${fmtAmount(2200)}'), findsOneWidget);
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget);
+    expect(find.byKey(const Key('allocation-note-field')), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '設定'), findsOneWidget);
+    // 抬頭「N已花」的 N 吃 widget.month（同 AppBar 的 MonthTitle 那份資料），
+    // 不是寫死的「本月」；這裡看的是當月，字串應該是 fmtMonth(thisMonth)。
+    expect(find.textContaining('${fmtMonth(thisMonth)}已花'), findsOneWidget);
   });
 
-  testWidgets('金額空白或 0：sheet 內顯示錯誤且不 pop（撥入／退回都擋）', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 2000, occurredOn: day(1), createdBy: kMeId)];
-    await pumpBudget(tester, allocations: allocations);
+  testWidgets('金額空白或 0：sheet 內顯示錯誤且不送出', (tester) async {
+    await pumpBudget(tester);
 
-    await tester.tap(find.text('食品').first);
+    await tester.tap(find.text('水電').first);
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('allocation-add-btn')));
@@ -253,46 +365,150 @@ void main() {
     expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 不該關掉');
 
     await tester.enterText(find.byKey(const Key('allocation-amount-field')), '0');
-    await tester.tap(find.byKey(const Key('allocation-return-btn')));
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
     await tester.pumpAndSettle();
     expect(find.text('請輸入金額'), findsOneWidget);
     expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 不該關掉');
   });
 
-  testWidgets('提示只在當月無撥款出現：本月已有撥款則不顯示', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 1000, occurredOn: day(1), createdBy: kMeId)];
-    await pumpBudget(tester, allocations: allocations);
+  testWidgets('設定成功（看本月）：allocationsProvider 多一筆，occurredOn＝今天', (tester) async {
+    final container = await pumpBudget(tester);
 
-    expect(find.text('設定本月預算'), findsNothing);
-    expect(find.byKey(const Key('copy-last-month-btn')), findsNothing);
+    await tester.tap(find.text('水電').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1000');
+    await tester.enterText(find.byKey(const Key('allocation-note-field')), '加碼');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsNothing, reason: 'sheet 該關閉');
+    final added = container.read(allocationsProvider).last;
+    expect(added.amount, 1000);
+    expect(added.categoryId, 'c-util');
+    expect(added.note, '加碼');
+    expect(added.createdBy, kMeId);
+    expect(added.occurredOn, DateTime(now.year, now.month, now.day));
   });
 
-  testWidgets('提示只在當月或未來月出現：過去月份即使無撥款也不顯示（即使該過去月的上月有撥款可複製，也不該被 canCopy 掩護）', (tester) async {
-    // 檢視月＝上月，該月無任何撥款。但「上月的上月」（兩個月前）有食品撥款 3,000 可複製——
-    // 如果 showPrompt 漏判「只在當月／未來月出現」，這裡會誤判成「當月無撥款」而顯示提示，
-    // 且 canCopy 會是 true（複製來源抓得到），文字會變成「設定本月預算」＋按鈕可按，
-    // 跟「本來就不該出現任何提示」的正確行為有明顯落差；用按鈕 key 判定「提示列有沒有畫出來」，
-    // 不用文字內容（文字會因 canCopy 而二選一，用錯文字判斷會對這條變異視而不見）。
-    final twoMonthsAgo = DateTime(prevMonth.year, prevMonth.month - 1, 1);
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: twoMonthsAgo, createdBy: kMeId)];
+  testWidgets('設定成功（看未來月）：occurredOn＝該月 1 號', (tester) async {
+    final container = await pumpBudget(tester);
+
+    await tester.tap(find.byKey(const Key('month-next')));
+    await tester.pumpAndSettle();
+    expect(find.text(fmtMonth(nextMonth)), findsOneWidget);
+
+    await tester.tap(find.text('水電').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '800');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    final added = container.read(allocationsProvider).last;
+    expect(added.occurredOn, DateTime(nextMonth.year, nextMonth.month, 1));
+  });
+
+  testWidgets('設定儲存失敗：sheet 仍開著、sheet 內顯示錯誤文字', (tester) async {
+    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 2000, occurredOn: day(1), createdBy: kMeId)];
+    // 食品本月已設定會走唯讀分支（沒有輸入欄可測失敗路徑），挑一個本月還沒設定的分類（餐飲）。
+    await pumpBudget(tester, allocations: allocations, throwing: true);
+
+    await tester.tap(find.text('餐飲').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1234');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 仍開著');
+    expect(find.text('儲存失敗，請重試'), findsOneWidget, reason: 'sheet 內顯示錯誤文字');
+    expect(find.text('處理中…'), findsNothing, reason: '_saving 要解除，不能卡住');
+    final btn = tester.widget<FilledButton>(find.byKey(const Key('allocation-add-btn')));
+    expect(btn.onPressed, isNotNull, reason: '失敗後應可重試');
+  });
+
+  testWidgets('unique 23505（前端快取還沒同步、伺服器早有這筆）：sheet 內顯示含「本月已設定」', (tester) async {
+    // 模擬競態：allocationsProvider 的本地快取是空的（sheet 因此判斷未設定、放行編輯表單），
+    // 但底層 repository 的快照其實已經有這個分類這個月的預算——送出時撞上 DB 的
+    // unique (ledger_id, category_id, month)，InMemory 守衛丟同一句中文。
+    final existing = BudgetAllocation(id: 'a-server', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: day(1), createdBy: kMeId);
+    final repo = InMemoryLedgerRepository(
+      seed: snapshotWith(categories: cats3, entries: const [], allocations: [existing]),
+    );
+    await pumpBudget(tester, repository: repo);
+
+    await tester.tap(find.text('食品').first);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: '前端快取沒看到那筆，仍顯示可編輯表單');
+
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '3000');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 仍開著，不 pop');
+    expect(find.textContaining('本月已設定'), findsOneWidget);
+  });
+
+  testWidgets('已清帳月（資料異常防線）：sheet 內顯示含「已清帳」', (tester) async {
+    // 正常路徑下 _isPastMonth 就會擋過去月份；這裡刻意讓「已清帳的月份」與「檢視月＝當月」
+    // 同時成立（資料異常／補記競態），驗證即使前端日期守衛放行，repository 那道鎖月 trigger
+    // 仍是最後防線，錯誤訊息一樣經 errors.dart 轉成「已清帳」。
+    final repo = InMemoryLedgerRepository(
+      seed: snapshotWith(categories: cats3, entries: const [], allocations: const [])
+          .copyWith(closes: [closeOf(thisMonth)]),
+    );
+    await pumpBudget(tester, repository: repo);
+
+    await tester.tap(find.text('食品').first);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: '本月非過去月，前端日期守衛放行');
+
+    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1000');
+    await tester.tap(find.byKey(const Key('allocation-add-btn')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 仍開著，不 pop');
+    expect(find.textContaining('已清帳'), findsOneWidget);
+  });
+
+  testWidgets('已設定：sheet 唯讀顯示金額／備註／設定者／日期，無輸入欄、無退回刪除修改文字', (tester) async {
+    final allocations = [
+      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: day(3), createdBy: kMeId, note: '本月食品'),
+    ];
     await pumpBudget(tester, allocations: allocations);
+
+    await tester.tap(find.text('食品').first);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TextField), findsNothing);
+    expect(find.text('退回'), findsNothing);
+    expect(find.text('刪除'), findsNothing);
+    expect(find.text('修改'), findsNothing);
+    expect(find.text(fmtAmount(5000)), findsWidgets, reason: '「金額」欄位顯示 5,000');
+    expect(find.text('本月食品'), findsOneWidget, reason: '備註');
+    expect(find.text('Mike'), findsOneWidget, reason: '設定者');
+    expect(find.text(fmtDate(day(3))), findsOneWidget, reason: '日期');
+  });
+
+  testWidgets('過去月份未設定：顯示「已過期，不可設定」且無輸入欄', (tester) async {
+    await pumpBudget(tester);
 
     await tester.fling(find.byKey(const Key('month-title')), const Offset(200, 0), 1000);
     await tester.pumpAndSettle();
-
     expect(find.text(fmtMonth(prevMonth)), findsOneWidget);
-    expect(find.byKey(const Key('copy-last-month-btn')), findsNothing, reason: '不管 canCopy 是 true 或 false，只要按鈕存在就代表提示列有畫出來');
-    expect(find.text('設定本月預算'), findsNothing);
-    expect(find.text('上月沒有撥款'), findsNothing);
+
+    await tester.tap(find.text('水電').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('已過期，不可設定'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
   });
 
-  testWidgets('本月無撥款：提示出現＋複製上月建對筆數與金額（>0 才建，退回後淨額 0 的分類不建）', (tester) async {
-    // 上月＝檢視月（本月，未切換）的前一個月：食品 3,000；餐飲 2,000；水電先撥 1,000 又全退回＝淨額 0（不該被複製）。
+  testWidgets('複製上月：本月完全無預算 → 提示出現，複製建對筆數與金額（cat1、cat2 兩筆）', (tester) async {
+    // spec 口徑：showPrompt 只看「本月完全沒有任何預算」，不是「還有分類沒設定」。
+    // 上月：食品 5,000、餐飲 1,000；水電上月沒有值——本月三個分類都還沒設定，
+    // 複製只會建有上月值的兩筆（食品、餐飲），水電沒有來源不建。
     final allocations = [
-      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: pday(1), createdBy: kMeId),
-      BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 2000, occurredOn: pday(1), createdBy: kMeId),
-      BudgetAllocation(id: 'a-3', ledgerId: kLedgerId, categoryId: 'c-util', amount: 1000, occurredOn: pday(2), createdBy: kMeId),
-      BudgetAllocation(id: 'a-4', ledgerId: kLedgerId, categoryId: 'c-util', amount: -1000, occurredOn: pday(3), createdBy: kMeId),
+      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: pday(1), createdBy: kMeId),
+      BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 1000, occurredOn: pday(1), createdBy: kMeId),
     ];
     final container = await pumpBudget(tester, allocations: allocations);
     final before = container.read(allocationsProvider).length;
@@ -305,25 +521,54 @@ void main() {
     await tester.pumpAndSettle();
 
     final after = container.read(allocationsProvider);
-    expect(after.length, before + 2, reason: '只複製食品與餐飲，水電淨額 0 不建');
+    expect(after.length, before + 2);
     final created = after.skip(before).toList();
     expect(created.every((a) => a.note == '複製上月'), isTrue);
     expect(created.every((a) => a.occurredOn == DateTime(thisMonth.year, thisMonth.month, 1)), isTrue);
-    expect(created.where((a) => a.categoryId == 'c-food').single.amount, 3000);
-    expect(created.where((a) => a.categoryId == 'c-dining').single.amount, 2000);
+    expect(created.where((a) => a.categoryId == 'c-food').single.amount, 5000);
+    expect(created.where((a) => a.categoryId == 'c-dining').single.amount, 1000);
     expect(created.any((a) => a.categoryId == 'c-util'), isFalse);
 
-    // 建完提示消失。
+    expect(find.text('設定本月預算'), findsNothing, reason: '建完提示消失（本月現在有預算了）');
+  });
+
+  testWidgets('本月已有任一預算 → 不顯示提示（即使其他分類還沒設定）', (tester) async {
+    final allocations = [
+      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: pday(1), createdBy: kMeId),
+      BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 1000, occurredOn: pday(1), createdBy: kMeId),
+      BudgetAllocation(id: 'a-3', ledgerId: kLedgerId, categoryId: 'c-food', amount: 4000, occurredOn: day(1), createdBy: kMeId),
+    ];
+    await pumpBudget(tester, allocations: allocations);
+
+    expect(find.text('設定本月預算'), findsNothing, reason: '食品本月已設定，即使餐飲、水電還沒設定也不提示');
+    expect(find.byKey(const Key('copy-last-month-btn')), findsNothing);
+  });
+
+  testWidgets('上月無任何設定：提示出現但複製鈕 disabled，文字「上月沒有預算」', (tester) async {
+    await pumpBudget(tester);
+
+    expect(find.text('上月沒有預算'), findsOneWidget);
+    final btn = tester.widget<FilledButton>(find.byKey(const Key('copy-last-month-btn')));
+    expect(btn.onPressed, isNull);
+  });
+
+  testWidgets('提示只在當月或未來月出現：過去月份即使有未設定分類也不顯示', (tester) async {
+    final twoMonthsAgo = DateTime(prevMonth.year, prevMonth.month - 1, 1);
+    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: twoMonthsAgo, createdBy: kMeId)];
+    await pumpBudget(tester, allocations: allocations);
+
+    await tester.fling(find.byKey(const Key('month-title')), const Offset(200, 0), 1000);
+    await tester.pumpAndSettle();
+
+    expect(find.text(fmtMonth(prevMonth)), findsOneWidget);
+    expect(find.byKey(const Key('copy-last-month-btn')), findsNothing);
     expect(find.text('設定本月預算'), findsNothing);
   });
 
   testWidgets('複製上月寫到一半失敗：頁內講清楚已建幾筆／共幾筆，不靜默留半套', (tester) async {
-    // 一列＝一次撥款，沒有批次入口，中途失敗就是「已建 N 筆」。已建的是有效撥款不回頭刪，
-    // 但一定要把數字說清楚——不然使用者只看到信封多了一半，不知道缺什麼、也不敢再按一次。
     final allocations = [
       BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: pday(1), createdBy: kMeId),
       BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 2000, occurredOn: pday(1), createdBy: kMeId),
-      BudgetAllocation(id: 'a-3', ledgerId: kLedgerId, categoryId: 'c-util', amount: 1500, occurredOn: pday(1), createdBy: kMeId),
     ];
     final container = await pumpBudget(
       tester,
@@ -339,12 +584,13 @@ void main() {
     final error = find.byKey(const Key('copy-last-month-error'));
     expect(error, findsOneWidget, reason: '頁內顯示，不用會自己消失的 SnackBar');
     final text = tester.widget<Text>(error).data!;
-    expect(text, contains('已建 1／3 筆'));
+    expect(text, contains('已建 1／2 筆'));
     expect(text, contains('寫入被拒絕'));
   });
 
   testWidgets('切到下月：複製上月以「檢視月」為基準（不是以今天為基準），5 筆建立且 id 互異', (tester) async {
-    // 本月（今天所在月）5 個分類都有撥款；view 切到下月後，「上月」＝本月（今天所在月），不是「今天再往前一個月」。
+    // 本月（今天所在月）5 個分類都有預算；view 切到下月後，「上月」＝本月（今天所在月），
+    // 不是「今天再往前一個月」。
     final allocations = [
       for (var i = 0; i < cats5.length; i++)
         BudgetAllocation(id: 'a-${i + 1}', ledgerId: kLedgerId, categoryId: cats5[i].id, amount: 1000 * (i + 1), occurredOn: day(1), createdBy: kMeId),
@@ -368,14 +614,6 @@ void main() {
     for (var i = 0; i < cats5.length; i++) {
       expect(created.singleWhere((a) => a.categoryId == cats5[i].id).amount, 1000 * (i + 1));
     }
-  });
-
-  testWidgets('本月與上月都無撥款：複製上月按鈕 disabled 並顯示「上月沒有撥款」', (tester) async {
-    await pumpBudget(tester);
-
-    expect(find.text('上月沒有撥款'), findsOneWidget);
-    final btn = tester.widget<FilledButton>(find.byKey(const Key('copy-last-month-btn')));
-    expect(btn.onPressed, isNull);
   });
 
   testWidgets('月份標題左滑切下月、右滑切回上月', (tester) async {
@@ -404,147 +642,9 @@ void main() {
     expect(find.text(fmtMonth(thisMonth)), findsOneWidget);
   });
 
-  testWidgets('點列開 sheet：撥入成功後 sheet 關閉、可用餘額同步下降', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 2000, occurredOn: day(1), createdBy: kMeId)];
-    final container = await pumpBudget(tester, allocations: allocations);
-
-    expect(find.text(fmtMoney(8000)), findsOneWidget); // 10,000 − 2,000
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-
-    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1000');
-    await tester.enterText(find.byKey(const Key('allocation-note-field')), '加碼');
-    await tester.tap(find.byKey(const Key('allocation-add-btn')));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('allocation-amount-field')), findsNothing, reason: 'sheet 該關閉');
-    final added = container.read(allocationsProvider).last;
-    expect(added.amount, 1000);
-    expect(added.categoryId, 'c-food');
-    expect(added.note, '加碼');
-    expect(added.createdBy, kMeId);
-    expect(find.text(fmtMoney(7000)), findsOneWidget); // 8,000 − 1,000
-  });
-
-  testWidgets('撥款可負（退回）成功：信封還回可用餘額', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: day(1), createdBy: kMeId)];
-    final container = await pumpBudget(tester, allocations: allocations);
-
-    expect(find.text(fmtMoney(7000)), findsOneWidget); // 10,000 − 3,000
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1000');
-    await tester.tap(find.byKey(const Key('allocation-return-btn')));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('allocation-amount-field')), findsNothing, reason: 'sheet 該關閉');
-    expect(container.read(allocationsProvider).last.amount, -1000);
-    expect(find.text(fmtMoney(8000)), findsOneWidget); // 7,000 + 1,000
-  });
-
-  testWidgets('退回超過剩餘被擋：sheet 內錯誤、state 不變', (tester) async {
-    final entries = [
-      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 500, categoryId: 'c-food', occurredOn: day(5), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
-    ];
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 2000, occurredOn: day(1), createdBy: kMeId)];
-    final container = await pumpBudget(tester, entries: entries, allocations: allocations);
-    final before = container.read(allocationsProvider).length;
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-    // 剩餘＝2,000－500＝1,500，退回 2,000 應被擋。
-    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '2000');
-    await tester.tap(find.byKey(const Key('allocation-return-btn')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('退回不得超過剩餘 ${fmtAmount(1500)}'), findsOneWidget);
-    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 不該關掉');
-    expect(container.read(allocationsProvider).length, before);
-  });
-
-  testWidgets('撥款儲存失敗：sheet 仍開著、sheet 內顯示錯誤文字', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 2000, occurredOn: day(1), createdBy: kMeId)];
-    await pumpBudget(tester, allocations: allocations, throwing: true);
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('allocation-amount-field')), '1234');
-    await tester.tap(find.byKey(const Key('allocation-add-btn')));
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('allocation-amount-field')), findsOneWidget, reason: 'sheet 仍開著');
-    expect(find.text('儲存失敗，請重試'), findsOneWidget, reason: 'sheet 內顯示錯誤文字');
-    expect(find.text('處理中…'), findsNothing, reason: '_saving 要解除，不能卡住');
-    final btn = tester.widget<FilledButton>(find.byKey(const Key('allocation-add-btn')));
-    expect(btn.onPressed, isNotNull, reason: '失敗後應可重試');
-  });
-
-  testWidgets('過去月份：sheet 可開但撥入／退回按鈕 disabled', (tester) async {
-    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: pday(1), createdBy: kMeId)];
-    await pumpBudget(tester, allocations: allocations);
-
-    await tester.fling(find.byKey(const Key('month-title')), const Offset(200, 0), 1000);
-    await tester.pumpAndSettle();
-    expect(find.text(fmtMonth(prevMonth)), findsOneWidget);
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-
-    expect(find.text('過去月份不可撥款'), findsOneWidget);
-    final addBtn = tester.widget<FilledButton>(find.byKey(const Key('allocation-add-btn')));
-    final returnBtn = tester.widget<OutlinedButton>(find.byKey(const Key('allocation-return-btn')));
-    expect(addBtn.onPressed, isNull);
-    expect(returnBtn.onPressed, isNull);
-  });
-
-  testWidgets('本月撥款流水：列出且可刪除', (tester) async {
-    final allocations = [
-      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: day(1), createdBy: kMeId, note: '本月食品'),
-      BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-food', amount: 1000, occurredOn: day(5), createdBy: kMeId, note: '加碼'),
-    ];
-    final container = await pumpBudget(tester, allocations: allocations);
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-
-    expect(find.text('本月食品'), findsOneWidget);
-    expect(find.text('加碼'), findsOneWidget);
-
-    // 左滑刪除（2026-09-04）：先把該列往左拖開 action pane 再點刪除。
-    await tester.drag(find.byKey(const ValueKey('allocation-flow-a-2')), const Offset(-200, 0));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('allocation-delete-a-2')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('加碼'), findsNothing);
-    expect(container.read(allocationsProvider).any((a) => a.id == 'a-2'), isFalse);
-    expect(container.read(allocationsProvider).any((a) => a.id == 'a-1'), isTrue);
-  });
-
-  testWidgets('流水金額 6 位數不撐高列（單行不換行、不撐高列高）', (tester) async {
-    final allocations = [
-      BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 100, occurredOn: day(1), createdBy: kMeId, note: '小筆'),
-      BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-food', amount: 123456, occurredOn: day(2), createdBy: kMeId, note: '大筆'),
-    ];
-    await pumpBudget(tester, allocations: allocations);
-
-    await tester.tap(find.text('食品').first);
-    await tester.pumpAndSettle();
-
-    final paragraph = tester.renderObject<RenderParagraph>(find.text(fmtAmount(123456)));
-    expect(paragraph.didExceedMaxLines, isFalse);
-    expect(tester.takeException(), isNull);
-
-    final smallRowHeight = tester.getSize(find.byKey(const ValueKey('allocation-flow-a-1'))).height;
-    final bigRowHeight = tester.getSize(find.byKey(const ValueKey('allocation-flow-a-2'))).height;
-    expect(bigRowHeight, smallRowHeight, reason: '6 位數金額不該把這列撐得比其他列高');
-  });
-
   testWidgets('390×844：分類列數字單行不截斷、不用 FittedBox 縮字級也不 overflow', (tester) async {
     final entries = [
-      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 123456, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, splitMethod: SplitMethod.common, funding: Funding.budget),
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 123456, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, splitMethod: SplitMethod.common),
     ];
     final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 100000, occurredOn: day(1), createdBy: kMeId)];
     await pumpBudget(tester, entries: entries, allocations: allocations);
@@ -555,6 +655,26 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('390 寬：頂部第二列三欄六位數金額縮字級頂住、不截斷也不炸版', (tester) async {
+    final entries = [
+      Entry(id: 'e-1', ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 723456, categoryId: 'c-food', occurredOn: day(10), createdBy: kMeId, splitMethod: SplitMethod.common),
+    ];
+    final allocations = [BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 100000, occurredOn: day(1), createdBy: kMeId)];
+    await pumpBudget(tester, entries: entries, allocations: allocations);
+
+    // 本月預算 100,000／本月共同支出 723,456／本月超支 623,456：三欄都撐到六位數＋「元」。
+    // 金額不能用省略號截斷（會讓人看錯錢）：`_stat` 改用 FittedBox(scaleDown) 縮字級頂住，
+    // 所以這裡要驗證的是「六位數金額三欄下 didExceedMaxLines == false」——文字完整顯示，
+    // 只是被縮小，不是被砍字。
+    for (final value in [fmtMoney(100000), fmtMoney(723456), fmtMoney(623456)]) {
+      final finder = find.text(value);
+      expect(finder, findsOneWidget, reason: '$value 應該只出現一次（頂部那一格）');
+      final paragraph = tester.renderObject<RenderParagraph>(finder);
+      expect(paragraph.didExceedMaxLines, isFalse, reason: '$value 縮字級顯示完整，不截斷');
+    }
+    expect(tester.takeException(), isNull, reason: 'FittedBox(scaleDown) 接住了，不該有 RenderFlex overflow 或其他例外');
+  });
+
   testWidgets('深色主題渲染不炸', (tester) async {
     await pumpBudget(
       tester,
@@ -563,7 +683,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('真主題殼（buildTheme）：亮色渲染與撥款流程不炸', (tester) async {
+  testWidgets('真主題殼（buildTheme）：亮色渲染與設定流程不炸', (tester) async {
     await pumpBudget(tester, theme: buildTheme(Brightness.light));
     await tester.tap(find.text('食品').first);
     await tester.pumpAndSettle();

@@ -1,4 +1,5 @@
 import 'package:accounting/domain/models.dart';
+import 'package:accounting/domain/month_summary.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 序列化的 round-trip 一律比 `toJson → fromJson → toJson` 的兩張 map：
@@ -24,11 +25,40 @@ void main() {
       expect(Ledger.fromJson(j).defaultRatio, {'m-a': 50, 'm-b': 50});
     });
 
-    test('Member', () {
-      const x = Member(id: 'm-a', ledgerId: 'l-1', userId: 'u-1', displayName: 'Mike', openingBalancePersonal: 50000);
+    test('Member（v1.4：monthly_topup／joined_at）', () {
+      final x = Member(
+        id: 'm-a',
+        ledgerId: 'l-1',
+        userId: 'u-1',
+        displayName: 'Mike',
+        monthlyTopup: 10000,
+        openingBalancePersonal: 50000,
+        joinedAt: DateTime(2026, 3, 1, 9, 30),
+      );
       final j = x.toJson();
       expect(j.containsKey('display_name'), isTrue);
+      expect(j['monthly_topup'], 10000);
       expect(roundTrip(j, Member.fromJson), j);
+
+      final back = Member.fromJson(j);
+      expect(back.monthlyTopup, 10000);
+      expect(back.joinedAt, DateTime(2026, 3, 1, 9, 30));
+      expect(back.openingBalancePersonal, 50000, reason: 'v1.4 廢用但欄位仍解析');
+    });
+
+    test('Member.fromJson：缺 monthly_topup 預設 0、缺 joined_at fallback epoch', () {
+      final back = Member.fromJson(const {
+        'id': 'm-a',
+        'ledger_id': 'l-1',
+        'user_id': 'u-1',
+        'display_name': 'Mike',
+      });
+      expect(back.monthlyTopup, 0);
+      // `members.joined_at` 是 not null，缺鍵只會是舊 build／替身沒帶。
+      // fallback 取 epoch（＝很久以前就加入、每個月都有補入額），不是 now()——
+      // 少算補入額會讓餘額憑空變少，寧可多算。
+      expect(back.joinedAt, DateTime(1970));
+      expect(back.openingBalancePersonal, 0);
     });
 
     test('Category', () {
@@ -74,7 +104,24 @@ void main() {
       );
       final j = x.toJson();
       expect(j['occurred_on'], '2026-05-08');
-      expect(j['funding'], 'balance');
+      // 欄位清單寫死：v1.4 drop 掉的資金來源欄若被誰加回來，這裡會立刻紅。
+      expect(j.keys.toSet(), {
+        'id',
+        'ledger_id',
+        'kind',
+        'scope',
+        'amount',
+        'category_id',
+        'occurred_on',
+        'created_by',
+        'note',
+        'payer_id',
+        'split_method',
+        'settled_state',
+        'is_adjustment',
+        'line_items',
+        'entry_splits',
+      });
       expect(roundTrip(j, Entry.fromJson), j);
 
       final back = Entry.fromJson(j);
@@ -84,25 +131,7 @@ void main() {
       expect(back.isAdjustment, isTrue);
     });
 
-    test('Entry：funding=budget 的共同錢包支出', () {
-      final x = Entry(
-        id: 'e-2',
-        ledgerId: 'l-1',
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 6200,
-        categoryId: 'c-food',
-        occurredOn: DateTime(2026, 5, 10),
-        createdBy: 'm-a',
-        funding: Funding.budget,
-      );
-      final j = x.toJson();
-      expect(j['funding'], 'budget');
-      expect(j['payer_id'], isNull);
-      expect(roundTrip(j, Entry.fromJson), j);
-    });
-
-    test('Entry.fromJson：沒有 funding 欄時當 balance（DB default）', () {
+    test('Entry.fromJson：DB 多回一個前端不認得的鍵時直接忽略（v1.4 drop 掉的欄位就是這個形狀）', () {
       final j = {
         'id': 'e-3',
         'ledger_id': 'l-1',
@@ -114,10 +143,13 @@ void main() {
         'created_by': 'm-a',
         'split_method': 'common',
         'settled_state': 'open',
+        'obsolete_column': 'budget',
       };
-      expect(Entry.fromJson(j).funding, Funding.balance);
-      expect(Entry.fromJson(j).note, '');
-      expect(Entry.fromJson(j).lineItems, isEmpty);
+      final back = Entry.fromJson(j);
+      expect(back.amount, 100);
+      expect(back.note, '');
+      expect(back.lineItems, isEmpty);
+      expect(back.toJson().containsKey('obsolete_column'), isFalse);
     });
 
     test('Settlement（含巢狀 settlement_entries／settlement_approvals，void_ ↔ void）', () {
@@ -295,7 +327,7 @@ void main() {
   });
 
   group('Entry.toUpsertJson', () {
-    Entry base({String id = 'e-1', Funding funding = Funding.balance, String? payerId}) => Entry(
+    Entry base({String id = 'e-1', String? payerId}) => Entry(
           id: id,
           ledgerId: 'l-1',
           kind: EntryKind.expense,
@@ -307,7 +339,6 @@ void main() {
           note: '午餐',
           payerId: payerId,
           settledState: SettledState.settling,
-          funding: funding,
         );
 
     test('只吐 upsert_entry 可寫欄，不含 settled_state／created_by／created_at', () {
@@ -329,8 +360,7 @@ void main() {
         'payer_id',
         'split_method',
         'is_adjustment',
-        'funding',
-      });
+      }, reason: '欄位清單寫死：v1.4 drop 掉的資金來源欄被加回來就會紅');
     });
 
     test('id 為空（新筆）時不帶 id 欄，讓 DB 自己生', () {
@@ -338,70 +368,122 @@ void main() {
       expect(base().toUpsertJson()['id'], 'e-1');
     });
 
-    test('funding 送 DB 字面值', () {
-      expect(base(funding: Funding.budget).toUpsertJson()['funding'], 'budget');
-      expect(base().toUpsertJson()['funding'], 'balance');
+  });
+
+  group('月清帳（v1.4）', () {
+    final details = MonthCloseDetails(
+      month: DateTime(2026, 7, 1),
+      members: const [
+        MonthCloseMemberLine(
+          memberId: 'm-a',
+          displayName: 'Mike',
+          topup: 10000,
+          net: -10200,
+          ending: -200,
+        ),
+        MonthCloseMemberLine(
+          memberId: 'm-b',
+          displayName: '老婆',
+          topup: 8000,
+          net: -500,
+          ending: 7500,
+        ),
+      ],
+      sharedDelta: 1000,
+    );
+
+    test('MonthClose round-trip（details 落地不帶 warnings）', () {
+      final x = MonthClose(
+        id: 'mc-1',
+        ledgerId: 'l-1',
+        month: DateTime(2026, 7, 1),
+        closedBy: 'm-a',
+        closedAt: DateTime(2026, 8, 1, 10, 30),
+        details: details,
+      );
+      final j = x.toJson();
+      expect(j['month'], '2026-07-01');
+      expect((j['details']! as Map).containsKey('warnings'), isFalse,
+          reason: 'close_month 落地的 details 是事實快照，不帶提醒');
+      expect(roundTrip(j, MonthClose.fromJson), j);
+
+      final back = MonthClose.fromJson(j);
+      expect(back.month, DateTime(2026, 7, 1));
+      expect(back.closedAt, DateTime(2026, 8, 1, 10, 30));
+      expect(back.details.members.first.ending, -200);
+      expect(back.details.sharedDelta, 1000);
+      expect(back.details.warnings, isEmpty);
+    });
+
+    test('MonthCloseDetails.fromJson：warnings 是 [{code, count}]，缺鍵時空清單', () {
+      final withWarning = MonthCloseDetails.fromJson({
+        'month': '2026-07-01',
+        'members': const [],
+        'shared_delta': 0,
+        'warnings': const [
+          {'code': 'unsplit_advances', 'count': 3},
+        ],
+      });
+      expect(withWarning.warnings.single.code, 'unsplit_advances');
+      expect(withWarning.warnings.single.count, 3);
+
+      final none = MonthCloseDetails.fromJson({
+        'month': '2026-07-01',
+        'members': const [],
+        'shared_delta': 0,
+      });
+      expect(none.warnings, isEmpty);
+      expect(none.sharedDelta, 0);
     });
   });
 
-  group('funding 不變式', () {
-    Entry build({
-      EntryKind kind = EntryKind.expense,
-      EntryScope scope = EntryScope.shared,
-      String? payerId,
-    }) =>
-        Entry(
-          id: 'e-1',
-          ledgerId: 'l-1',
-          kind: kind,
-          scope: scope,
-          amount: 300,
-          categoryId: 'c-food',
-          occurredOn: DateTime(2026, 5, 8),
-          createdBy: 'm-a',
-          payerId: payerId,
-          funding: Funding.budget,
-        );
+  group('MonthSummary.fromJson（v1.4 新鍵）', () {
+    Map<String, dynamic> payload({Map<String, dynamic>? me}) => {
+          'shared_balance': 7500,
+          'budget_total': 6000,
+          'spent_total': 5500,
+          'overspend_total': 1500,
+          'categories': const [
+            {
+              'category_id': 'c-food',
+              'allocated': 5000,
+              'spent': 3000,
+              'remaining': 2000,
+              'over': 0,
+            },
+          ],
+          'me': me,
+        };
 
-    test('代墊（payer 非空）不得用預算', () {
-      expect(() => build(payerId: 'm-a'), throwsArgumentError);
+    test('四個合計＋categories＋me 都吃得到', () {
+      final s = MonthSummary.fromJson(payload(me: const {
+        'member_id': 'm-a',
+        'personal_balance': 8700,
+        'monthly_topup': 10000,
+        'month_net': -1300,
+      }));
+      expect(s.sharedBalance, 7500);
+      expect(s.budgetTotal, 6000);
+      expect(s.spentTotal, 5500);
+      expect(s.overspendTotal, 1500);
+      expect(s.memberId, 'm-a');
+      expect(s.personalBalance, 8700);
+      expect(s.monthlyTopup, 10000);
+      expect(s.monthNet, -1300);
+      expect(s.envelopeOf('c-food').allocated, 5000);
+      expect(s.envelopeOf('c-food').spent, 3000);
+      // 沒有那一列的分類全 0（該月既無預算也無共同支出）。
+      expect(s.envelopeOf('c-util').allocated, 0);
+      expect(s.envelopeOf('c-util').over, 0);
     });
 
-    test('私人支出不得用預算', () {
-      expect(() => build(scope: EntryScope.private, payerId: 'm-a'), throwsArgumentError);
-    });
-
-    test('收入不得用預算', () {
-      expect(() => build(kind: EntryKind.income), throwsArgumentError);
-    });
-
-    test('共同錢包的共同支出可以用預算', () {
-      expect(build().funding, Funding.budget);
-    });
-
-    test('copyWith 把合法的預算筆改成代墊也會被擋', () {
-      final ok = build();
-      expect(() => ok.copyWith(payerId: 'm-a'), throwsArgumentError);
-    });
-
-    test('fromJson 也吃同一條不變式', () {
-      expect(
-        () => Entry.fromJson({
-          'id': 'e-1',
-          'ledger_id': 'l-1',
-          'kind': 'expense',
-          'scope': 'shared',
-          'amount': 100,
-          'category_id': 'c-food',
-          'occurred_on': '2026-05-08',
-          'created_by': 'm-a',
-          'payer_id': 'm-a',
-          'split_method': 'equal',
-          'settled_state': 'open',
-          'funding': 'budget',
-        }),
-        throwsArgumentError,
-      );
+    test('me 為 null（非成員）時個人那組全部 null', () {
+      final s = MonthSummary.fromJson(payload());
+      expect(s.memberId, isNull);
+      expect(s.personalBalance, isNull);
+      expect(s.monthlyTopup, isNull);
+      expect(s.monthNet, isNull);
+      expect(s.sharedBalance, 7500);
     });
   });
 }

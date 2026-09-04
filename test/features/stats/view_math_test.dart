@@ -111,43 +111,36 @@ void main() {
   });
 
   group('monthSummary', () {
-    test('家庭視角本月摘要與假資料手算一致（balance 改 v1.3 sharedAvailable）', () {
-      final allocations = container.read(allocationsProvider);
+    test('家庭視角本月摘要與假資料手算一致（balance 改 v1.4 sharedBalance）', () {
       final s = monthSummary(
         items: view(ViewMode.family, kMeId),
         month: DateTime.now(),
-        balanceAt: (until) => sharedAvailable(
-          ledger: ledger,
-          entries: entries,
-          allocations: allocations,
-          until: until,
-        ),
+        balance: sharedBalance(
+            ledger: ledger, entries: entries, until: lastDayOfMonth(DateTime.now())),
       );
       // 收入：薪水 52000（私人接案 8000 不算）
       expect(s.income, 52000);
       // 支出：26000+2300+567+1280+1520+420+680+2400+1300（私人 Steam 350 不算）
       expect(s.expense, 36467);
       expect(s.net, 15533);
-      // v1.3：balance 不再是「視角收支累計」，改吃 sharedAvailable（月底）。
+      // v1.4：balance 改吃 sharedBalance（月底），預算不再預扣。
       // 共同餘額＝期初 120000 ＋（本月 52000＋上月 52000）共同收入
       //   −（本月 26000+2300+2400+1300＋上月 26000+6200+3900+1100）共同錢包支出（payerId 為空）
-      //   ＝154800（代墊的 567、1280、1520、420、680 走個人，不動共同餘額）；
-      // 當月信封剩餘合計＝食品 3600＋餐飲 2700＋日常用品 1500＋水電 700＋交通 2000＝10500；
-      // sharedAvailable＝154800−10500＝144300（brief 手算基準）。
-      expect(s.balance, 144300);
+      //   ＝154800（代墊的 567、1280、1520、420、680 走個人，不動共同餘額）。
+      expect(s.balance, 154800);
     });
 
-    test('個人視角本月摘要（Mike）與手算一致（balance 改 v1.3 personalBalance）', () {
+    test('個人視角本月摘要（Mike）與手算一致（balance 改 v1.4 personalBalance）', () {
       final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
-      final settlements = container.read(settlementsProvider);
       final s = monthSummary(
         items: view(ViewMode.personal, kMeId),
         month: DateTime.now(),
-        balanceAt: (until) => personalBalance(
+        balance: personalBalance(
           member: me,
           entries: entries,
-          settlements: settlements,
-          until: until,
+          closes: container.read(monthClosesProvider),
+          until: lastDayOfMonth(DateTime.now()),
+          joinedMonth: monthOf(me.joinedAt),
         ),
       );
       // 只有私人接案 8000（共同薪水進共同餘額，不進個人視角）
@@ -155,11 +148,12 @@ void main() {
       // 13000+1150+284+640+760+350+210+340+1200（大採購半）+650（週末外食半）
       expect(s.expense, 18584);
       expect(s.net, -10584);
-      // v1.3：balance 改吃 personalBalance（月底）。
-      // 期初 50000 ＋ 私人收入 8000（接案）− 私人支出 350（Steam）
-      //   − 代墊全額 567（全聯 e-5，payerId Mike）− 1520（Costco e-7，payerId Mike）
-      //   ＝55563（s-1 結算 pending 未 settled，nets 不算；共同收支不動個人餘額）。
-      expect(s.balance, 55563);
+      // v1.4：balance 改吃 personalBalance（月底，額度制）。
+      // 補入額 10000 × 2 個未清帳月份（假資料的加入月＝上月）＝20000
+      //   ＋ 私人收入 8000（接案）− 私人支出 350（Steam）
+      //   − 未結算代墊全額 567（全聯 e-5，payerId Mike）− 1520（Costco e-7，payerId Mike）
+      //   ＝25563（期初個人餘額已廢用；共同收支不動個人餘額）。
+      expect(s.balance, 25563);
     });
   });
 

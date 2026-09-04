@@ -11,17 +11,17 @@ enum TrendTab { overview, byCategory }
 
 /// 三條趨勢線（v1.3 拿掉預算線）。順序即切換列與 series 的順序。
 ///
-/// 實際顯示的子集依視角而定（[_linesFor]）：家庭三條都畫，個人沒有信封所以
+/// 實際顯示的子集依視角而定（[_linesFor]）：家庭三條都畫，個人沒有預算所以
 /// 沒有「超支」，只畫 [spend]／[balance]。
 enum TrendLine { spend, over, balance }
 
 extension TrendLineX on TrendLine {
-  /// 字面不依視角變：家庭是共同可用餘額、個人是個人可用餘額，兩者都叫
-  /// 「可用餘額」（spec：個人視角＝個人可用餘額）——與月摘要卡同一套用詞。
-  String get label => switch (this) {
+  /// balance 線的字面依視角變（v1.4，ADR-0008）：家庭是「共同餘額」、個人是
+  /// 「個人餘額」——兩者是不同的錢（共同帳戶 vs 個人額度制），不再共用一個詞。
+  String labelFor(ViewMode mode) => switch (this) {
         TrendLine.spend => '花費',
         TrendLine.over => '超支',
-        TrendLine.balance => '可用餘額',
+        TrendLine.balance => mode == ViewMode.personal ? '個人餘額' : '共同餘額',
       };
 
   Color color(ColorScheme cs) => switch (this) {
@@ -30,17 +30,19 @@ extension TrendLineX on TrendLine {
         TrendLine.balance => balanceColor(cs),
       };
 
-  double valueOf(Bucket b) => switch (this) {
+  /// `null`＝這個桶不畫這條線的點（目前只有 balance 線、已清帳月非月顆粒度會這樣，
+  /// 見 [Bucket.balance]）。
+  double? valueOf(Bucket b) => switch (this) {
         TrendLine.spend => b.spend.toDouble(),
         TrendLine.over => b.over.toDouble(),
-        TrendLine.balance => b.balance.toDouble(),
+        TrendLine.balance => b.balance?.toDouble(),
       };
 
   /// 餘額量級比其他兩條大一個數量級，同一 y 軸會把它們壓平，所以預設收起來。
   bool get initiallyVisible => this != TrendLine.balance;
 }
 
-/// 總覽線別依視角的子集：家庭三條都畫；個人沒有信封（超支恆 0），不給「超支」toggle。
+/// 總覽線別依視角的子集：家庭三條都畫；個人沒有預算（超支恆 0），不給「超支」toggle。
 /// 順序沿用 [TrendLine.values]，即切換列與 series 的順序。
 List<TrendLine> _linesFor(ViewMode mode) => mode == ViewMode.personal
     ? const [TrendLine.spend, TrendLine.balance]
@@ -77,8 +79,8 @@ class TrendCard extends StatefulWidget {
   final Granularity granularity;
   final ValueChanged<Granularity> onGranularityChanged;
 
-  /// 統計頁目前的視角：決定總覽線別子集（[_linesFor]）——個人沒有信封，
-  /// 不畫「超支」。線的標籤字不依視角變（見 [TrendLineX.label]）。
+  /// 統計頁目前的視角：決定總覽線別子集（[_linesFor]）——個人沒有預算，
+  /// 不畫「超支」；也決定 balance 線的標籤字（見 [TrendLineX.labelFor]）。
   final ViewMode viewMode;
 
   @override
@@ -231,10 +233,12 @@ class _TrendCardState extends State<TrendCard> {
 
   // 只看視角實際會畫的線（[_linesFor]）：個人視角沒有超支線，over 是否為 0
   // 不該影響「這個範圍有沒有資料」的判斷（雖然個人視角 over 現況恆 0，這裡仍
-  // 明確依線別子集判斷，不靠這個巧合）。
+  // 明確依線別子集判斷，不靠這個巧合）。balance 線的 null（已清帳月非月顆粒度
+  // 不畫點）當 0 看待——一個斷開的點不構成「這個範圍有資料」。
   bool _overviewEmpty() =>
       widget.buckets.isEmpty ||
-      widget.buckets.every((b) => _linesFor(widget.viewMode).every((l) => l.valueOf(b) == 0));
+      widget.buckets
+          .every((b) => _linesFor(widget.viewMode).every((l) => (l.valueOf(b) ?? 0) == 0));
 
   // 分類版畫的只有花費線，所以「有沒有資料」只看 spend。
   bool _categoryEmpty() =>
@@ -245,7 +249,7 @@ class _TrendCardState extends State<TrendCard> {
           for (final l in _linesFor(widget.viewMode))
             Expanded(
               child: _Toggle(
-                label: l.label,
+                label: l.labelFor(widget.viewMode),
                 color: l.color(cs),
                 on: !_hidden.contains(l),
                 onTap: () => setState(() {
@@ -298,7 +302,8 @@ class _TrendCardState extends State<TrendCard> {
     var lo = 0.0;
     for (final l in visible) {
       for (final b in buckets) {
-        if (l.valueOf(b) < lo) lo = l.valueOf(b);
+        final v = l.valueOf(b);
+        if (v != null && v < lo) lo = v;
       }
     }
     return _chart(cs, lo, [
@@ -307,7 +312,7 @@ class _TrendCardState extends State<TrendCard> {
           dataSource: buckets,
           xValueMapper: (b, _) => b.label,
           yValueMapper: (b, _) => l.valueOf(b),
-          name: l.label,
+          name: l.labelFor(widget.viewMode),
           color: l.color(cs),
           width: 2.5,
           markerSettings: MarkerSettings(isVisible: buckets.length <= 12, height: 6, width: 6),

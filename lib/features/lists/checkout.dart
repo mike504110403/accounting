@@ -2,7 +2,6 @@
 /// 不含 UI；供 widget 呼叫，也直接被單元測試覆蓋。
 library;
 
-import '../../domain/balance_math.dart';
 import '../../domain/models.dart';
 import '../entries/split_math.dart';
 
@@ -34,8 +33,7 @@ Map<String, List<ListItem>> groupByStore(List<ListItem> items) {
 /// - `total` 由呼叫端決定（可手改，ADR-0001 允許與細項加總有差額）。
 /// - note 用第一個有填店家的項目店名，都沒有則「購物」。
 /// - 依 ADR-0005 新增共同支出預設：payer 共同錢包、split common。
-/// - funding 依 [defaultFunding]（該分類在結帳當月有撥款 → budget，否則 balance）；
-///   多項結帳同一分類，規則對整批一致套用。
+/// - v1.4 起沒有資金來源狀態機：一律走 Entry 建構的餘額支出預設值（ADR-0008）。
 Entry buildEntryFromItems({
   required List<ListItem> items,
   required Map<String, int> actuals,
@@ -44,11 +42,9 @@ Entry buildEntryFromItems({
   required DateTime date,
   required String ledgerId,
   required String me,
-  required Iterable<BudgetAllocation> allocations,
   // 結帳方式（Mike 裁示 2026-09-04：與支出表單同一組選項）。
   String? payerId, // null＝共同錢包
   SplitMethod splitMethod = SplitMethod.common,
-  Funding? funding, // null＝共同錢包依 defaultFunding；代墊一律 balance（Entry 不變式）
   List<Member> members = const [],
   Map<String, int> ratio = const {},
   Map<String, int> manual = const {},
@@ -91,9 +87,6 @@ Entry buildEntryFromItems({
     note: storeName ?? '購物',
     payerId: payerId,
     splitMethod: payerId == null ? SplitMethod.common : splitMethod,
-    funding: payerId != null
-        ? Funding.balance
-        : (funding ?? defaultFunding(allocations: allocations, categoryId: categoryId, month: date)),
     splits: splits,
     lineItems: lineItems,
   );
