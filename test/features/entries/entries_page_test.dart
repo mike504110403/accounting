@@ -146,14 +146,14 @@ void main() {
     expect(find.text('Steam'), findsOneWidget);
   });
 
-  testWidgets('個人視角：全聯買菜顯示我的份額 284', (tester) async {
+  testWidgets('個人視角只列私人帳：共同筆不出現（份額歸統計頁）', (tester) async {
     await pumpApp(tester);
     await tester.tap(viewMode('個人'));
     await tester.pumpAndSettle();
-    await tester.dragUntilVisible(find.text('全聯買菜'), find.byType(ListView).first, const Offset(0, -120));
 
-    final row = find.ancestor(of: find.text('全聯買菜'), matching: find.byType(InkWell)).first;
-    expect(find.descendant(of: row, matching: find.text('284')), findsOneWidget);
+    expect(find.text('全聯買菜'), findsNothing, reason: '共同支出不進個人分頁（2026-09-04 裁示）');
+    await tester.dragUntilVisible(find.text('Steam'), find.byType(ListView).first, const Offset(0, -120));
+    expect(find.text('Steam'), findsOneWidget, reason: '自己的私人帳全額顯示');
   });
 
   testWidgets('分頁：預設建立時間倒序先出 20 筆，滑到底再放 20', (tester) async {

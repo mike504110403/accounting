@@ -160,12 +160,12 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     }
   }
 
-  /// 本視角看得到的 entry：家庭＝只看共同；個人＝自己的私人＋共同支出（份額）。
-  /// 共同收入進共同餘額，不列進個人視角（spec 帳務規則 v1.3）。
+  /// 帳目列表的視角徹底分開（Mike 裁示 2026-09-04）：家庭＝只看共同、個人＝只看自己的私人。
+  /// 份額與個人餘額的視角換算屬於統計頁（view_math），列表不再混入共同筆——
+  /// 單人帳本時兩個分頁才不會長得一樣。
   bool _visible(Entry e, String me) {
     if (_view == ViewMode.family) return e.scope == EntryScope.shared;
-    if (e.scope == EntryScope.private) return e.createdBy == me;
-    return e.isExpense;
+    return e.scope == EntryScope.private && e.createdBy == me;
   }
 
   /// 本視角下這筆算多少：家庭看全額，個人看自己的份額。
