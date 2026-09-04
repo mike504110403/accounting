@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/cupertino.dart' show CupertinoPicker, CupertinoTheme, CupertinoThemeData;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/category_wheel.dart';
@@ -152,6 +153,7 @@ class _AddShoppingItemSheetState extends ConsumerState<AddShoppingItemSheet> {
           controller: _estCtrl,
           autofocus: true,
           keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           decoration: const InputDecoration(isDense: true, hintText: '可留空'),
           onSubmitted: (_) => _next(),
         );

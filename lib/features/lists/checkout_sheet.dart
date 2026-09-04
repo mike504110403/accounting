@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/category_wheel.dart';
@@ -293,6 +294,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
                       key: Key('checkout-ratio-${m.id}'),
                       controller: _ratioOf(m.id),
                       keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       decoration: InputDecoration(isDense: true, labelText: '${m.displayName} %'),
                       onChanged: (_) => setState(() {}),
                     ),
@@ -313,6 +315,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
                       key: Key('checkout-manual-${m.id}'),
                       controller: _manualOf(m.id),
                       keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                       decoration: InputDecoration(isDense: true, labelText: m.displayName),
                       onChanged: (_) => setState(() {}),
                     ),
@@ -346,6 +349,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
             child: TextField(
               controller: _actualCtrls[item.id],
               keyboardType: TextInputType.number,
+              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               textAlign: TextAlign.end,
               decoration: InputDecoration(isDense: true, errorText: invalid ? '請輸入金額' : null),
             ),
