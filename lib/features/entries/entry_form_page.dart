@@ -565,9 +565,9 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         child: SafeArea(
         bottom: false,
         child: Align(
-          // 步驟拆開後單步內容不多：整塊垂直置中（Mike 裁示 2026-09-03），
-          // 內容比視窗高（鍵盤彈起等）時 SingleChildScrollView 自然轉為可捲。
-          alignment: Alignment.center,
+          // 步驟拆開後單步內容不多：整塊垂直置中（Mike 裁示 2026-09-03）；
+          // 鍵盤彈起時改頂對齊——內容上移不被擋、也不會隨鍵盤高度亂跳（2026-09-04）。
+          alignment: MediaQuery.viewInsetsOf(context).bottom > 0 ? Alignment.topCenter : Alignment.center,
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 560),
             child: SingleChildScrollView(
@@ -830,7 +830,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (editing) const SizedBox.shrink(key: Key('edit-mode')),
-        for (final r in rows)
+        for (final r in rows) ...[
           InkWell(
             key: r.$3 == null ? null : Key(r.$3!),
             onTap: r.$4,
@@ -865,34 +865,35 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ),
             ),
           ),
-        if (ro && _liExpanded && _lines.isNotEmpty)
-          // 細項展開（唯讀）：同樣 3 列高可滾、倒序。
-          SizedBox(
-            height: 3 * 40.0,
-            child: ListView(
-              key: const Key('detail-lineitems'),
-              children: [
-                for (final i in [for (var k = 0; k < _lines.length; k++) k].reversed)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    child: Row(
-                      children: [
-                        const SizedBox(width: 56),
-                        Expanded(
-                          child: Text(_lines[i].name.text,
-                              style: t.textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        ),
-                        Text(
-                          _lines[i].amount.text.isEmpty ? '—' : fmtAmount(int.tryParse(_lines[i].amount.text) ?? 0),
-                          style: t.textTheme.bodySmall?.copyWith(
-                              fontFeatures: const [FontFeature.tabularFigures()]),
-                        ),
-                      ],
+          if (ro && r.$3 == 'edit-row-lines' && _liExpanded && _lines.isNotEmpty)
+            // 細項展開（唯讀）：同樣 3 列高可滾、倒序。
+            SizedBox(
+              height: 3 * 40.0,
+              child: ListView(
+                key: const Key('detail-lineitems'),
+                children: [
+                  for (final i in [for (var k = 0; k < _lines.length; k++) k].reversed)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 56),
+                          Expanded(
+                            child: Text(_lines[i].name.text,
+                                style: t.textTheme.bodySmall, maxLines: 1, overflow: TextOverflow.ellipsis),
+                          ),
+                          Text(
+                            _lines[i].amount.text.isEmpty ? '—' : fmtAmount(int.tryParse(_lines[i].amount.text) ?? 0),
+                            style: t.textTheme.bodySmall?.copyWith(
+                                fontFeatures: const [FontFeature.tabularFigures()]),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
-          ),
+        ],
       ],
     );
   }
