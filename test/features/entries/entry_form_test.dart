@@ -685,6 +685,7 @@ void main() {
     Navigator.of(tester.element(find.byKey(const ValueKey('form-step-0')))).pop();
     await tester.pumpAndSettle();
     expect(find.text('沖銷'), findsWidgets);
+    expect(find.text('已沖銷'), findsOneWidget, reason: '原筆要標已沖銷並弱化');
     await tester.tap(find.text('已結帳的買菜').first);
     await tester.pumpAndSettle();
     final btn = tester.widget<OutlinedButton>(find.byKey(const Key('reverse-entry')));

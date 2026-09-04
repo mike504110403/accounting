@@ -264,6 +264,15 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     }
     final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
 
+    // 被沖銷的原筆：沖銷筆備註帶「#原id前8碼」，比對出配對集合。
+    final reversedTags = <String>{
+      for (final e in all)
+        if (e.isAdjustment)
+          ...RegExp(r'#([0-9A-Za-z-]{8})').allMatches(e.note).map((m) => m.group(1)!),
+    };
+    bool isReversed(Entry e) =>
+        !e.isAdjustment && e.id.length >= 8 && reversedTags.contains(e.id.substring(0, 8));
+
     Widget entryRow(Entry e) => Slidable(
           key: ValueKey('slide-${e.id}'),
           endActionPane: ActionPane(
@@ -292,6 +301,7 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
             categories: categories,
             members: members,
             amount: _shown(e, me, ledger.defaultRatio),
+            reversed: isReversed(e),
             onTap: () => context.push('/entries/${e.id}'),
           ),
         );
@@ -564,12 +574,16 @@ class _EntryTile extends StatelessWidget {
     required this.members,
     required this.amount,
     required this.onTap,
+    this.reversed = false,
   });
   final Entry entry;
   final List<Category> categories;
   final List<Member> members;
   final int amount;
   final VoidCallback onTap;
+
+  /// 這筆已被沖銷（有對應反向紀錄）：與沖銷筆同組弱化配色＋刪除線。
+  final bool reversed;
 
   String _categoryName() {
     for (final c in categories) {
@@ -595,7 +609,11 @@ class _EntryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
+    // 沖銷配對（Mike 裁示 2026-09-04）：被沖銷的原筆與沖銷筆用同組弱化色，正常筆不變。
+    final muted = reversed || entry.isAdjustment;
+    final inkColor = muted ? t.colorScheme.onSurfaceVariant : null;
     final tags = <String>[
+      if (reversed) '已沖銷',
       if (entry.isAdjustment) '沖銷',
       if (entry.scope == EntryScope.private) '私人',
       if (entry.payerId != null && entry.splitMethod != SplitMethod.common) '代墊 ${_memberName(entry.payerId!)}',
@@ -622,11 +640,16 @@ class _EntryTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Flexible(child: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: t.textTheme.bodyLarge)),
-                      if (entry.isAdjustment) ...[
-                        const SizedBox(width: 6),
-                        _Tag(text: '修正', tone: t.colorScheme.tertiary),
-                      ],
+                      Flexible(
+                        child: Text(title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: t.textTheme.bodyLarge?.copyWith(
+                              color: inkColor,
+                              decoration: reversed ? TextDecoration.lineThrough : null,
+                              decorationColor: inkColor,
+                            )),
+                      ),
                     ],
                   ),
                   if (tags.isNotEmpty)
@@ -646,7 +669,11 @@ class _EntryTile extends StatelessWidget {
               entry.isExpense ? fmtAmount(amount) : '+${fmtAmount(amount)}',
               style: t.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
-                color: entry.isExpense ? t.colorScheme.onSurface : incomeColor(context),
+                color: muted
+                    ? t.colorScheme.onSurfaceVariant
+                    : (entry.isExpense ? t.colorScheme.onSurface : incomeColor(context)),
+                decoration: reversed ? TextDecoration.lineThrough : null,
+                decorationColor: t.colorScheme.onSurfaceVariant,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
