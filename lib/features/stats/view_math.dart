@@ -4,7 +4,7 @@
 /// 一律吃它的輸出，不再各自判斷 scope／分攤。
 library;
 
-import '../../domain/budget_math.dart';
+import '../../domain/balance_math.dart';
 import '../../domain/models.dart';
 
 /// 套上視角後的一筆：原始 entry ＋ 該視角下計入統計的金額。
@@ -13,8 +13,9 @@ typedef ViewEntry = ({Entry entry, int amount});
 /// 視角過濾＋金額換算（ADR-0003）。
 ///
 /// - 家庭：只取 `scope == shared`，金額全額。
-/// - 個人：`private && createdBy == me` 取全額；`shared` 取 [myPortion]
-///   （共同支出取我的分攤、common／收入依 `defaultRatio`）。他人的私人筆不可見。
+/// - 個人：`private && createdBy == me` 取全額；共同支出取 [myPortion]
+///   （splits 取我的分攤、common 依 `defaultRatio`）。他人的私人筆不可見；
+///   共同收入進共同餘額、不進個人視角（spec 帳務規則 v1.3）。
 List<ViewEntry> viewEntries(
   Iterable<Entry> entries,
   ViewMode mode,
@@ -29,7 +30,7 @@ List<ViewEntry> viewEntries(
       case ViewMode.personal:
         if (e.scope == EntryScope.private) {
           if (e.createdBy == me) out.add((entry: e, amount: e.amount));
-        } else {
+        } else if (e.isExpense) {
           out.add((entry: e, amount: myPortion(e, me, ratio)));
         }
     }
@@ -37,13 +38,7 @@ List<ViewEntry> viewEntries(
   return out;
 }
 
-/// 把視角金額寫回 [Entry]，好讓 `budget_math` 的 [runningBalance]／[spentIn]
-/// 在個人視角也算的是「我的份額」。
-List<Entry> asEntries(Iterable<ViewEntry> items) => [
-      for (final i in items) i.entry.copyWith(amount: i.amount),
-    ];
-
-// ── 日期工具（budget_math 只有月層級，日／週層級放這裡）─────────────────
+// ── 日期工具（balance_math 只有月層級，日／週層級放這裡）─────────────────
 
 DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
@@ -95,7 +90,9 @@ class MonthSummary {
   /// 該月支出合計（視角金額）。
   final int expense;
 
-  /// 期初＋Σ收入−Σ支出，算到該月最後一天（ADR-0004，連續累計不月結）。
+  /// 該月最後一天（含）的可用餘額（ADR-0007，v1.3）：
+  /// 家庭＝`sharedAvailable`（共同可用餘額）、個人＝`personalBalance`（個人餘額）。
+  /// 由呼叫端把視角決定好包成 [monthSummary] 的 `balanceAt`，這裡不判斷視角。
   final int balance;
 
   int get net => income - expense;
@@ -104,7 +101,7 @@ class MonthSummary {
 MonthSummary monthSummary({
   required List<ViewEntry> items,
   required DateTime month,
-  required int opening,
+  required int Function(DateTime until) balanceAt,
 }) {
   var income = 0;
   var expense = 0;
@@ -119,11 +116,7 @@ MonthSummary monthSummary({
   return MonthSummary(
     income: income,
     expense: expense,
-    balance: runningBalance(
-      opening: opening,
-      entries: asEntries(items),
-      until: lastDayOfMonth(month),
-    ),
+    balance: balanceAt(lastDayOfMonth(month)),
   );
 }
 

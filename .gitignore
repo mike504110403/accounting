@@ -45,3 +45,9 @@ app.*.map.json
 /android/app/release
 .dart_tool/dev.pid
 accounting.iml
+
+# 環境變數（金鑰不進版控；範例檔例外）
+.env
+.env.*
+!.env.example
+.playwright-cli/

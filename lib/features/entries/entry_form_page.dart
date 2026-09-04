@@ -3,8 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../app/category_icon.dart';
+import '../../app/category_wheel.dart';
 import '../../app/format.dart';
+import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import 'split_math.dart';
@@ -66,6 +67,34 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   Entry? _original;
   bool _missing = false;
 
+  /// 步驟精靈（Mike 裁示 2026-09-03，四關版）：類型・分類・金額 → 日期・備註・細項 → 進階 → 確認。
+  static const _stepTitles = ['類型・分類・金額', '日期・備註・細項', '進階', '確認'];
+  static const _confirmStep = 3;
+  int _step = 0;
+
+  void _nextStep() => setState(() => _step = (_step + 1).clamp(0, _confirmStep));
+  void _prevStep() => setState(() => _step = (_step - 1).clamp(0, _confirmStep));
+
+  /// 編輯 hub 的單欄彈窗（bottom sheet）活在另一條 route，page 的 setState 不會讓它重建；
+  /// 彈窗內容包 [AnimatedBuilder] 聽這個 tick，setState 順手 ping 一下兩邊就同步。
+  final _tick = _Tick();
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    _tick.ping();
+  }
+
+  /// 寫入進行中：儲存鈕停用，避免重複送出。
+  bool _saving = false;
+
+  /// 資金來源（v1.3／ADR-0007）：只有共同錢包的共同支出可選，其餘一律 balance。
+  Funding _funding = Funding.balance;
+
+  /// 使用者是否手動選過資金來源：true 就不再被 [_syncFunding] 的預設值覆寫，
+  /// 直到付款來源切成員／範圍切私人／種類切收入把它強制清掉。
+  bool _fundingTouched = false;
+
   /// 分攤欄位的 controller 延後到用得到時才建立：成員清單變動（加入新成員、切帳本）
   /// 也不會出現沒有 controller 的成員。
   TextEditingController _manualOf(String memberId) =>
@@ -75,11 +104,25 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         () => TextEditingController(text: '${ref.read(ledgerProvider).defaultRatio[memberId] ?? 0}'),
       );
 
+  /// 該 kind 排序後的第一個分類（滾輪語義：永遠有選中值；kind 無分類時 null）。
+  String? _firstCategoryOf(EntryKind kind) {
+    final list = [
+      for (final c in ref.read(categoriesProvider))
+        if (c.kind == kind) c,
+    ]..sort((a, b) => a.sort.compareTo(b.sort));
+    return list.isEmpty ? null : list.first.id;
+  }
+
   @override
   void initState() {
     super.initState();
     final id = widget.entryId;
-    if (id == null) return;
+    if (id == null) {
+      // 分類改垂直滾輪（2026-09-03）：新增即預設第一個分類，不再有「未選」狀態。
+      _categoryId = _firstCategoryOf(_kind);
+      _syncFunding();
+      return;
+    }
 
     Entry? found;
     for (final e in ref.read(entriesProvider)) {
@@ -90,6 +133,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       return;
     }
     _original = found;
+    _step = _confirmStep; // 編輯：直接進單頁精簡明細（Mike 裁示 2026-09-03），點欄位開彈窗改
     _kind = found.kind;
     _scope = found.scope;
     _amount.text = found.amount.toString();
@@ -99,6 +143,12 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     _payerId = found.payerId;
     _method = found.splitMethod;
     _isAdjustment = found.isAdjustment;
+    // 編輯既有帳目：只有「共同錢包的共同支出」才是使用者真的選過資金來源，視為已
+    // touched、不被之後的分類／日期變動自動覆寫；代墊／私人／收入的 balance 是
+    // Entry 不變式逼出來的，不是使用者選的——不能讓它們「假裝已選過」，否則之後切回
+    // 共同錢包時 `_syncFunding` 會被 touched 擋住，沒辦法依 defaultFunding 重算。
+    _funding = found.funding;
+    _fundingTouched = _fundingSelectable;
     for (final li in found.lineItems) {
       _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
     }
@@ -133,9 +183,26 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   bool get _settling => _original?.settledState == SettledState.settling;
   String get _lockReason => _settled ? '已結帳，金額鎖定；改用修正筆' : '結算中，簽核完成或作廢後才能改金額';
   int get _amountValue => int.tryParse(_amount.text.trim()) ?? 0;
+  /// 名稱非空的細項列（儲存與顯示的口徑：空白列一律不算、儲存時捨棄）。
+  int get _validLineCount {
+    var n = 0;
+    for (final l in _lines) {
+      if (l.name.text.trim().isNotEmpty) n++;
+    }
+    return n;
+  }
+
+  bool get _hasBlankLine {
+    for (final l in _lines) {
+      if (l.name.text.trim().isEmpty) return true;
+    }
+    return false;
+  }
+
   int get _lineTotal {
     var sum = 0;
     for (final l in _lines) {
+      if (l.name.text.trim().isEmpty) continue;
       sum += int.tryParse(l.amount.text.trim()) ?? 0;
     }
     return sum;
@@ -155,6 +222,28 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   /// 支出＋共同時才有付款來源與分攤。
   bool get _splittable => _kind == EntryKind.expense && _scope == EntryScope.shared;
 
+  /// 資金來源只在「共同錢包的共同支出、且已選分類」可選（與 [Entry] 的建構不變式一致；
+  /// 未選分類時 [defaultFunding] 無主體可算，不渲染這列，維持 balance）。
+  bool get _fundingSelectable => _splittable && _payerId == null && _categoryId != null;
+
+  /// 依目前狀態同步 `_funding`：條件不符（付款人是成員／範圍私人／種類收入／尚未選分類）
+  /// 就強制收回 balance 並清「已手動選過」旗標；條件符合但使用者還沒手動選過，就依
+  /// [defaultFunding] 重算預設；已手動選過的維持原值不覆寫。呼叫端要在每個會影響
+  /// 分攤性、付款人、分類、日期的 setState 裡呼叫這個，讓狀態隨時保持一致。
+  void _syncFunding() {
+    if (!_fundingSelectable) {
+      _funding = Funding.balance;
+      _fundingTouched = false;
+      return;
+    }
+    if (_fundingTouched) return;
+    _funding = defaultFunding(
+      allocations: ref.read(allocationsProvider),
+      categoryId: _categoryId!,
+      month: _date,
+    );
+  }
+
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
       context: context,
@@ -162,10 +251,16 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       firstDate: DateTime(2020),
       lastDate: DateTime(2100),
     );
-    if (picked != null && mounted) setState(() => _date = picked);
+    if (picked != null && mounted) {
+      setState(() {
+        _date = picked;
+        _syncFunding();
+      });
+    }
   }
 
-  void _save() {
+  Future<void> _save() async {
+    if (_saving) return;
     final me = ref.read(currentMemberIdProvider);
     final members = ref.read(membersProvider);
     final ledger = ref.read(ledgerProvider);
@@ -224,7 +319,14 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       return;
     }
 
-    final id = orig?.id ?? DateTime.now().microsecondsSinceEpoch.toString();
+    // 防禦層：不變式保證 funding=budget 只允許共同錢包的共同支出；_syncFunding 已經
+    // 隨狀態同步過，這裡用最終算出的 scope／payerId 再擋一次，確保炸不了。
+    final funding = locked
+        ? orig!.funding
+        : (payerId == null && scope == EntryScope.shared && _kind == EntryKind.expense ? _funding : Funding.balance);
+
+    // 新筆的 id 留空字串＝交給 repository（Supabase 由 DB）產生。
+    final id = orig?.id ?? '';
     final splits = locked
         ? orig!.splits
         : toEntrySplits(
@@ -242,11 +344,12 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       final name = _lines[i].name.text.trim();
       if (name.isEmpty) continue;
       lineItems.add(LineItem(
-        id: 'li-$id-$i',
+        // 細項是「全刪重建」，id 一律留給 repository 產生；空列已捨棄，sort 用有效序。
+        id: '',
         entryId: id,
         name: name,
         amount: int.tryParse(_lines[i].amount.text.trim()),
-        sort: i,
+        sort: lineItems.length,
       ));
     }
 
@@ -264,18 +367,32 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       splitMethod: method,
       settledState: orig?.settledState ?? SettledState.open,
       isAdjustment: locked ? orig!.isAdjustment : _isAdjustment,
+      funding: funding,
       lineItems: lineItems,
       splits: splits,
     );
 
+    setState(() => _saving = true);
     try {
+      final notifier = ref.read(entriesProvider.notifier);
       if (orig == null) {
-        ref.read(entriesProvider.notifier).add(entry);
+        await notifier.add(entry);
+      } else if (_settled) {
+        // 已結帳（ADR-0002：分類、備註、細項可改）：主筆走 `upsert_entry` 但**不能帶子表**
+        // ——那支的子表寫法是全刪重建，settled 下會被 policy 擋成半套。
+        // 細項本身是允許改的，改走直寫 `line_items` 表的 replaceLineItems。
+        await notifier.update(entry, writeSplits: false, writeLineItems: false);
+        await notifier.replaceLineItems(entry.id, lineItems);
       } else {
-        ref.read(entriesProvider.notifier).update(entry);
+        await notifier.update(entry);
       }
+    } on LedgerException catch (e) {
+      if (mounted) setState(() => _saving = false);
+      _toast(e.message);
+      return;
     } catch (e, st) {
       debugPrint('帳目儲存失敗: $e\n$st');
+      if (mounted) setState(() => _saving = false);
       _toast('儲存失敗，請稍後再試');
       return;
     }
@@ -299,10 +416,16 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       ),
     );
     if (ok != true || !mounted) return;
+    setState(() => _saving = true);
     try {
-      ref.read(entriesProvider.notifier).remove(_original!.id);
+      await ref.read(entriesProvider.notifier).remove(_original!.id);
+    } on LedgerException catch (e) {
+      if (mounted) setState(() => _saving = false);
+      _toast(e.message);
+      return;
     } catch (e, st) {
       debugPrint('帳目刪除失敗: $e\n$st');
+      if (mounted) setState(() => _saving = false);
       _toast('刪除失敗，請稍後再試');
       return;
     }
@@ -370,262 +493,489 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       ),
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-        child: FilledButton(key: const Key('save-button'), onPressed: _save, child: const Text('儲存')),
+        child: Row(
+          children: [
+            if (_step > 0 && _original == null) ...[
+              OutlinedButton(
+                key: const Key('form-back-button'),
+                onPressed: _saving ? null : _prevStep,
+                child: const Text('返回'),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: _step == _confirmStep
+                  ? FilledButton(
+                      key: const Key('save-button'),
+                      onPressed: _saving ? null : _save,
+                      child: Text(_saving ? '儲存中…' : '儲存'),
+                    )
+                  : FilledButton(
+                      key: const Key('form-next-button'),
+                      // 金額 0／空白不能進下一關（Mike 裁示 2026-09-03）；其餘格式錯誤仍由儲存端擋。
+                      onPressed: _step == 0 && _amountValue == 0 ? null : _nextStep,
+                      child: const Text('下一步'),
+                    ),
+            ),
+          ],
+        ),
       ),
-      body: SafeArea(
+      // 點內容空白處收鍵盤（Mike 裁示：鍵盤不要擋欄位、要收得掉）。
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => FocusScope.of(context).unfocus(),
+        child: SafeArea(
         bottom: false,
-        child: Center(
+        child: Align(
+          // 步驟拆開後單步內容不多：整塊垂直置中（Mike 裁示 2026-09-03），
+          // 內容比視窗高（鍵盤彈起等）時 SingleChildScrollView 自然轉為可捲。
+          alignment: Alignment.center,
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 560),
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
               child: Column(
+                mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  SegmentedButton<EntryKind>(
-                    segments: const [
-                      ButtonSegment(value: EntryKind.expense, label: Text('支出')),
-                      ButtonSegment(value: EntryKind.income, label: Text('收入')),
-                    ],
-                    selected: {_kind},
-                    showSelectedIcon: false,
-                    onSelectionChanged: _original != null
-                        ? null
-                        : (s) => setState(() {
-                              _kind = s.first;
-                              _categoryId = null;
-                            }),
-                  ),
+                  // 步驟標題與進度置中放大：一眼看懂現在在填什麼、走到哪。
+                  // 編輯＝單頁明細 hub，沒有步驟進度。
+                  Text(_original != null ? '帳目明細' : _stepTitles[_step],
+                      textAlign: TextAlign.center, style: t.textTheme.titleMedium),
+                  if (_original == null) ...[
+                    const SizedBox(height: 4),
+                    Text('${_step + 1}/${_stepTitles.length}',
+                        textAlign: TextAlign.center,
+                        style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
+                  ],
                   if (_locked)
                     Padding(
-                      padding: const EdgeInsets.only(top: 10),
+                      padding: const EdgeInsets.only(top: 12),
                       child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(Icons.lock_outline, size: 16, color: t.colorScheme.onSurfaceVariant),
                           const SizedBox(width: 6),
-                          Expanded(
+                          Flexible(
                             child: Text(_lockReason,
                                 style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
                           ),
                         ],
                       ),
                     ),
-                  TextField(
-                    key: const Key('amount-field'),
-                    controller: _amount,
-                    enabled: !_locked,
-                    keyboardType: const TextInputType.numberWithOptions(signed: true),
-                    inputFormatters: [_AmountFormatter(allowNegative: _isAdjustment)],
-                    textAlign: TextAlign.center,
-                    style: t.textTheme.headlineMedium?.copyWith(
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                    decoration: const InputDecoration(hintText: '0', filled: false, border: InputBorder.none),
-                    onChanged: (_) => setState(() {}),
-                  ),
-                  _SectionLabel('分類'),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      for (final c in categories)
-                        _CategoryCell(
-                          key: Key('category-${c.id}'),
-                          category: c,
-                          selected: _categoryId == c.id,
-                          onTap: () => setState(() => _categoryId = c.id),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      ActionChip(
-                        key: const Key('date-button'),
-                        avatar: const Icon(Icons.calendar_today_outlined, size: 16),
-                        label: Text(fmtDate(_date)),
-                        onPressed: _pickDate,
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: TextField(
-                          key: const Key('note-field'),
-                          controller: _note,
-                          decoration: const InputDecoration(hintText: '備註'),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  _LineItemsSection(
-                    lines: _lines,
-                    amount: _amountValue,
-                    lineTotal: _lineTotal,
-                    onAdd: () => setState(() => _lines.add(_LineRow())),
-                    onRemove: (i) => setState(() => _lines.removeAt(i).dispose()),
-                    onChanged: () => setState(() {}),
-                  ),
-                  ExpansionTile(
-                    key: const Key('advanced-tile'),
-                    tilePadding: EdgeInsets.zero,
-                    childrenPadding: const EdgeInsets.only(bottom: 8),
-                    shape: const Border(),
-                    collapsedShape: const Border(),
-                    title: Row(
-                      children: [
-                        Text('進階', style: t.textTheme.labelLarge),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            _advancedSummary(members),
-                            textAlign: TextAlign.right,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
-                          ),
-                        ),
-                      ],
-                    ),
-                    children: [
-                      _OptionRow(
-                        label: '範圍',
-                        children: [
-                          for (final e in const {EntryScope.shared: '共同', EntryScope.private: '私人'}.entries)
-                            _MiniChip(
-                              chipKey: Key('scope-${e.key.name}'),
-                              label: e.value,
-                              selected: _scope == e.key,
-                              onTap: _locked
-                                  ? null
-                                  : () => setState(() {
-                                        _scope = e.key;
-                                        if (_scope == EntryScope.private) {
-                                          _payerId = ref.read(currentMemberIdProvider);
-                                          _method = SplitMethod.common;
-                                        }
-                                      }),
-                            ),
-                        ],
-                      ),
-                      if (_splittable) ...[
-                        _OptionRow(
-                          label: '付款',
-                          children: [
-                            _MiniChip(
-                              chipKey: const Key('payer-common'),
-                              label: '共同錢包',
-                              selected: _payerId == null,
-                              onTap: _locked
-                                  ? null
-                                  : () => setState(() {
-                                        _payerId = null;
-                                        _method = SplitMethod.common;
-                                      }),
-                            ),
-                            for (final m in members)
-                              _MiniChip(
-                                chipKey: Key('payer-${m.id}'),
-                                label: m.displayName,
-                                selected: _payerId == m.id,
-                                onTap: _locked ? null : () => setState(() => _payerId = m.id),
-                              ),
-                          ],
-                        ),
-                        _OptionRow(
-                          label: '分攤',
-                          children: [
-                            for (final e in const {
-                              SplitMethod.equal: ('split-equal', '均分'),
-                              SplitMethod.ratio: ('split-ratio', '比例'),
-                              SplitMethod.amount: ('split-amount', '金額'),
-                              SplitMethod.common: ('split-common', '共同'),
-                            }.entries)
-                              _MiniChip(
-                                chipKey: Key(e.value.$1),
-                                label: e.value.$2,
-                                selected: _method == e.key,
-                                onTap: _locked || (_payerId == null && e.key != SplitMethod.common)
-                                    ? null
-                                    : () => setState(() => _method = e.key),
-                              ),
-                          ],
-                        ),
-                        if (_payerId != null && _method == SplitMethod.ratio)
-                          _PercentRow(
-                            members: members,
-                            controllers: _ratio,
-                            enabled: !_locked,
-                            total: _ratioTotal,
-                            onChanged: () => setState(() {}),
-                          ),
-                        if (_payerId != null && _method == SplitMethod.amount)
-                          _ManualRow(
-                            members: members,
-                            controllers: _manual,
-                            enabled: !_locked,
-                            total: manualTotal(_manualValues),
-                            amount: _amountValue,
-                            onChanged: () => setState(() {}),
-                          ),
-                        if (_payerId != null && (_method == SplitMethod.equal || _method == SplitMethod.ratio))
-                          Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              [
-                                for (final e in buildSplits(
-                                  amount: _amountValue,
-                                  method: _method,
-                                  members: members,
-                                  ratio: _ratioValues,
-                                ).entries)
-                                  '${_nameOf(members, e.key)} ${fmtShare(e.value)}',
-                              ].join('　'),
-                              textAlign: TextAlign.right,
-                              style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
-                            ),
-                          ),
-                      ],
-                      SwitchListTile(
-                        key: const Key('adjustment-switch'),
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        visualDensity: VisualDensity.compact,
-                        title: Tooltip(
-                          message: '沖銷已結帳金額用，可填負數',
-                          child: Text('修正筆', style: t.textTheme.labelMedium),
-                        ),
-                        value: _isAdjustment,
-                        onChanged: _locked ? null : (v) => setState(() => _isAdjustment = v),
-                      ),
-                    ],
-                  ),
+                  const SizedBox(height: 24),
+                  KeyedSubtree(key: ValueKey('form-step-$_step'), child: _stepBody(t, members, categories)),
                 ],
               ),
             ),
           ),
         ),
+        ),
       ),
+    );
+  }
+
+  /// 各步驟內容：欄位本體沿用原表單元件，一關一組。
+  Widget _stepBody(ThemeData t, List<Member> members, List<Category> categories) {
+    switch (_step) {
+      case 0:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // 窄版置中（Mike 裁示 2026-09-03）：不吃滿版，與下方欄位垂直邊切齊的節奏一致。
+            Center(
+              child: SegmentedButton<EntryKind>(
+              segments: const [
+                ButtonSegment(value: EntryKind.expense, label: Text('支出')),
+                ButtonSegment(value: EntryKind.income, label: Text('收入')),
+              ],
+              selected: {_kind},
+              showSelectedIcon: false,
+              onSelectionChanged: _original != null
+                  ? null
+                  : (s) => setState(() {
+                        _kind = s.first;
+                        _categoryId = _firstCategoryOf(_kind);
+                        _syncFunding();
+                      }),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // 垂直滾輪：不秀 icon；鎖定只鎖金額／付款來源／分攤／範圍，分類結算中仍可改（spec）。
+            CategoryWheel(
+              key: const Key('category-wheel'),
+              categories: categories,
+              selectedId: _categoryId,
+              enabled: true,
+              onSelected: (id) => setState(() {
+                _categoryId = id;
+                _syncFunding();
+              }),
+            ),
+            const SizedBox(height: 8),
+            _amountField(t),
+          ],
+        );
+      case 1:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Center(
+              child: ActionChip(
+                key: const Key('date-button'),
+                avatar: const Icon(Icons.calendar_today_outlined, size: 16),
+                label: Text(fmtDate(_date)),
+                onPressed: _pickDate,
+              ),
+            ),
+            const SizedBox(height: 12),
+            _noteField(),
+            const SizedBox(height: 8),
+            // 細項窄版置中（Mike 裁示 2026-09-03）。
+            Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 320),
+                child: _linesSection(),
+              ),
+            ),
+          ],
+        );
+      case 2:
+        return _advancedBody(t, members);
+      default:
+        return _confirmBody(t, members);
+    }
+  }
+
+  Widget _amountField(ThemeData t) => TextField(
+        key: const Key('amount-field'),
+        controller: _amount,
+        enabled: !_locked,
+        keyboardType: const TextInputType.numberWithOptions(signed: true),
+        inputFormatters: [_AmountFormatter(allowNegative: _isAdjustment)],
+        textAlign: TextAlign.center,
+        style: t.textTheme.headlineMedium?.copyWith(
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+        decoration: const InputDecoration(
+          hintText: '0',
+          filled: false,
+          border: InputBorder.none,
+          isDense: true,
+          contentPadding: EdgeInsets.symmetric(vertical: 6),
+        ),
+        onChanged: (_) => setState(() {}),
+      );
+
+  Widget _noteField({bool autofocus = false}) => TextField(
+        key: const Key('note-field'),
+        controller: _note,
+        autofocus: autofocus,
+        decoration: const InputDecoration(hintText: '備註（可留空）'),
+        onChanged: (_) => setState(() {}),
+      );
+
+  Widget _linesSection() => _LineItemsSection(
+        lines: _lines,
+        amount: _amountValue,
+        lineTotal: _lineTotal,
+        // 有空白列就鎖「＋」（Mike 裁示 2026-09-03：細項沒填不能再往下加）。
+        onAdd: _hasBlankLine ? null : () => setState(() => _lines.add(_LineRow())),
+        onRemove: (i) => setState(() => _lines.removeAt(i).dispose()),
+        onChanged: () => setState(() {}),
+      );
+
+  /// 編輯 hub 的單欄彈窗：內容聽 [_tick]，page setState 兩邊同步；「完成」收起。
+  Future<void> _editFieldSheet(String title, Widget Function(BuildContext) content) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => AnimatedBuilder(
+        animation: _tick,
+        builder: (_, _) => Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + MediaQuery.of(ctx).viewInsets.bottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, textAlign: TextAlign.center, style: Theme.of(ctx).textTheme.titleMedium),
+              const SizedBox(height: 16),
+              content(ctx),
+              const SizedBox(height: 20),
+              FilledButton(
+                key: const Key('field-done'),
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('完成'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 確認頁（新增精靈末步）／編輯 hub（單頁精簡明細）。
+  /// 新增：點列跳回該步驟。編輯：值以弱色呈現（唯讀感），點列開該欄位的彈窗（Mike 裁示 2026-09-03）。
+  Widget _confirmBody(ThemeData t, List<Member> members) {
+    final editing = _original != null;
+    String categoryName = '—';
+    for (final c in ref.read(categoriesProvider)) {
+      if (c.id == _categoryId) categoryName = c.name;
+    }
+    final note = _note.text.trim();
+    final linesLabel = _validLineCount == 0 ? '—' : '$_validLineCount 筆・合計 ${fmtAmount(_lineTotal)}';
+
+    VoidCallback? go(int step) => () => setState(() => _step = step);
+    final rows = <(String, String, String?, VoidCallback?)>[
+      // (標籤, 值, 編輯列 key, onTap)
+      ('類型', _kind == EntryKind.income ? '收入' : '支出', null, editing ? null : go(0)),
+      (
+        '分類',
+        categoryName,
+        'edit-row-category',
+        editing
+            ? () => _editFieldSheet('分類', (ctx) {
+                  final categories = [
+                    for (final c in ref.read(categoriesProvider))
+                      if (c.kind == _kind) c,
+                  ]..sort((a, b) => a.sort.compareTo(b.sort));
+                  return CategoryWheel(
+                    key: const Key('category-wheel'),
+                    categories: categories,
+                    selectedId: _categoryId,
+                    enabled: true,
+                    onSelected: (id) => setState(() {
+                      _categoryId = id;
+                      _syncFunding();
+                    }),
+                  );
+                })
+            : go(0)
+      ),
+      (
+        '金額',
+        fmtAmount(_amountValue),
+        'edit-row-amount',
+        editing ? () => _editFieldSheet('金額', (_) => _amountField(t)) : go(0)
+      ),
+      ('日期', fmtDate(_date), 'date-button', editing ? _pickDate : go(1)),
+      if (editing || note.isNotEmpty)
+        (
+          '備註',
+          note.isEmpty ? '—' : note,
+          'edit-row-note',
+          editing ? () => _editFieldSheet('備註', (_) => _noteField(autofocus: true)) : go(1)
+        ),
+      if (editing || _validLineCount > 0)
+        (
+          '細項',
+          linesLabel,
+          'edit-row-lines',
+          editing ? () => _editFieldSheet('細項', (_) => _linesSection()) : go(1)
+        ),
+      (
+        '進階',
+        _advancedSummary(members) + (_isAdjustment ? '・修正筆' : ''),
+        'edit-row-advanced',
+        editing
+            ? () => _editFieldSheet('進階', (ctx) => _advancedBody(Theme.of(ctx), ref.read(membersProvider)))
+            : go(2)
+      ),
+      if (!editing && _isAdjustment) ('修正筆', '是', null, go(2)),
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (editing) const SizedBox.shrink(key: Key('edit-mode')),
+        for (final r in rows)
+          InkWell(
+            key: r.$3 == null ? null : Key(r.$3!),
+            onTap: r.$4,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 56,
+                    child: Text(r.$1, style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
+                  ),
+                  Expanded(
+                    child: Text(r.$2,
+                        textAlign: TextAlign.right,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: (t.textTheme.bodyMedium ?? const TextStyle()).copyWith(
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                            // 編輯 hub：值弱色＝唯讀感；點了才開彈窗改。
+                            color: editing ? t.colorScheme.onSurfaceVariant : null)),
+                  ),
+                  if (editing && r.$4 != null) ...[
+                    const SizedBox(width: 6),
+                    Icon(Icons.chevron_right, size: 16, color: t.colorScheme.onSurfaceVariant),
+                  ],
+                ],
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _advancedBody(ThemeData t, List<Member> members) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _OptionRow(
+          label: '範圍',
+          children: [
+            for (final e in const {EntryScope.shared: '共同', EntryScope.private: '私人'}.entries)
+              _MiniChip(
+                chipKey: Key('scope-${e.key.name}'),
+                label: e.value,
+                selected: _scope == e.key,
+                onTap: _locked
+                    ? null
+                    : () => setState(() {
+                          _scope = e.key;
+                          if (_scope == EntryScope.private) {
+                            _payerId = ref.read(currentMemberIdProvider);
+                            _method = SplitMethod.common;
+                          }
+                          _syncFunding();
+                        }),
+              ),
+          ],
+        ),
+        if (_splittable) ...[
+          _OptionRow(
+            label: '付款',
+            children: [
+              _MiniChip(
+                chipKey: const Key('payer-common'),
+                label: '共同錢包',
+                selected: _payerId == null,
+                onTap: _locked
+                    ? null
+                    : () => setState(() {
+                          _payerId = null;
+                          _method = SplitMethod.common;
+                          _syncFunding();
+                        }),
+              ),
+              for (final m in members)
+                _MiniChip(
+                  chipKey: Key('payer-${m.id}'),
+                  label: m.displayName,
+                  selected: _payerId == m.id,
+                  onTap: _locked
+                      ? null
+                      : () => setState(() {
+                            _payerId = m.id;
+                            _syncFunding();
+                          }),
+                ),
+            ],
+          ),
+          if (_fundingSelectable)
+            _OptionRow(
+              label: '資金',
+              children: [
+                _MiniChip(
+                  chipKey: const Key('funding-budget'),
+                  label: '預算',
+                  selected: _funding == Funding.budget,
+                  onTap: _locked
+                      ? null
+                      : () => setState(() {
+                            _funding = Funding.budget;
+                            _fundingTouched = true;
+                          }),
+                ),
+                _MiniChip(
+                  chipKey: const Key('funding-balance'),
+                  label: '餘額',
+                  selected: _funding == Funding.balance,
+                  onTap: _locked
+                      ? null
+                      : () => setState(() {
+                            _funding = Funding.balance;
+                            _fundingTouched = true;
+                          }),
+                ),
+              ],
+            ),
+          _OptionRow(
+            label: '分攤',
+            children: [
+              for (final e in const {
+                SplitMethod.equal: ('split-equal', '均分'),
+                SplitMethod.ratio: ('split-ratio', '比例'),
+                SplitMethod.amount: ('split-amount', '金額'),
+                SplitMethod.common: ('split-common', '共同'),
+              }.entries)
+                _MiniChip(
+                  chipKey: Key(e.value.$1),
+                  label: e.value.$2,
+                  selected: _method == e.key,
+                  onTap: _locked || (_payerId == null && e.key != SplitMethod.common)
+                      ? null
+                      : () => setState(() => _method = e.key),
+                ),
+            ],
+          ),
+          if (_payerId != null && _method == SplitMethod.ratio)
+            _PercentRow(
+              members: members,
+              controllers: _ratio,
+              enabled: !_locked,
+              total: _ratioTotal,
+              onChanged: () => setState(() {}),
+            ),
+          if (_payerId != null && _method == SplitMethod.amount)
+            _ManualRow(
+              members: members,
+              controllers: _manual,
+              enabled: !_locked,
+              total: manualTotal(_manualValues),
+              amount: _amountValue,
+              onChanged: () => setState(() {}),
+            ),
+          if (_payerId != null && (_method == SplitMethod.equal || _method == SplitMethod.ratio))
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                [
+                  for (final e in buildSplits(
+                    amount: _amountValue,
+                    method: _method,
+                    members: members,
+                    ratio: _ratioValues,
+                  ).entries)
+                    '${_nameOf(members, e.key)} ${fmtShare(e.value)}',
+                ].join('　'),
+                textAlign: TextAlign.right,
+                style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
+              ),
+            ),
+        ],
+        SwitchListTile(
+          key: const Key('adjustment-switch'),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          title: Tooltip(
+            message: '沖銷已結帳金額用，可填負數',
+            child: Text('修正筆', style: t.textTheme.labelMedium),
+          ),
+          value: _isAdjustment,
+          onChanged: _locked ? null : (v) => setState(() => _isAdjustment = v),
+        ),
+      ],
     );
   }
 }
 
-/// 細標題：分段用，不做卡片。
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel(this.text);
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(0, 6, 0, 8),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Text(text, style: t.textTheme.labelMedium?.copyWith(color: t.colorScheme.onSurfaceVariant)),
-      ),
-    );
-  }
-}
 
 /// 選項列：標籤在左、chip 在右，單行。
 class _OptionRow extends StatelessWidget {
@@ -713,7 +1063,6 @@ class _PercentRow extends StatelessWidget {
                   child: TextField(
                     key: Key('ratio-${m.id}'),
                     controller: controllers[m.id],
-                    enabled: enabled,
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     textAlign: TextAlign.end,
@@ -770,7 +1119,6 @@ class _ManualRow extends StatelessWidget {
                   child: TextField(
                     key: Key('manual-${m.id}'),
                     controller: controllers[m.id],
-                    enabled: enabled,
                     keyboardType: TextInputType.number,
                     inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                     textAlign: TextAlign.end,
@@ -795,44 +1143,6 @@ class _ManualRow extends StatelessWidget {
   }
 }
 
-class _CategoryCell extends StatelessWidget {
-  const _CategoryCell({super.key, required this.category, required this.selected, required this.onTap});
-  final Category category;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    final short = category.name.length <= 2 ? category.name : category.name.substring(0, 2);
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: Container(
-        width: 62,
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? t.colorScheme.primaryContainer : Colors.transparent,
-          border: Border.all(color: selected ? Colors.transparent : t.colorScheme.outlineVariant),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Column(
-          children: [
-            Icon(categoryIcon(category.icon),
-                size: 20, color: selected ? t.colorScheme.onPrimaryContainer : t.colorScheme.onSurfaceVariant),
-            const SizedBox(height: 4),
-            Text(
-              short,
-              maxLines: 1,
-              style: t.textTheme.labelSmall?.copyWith(
-                  color: selected ? t.colorScheme.onPrimaryContainer : t.colorScheme.onSurface),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 /// 細項：名稱＋金額可空，差額只在有細項且不等於主筆時以右對齊小字提示。
 class _LineItemsSection extends StatelessWidget {
@@ -847,7 +1157,7 @@ class _LineItemsSection extends StatelessWidget {
   final List<_LineRow> lines;
   final int amount;
   final int lineTotal;
-  final VoidCallback onAdd;
+  final VoidCallback? onAdd;
   final void Function(int index) onRemove;
   final VoidCallback onChanged;
 
@@ -881,6 +1191,8 @@ class _LineItemsSection extends StatelessWidget {
                     key: Key('li-name-$i'),
                     controller: lines[i].name,
                     decoration: const InputDecoration(hintText: '名稱'),
+                    // 名稱變動要通知外層：加列 gate（空白列鎖「＋」）靠它重算。
+                    onChanged: (_) => onChanged(),
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -915,4 +1227,8 @@ class _LineItemsSection extends StatelessWidget {
       ],
     );
   }
+}
+
+class _Tick extends ChangeNotifier {
+  void ping() => notifyListeners();
 }

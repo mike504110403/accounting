@@ -1,4 +1,3 @@
-import 'package:accounting/app/router.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/main.dart';
@@ -50,7 +49,6 @@ Future<void> openSearch(WidgetTester tester, String query) async {
 }
 
 void main() {
-  setUp(() => router.go('/entries'));
 
   testWidgets('搜尋品項：命中細項並顯示所屬主筆備註', (tester) async {
     await pumpApp(tester);
@@ -112,7 +110,8 @@ void main() {
     await openSearch(tester, '高麗菜');
     await tester.tap(inResults('高麗菜'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('amount-field')), findsOneWidget);
+    // 編輯＝單頁明細 hub（2026-09-03）。
+    expect(find.byKey(const Key('edit-mode')), findsOneWidget);
     expect(find.text('編輯'), findsOneWidget);
   });
 }

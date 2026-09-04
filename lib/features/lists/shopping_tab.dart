@@ -41,11 +41,12 @@ class ShoppingTab extends ConsumerWidget {
     );
     if (ok != true) return false;
     try {
-      ref.read(listItemsProvider.notifier).remove(id);
+      await ref.read(listItemsProvider.notifier).remove(id);
       return true;
-    } catch (_) {
+    } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('刪除失敗，請稍後再試')));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e is LedgerException ? e.message : '刪除失敗，請稍後再試')));
       }
       return false;
     }

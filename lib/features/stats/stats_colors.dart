@@ -40,8 +40,7 @@ Color sliceColor(ColorScheme cs, int i) {
 /// 不要退回 0——那會和第一個分類同色，看起來像是同一項。
 Color sliceColorAt(ColorScheme cs, int i) => i < 0 ? cs.outline : sliceColor(cs, i);
 
-/// 四條趨勢線的顏色，各取主題語意色。
+/// 三條趨勢線的顏色，各取主題語意色。
 Color spendColor(ColorScheme cs) => cs.primary;
-Color budgetColor(ColorScheme cs) => cs.tertiary;
 Color overColor(ColorScheme cs) => cs.error;
 Color balanceColor(ColorScheme cs) => cs.secondary;

@@ -33,6 +33,7 @@
 | `20260902002100_upsert_semantics_and_default_privs.sql` | `upsert_entry` 子表改 `null`＝不動；守恆 trigger 重讀當前列；函式 default privileges 關掉 | `entries_split_sum_check` |
 | `20260902002200_settled_children_and_column_grants.sql` | 已結帳不接受重寫子表；`ledgers`／`members` 欄位級 UPDATE；`rotate_invite_code` | `upsert_entry`、`rotate_invite_code` |
 | `20260902002300_sequences_and_member_insert.sql` | sequences 的授權與 default privileges 一併關掉；`members` 收回 INSERT（加入帳本只走 RPC） | — |
+| `20260903000100_budget_allocation_and_funding.sql` | 帳務規則 v1.3（ADR-0007）：`funding` enum ＋ `entries.funding`、`budget_allocation` 表（RLS／欄位級 UPDATE／realtime）、`upsert_entry` 帶 `funding`；**drop `budgets`、drop `categories.rollover`** | `upsert_entry`、`budget_allocation_expense_category` |
 
 ## 寫入入口一覽（波 2 最重要的一張表）
 
@@ -40,7 +41,8 @@
 | --- | --- |
 | **記一筆帳／改帳（帶分攤或細項）** | `upsert_entry(p_entry, p_splits, p_line_items)` —— 同一交易寫完，守恆才過得了 |
 | 記一筆帳、改帳、刪帳（不帶分攤） | 直接對 `entries` 寫（受 RLS ＋ 欄位級授權） |
-| 細項、分攤、分類、預算、清單 | 直接寫對應的表（受 RLS） |
+| 細項、分攤、分類、清單 | 直接寫對應的表（受 RLS） |
+| **撥款／退回預算** | 直接 `insert into budget_allocation`（一列＝一次撥款，`amount` 可負＝退回；`created_by` 必須是自己，比照 `entries`） |
 | 改自己的暱稱／個人期初餘額 | 直接 update `members` 自己那列 |
 | 改帳本名稱／`default_ratio`／共同期初餘額 | 直接 update `ledgers` |
 | **發起結算** | `initiate_settlement(ledger)` |
@@ -72,14 +74,19 @@
 | --- | :---: | :---: | :---: | :---: |
 | `ledgers` | ✓ | — | 欄位級 | — |
 | `members` | ✓ | ✓ | 欄位級 | — |
-| `categories`／`budgets`／`list_items`／`line_items`／`entry_splits` | ✓ | ✓ | ✓ | ✓ |
+| `categories`／`list_items`／`line_items`／`entry_splits` | ✓ | ✓ | ✓ | ✓ |
+| `budget_allocation` | ✓ | 欄位級 | 欄位級 | ✓ |
 | `entries` | ✓ | 欄位級 | 欄位級 | ✓ |
 | `settlements`／`settlement_entries`／`settlement_approvals`／`settlement_signers` | ✓ | — | — | — |
 
 `entries` 的欄位級授權：
-- **INSERT**：`ledger_id, kind, scope, amount, category_id, occurred_on, note, created_by, payer_id, split_method, is_adjustment`
+- **INSERT**：`ledger_id, kind, scope, amount, category_id, occurred_on, note, created_by, payer_id, split_method, is_adjustment, funding`
 - **UPDATE**：同上但**去掉 `ledger_id` 與 `created_by`**
 - 兩者都不含 `settled_state`／`id`／`created_at`。另有 before insert trigger 把 `settled_state` 強制為 `open`。
+
+`budget_allocation` 的欄位級授權：
+- **INSERT**：`ledger_id, category_id, amount, occurred_on, note, created_by`（**不含 `id`／`created_at`**，比照 `entries`）。
+- **UPDATE**：只開 `amount, occurred_on, note`——`ledger_id`／`category_id`／`created_by` 改了就是換一筆撥款，請刪掉重開（前端對這三欄**完全沒有 UPDATE 授權**，寫了就是 `permission denied for table budget_allocation`）。
 
 `ledgers` 的 UPDATE 只開 `name, default_ratio, opening_balance_shared`；
 **`invite_code` 不可寫**——輪替走 `rotate_invite_code`，否則任何成員都能把邀請碼改成自己記得住的字串（等於自選密碼）。
@@ -93,22 +100,22 @@
 | --- | --- |
 | `ledgers` | `name text`、`invite_code text unique`（**10 碼**大寫英數 base32，`gen_invite_code()` 以 `extensions.gen_random_bytes` 產生）、`default_ratio jsonb`（member_id → 百分比，合計 100）、`opening_balance_shared int` |
 | `members` | `ledger_id`、`user_id → auth.users`、`display_name text`、`opening_balance_personal int`、`joined_at`；`unique(ledger_id, user_id)` |
-| `categories` | `ledger_id`、`kind entry_kind`、`name text`、`icon text`（對應 `lib/app/category_icon.dart` 的名稱）、`sort int`、`rollover bool` |
-| `entries` | `ledger_id`、`kind entry_kind`、`scope entry_scope`、`amount int`、`category_id`、`occurred_on date`、`note text`、`created_by → members`、`payer_id → members`（null＝共同錢包）、`split_method split_method`、`settled_state settled_state`、`is_adjustment bool` |
+| `categories` | `ledger_id`、`kind entry_kind`、`name text`、`icon text`（對應 `lib/app/category_icon.dart` 的名稱）、`sort int` |
+| `entries` | `ledger_id`、`kind entry_kind`、`scope entry_scope`、`amount int`、`category_id`、`occurred_on date`、`note text`、`created_by → members`、`payer_id → members`（null＝共同錢包）、`split_method split_method`、`settled_state settled_state`、`is_adjustment bool`、**`funding funding`**（`balance`／`budget`，預設 `balance`） |
 | `entry_splits` | `entry_id`、`member_id`、`share numeric(12,2)`；`unique(entry_id, member_id)` |
 | `line_items` | `entry_id`、`name text`、`amount int null`、`sort int` |
 | `settlements` | `ledger_id`、`status settlement_status`、`initiated_by → members`、`nets jsonb`（member_id → int）、`settled_at timestamptz null` |
 | `settlement_entries` | `settlement_id`、`entry_id`；`unique(settlement_id, entry_id)` |
 | `settlement_approvals` | `settlement_id`、`member_id`、`approved_at`；`unique(settlement_id, member_id)` |
 | `settlement_signers` | `settlement_id`、`member_id`；發起當下定案的**需簽者快照**，之後只讀不改；`unique(settlement_id, member_id)` |
-| `budgets` | `ledger_id`、`category_id`、`month date`（該月 1 號）、**`limit_amount int`**；`unique(ledger_id, category_id, month)` |
+| `budget_allocation` | `ledger_id`、`category_id`（必須是同帳本的**支出**分類）、**`amount int`**（`<> 0`，負＝退回）、`occurred_on date`、`note text`、`created_by → members`（必須是呼叫者自己）；索引 `(ledger_id, occurred_on)`、`(category_id)`、`(created_by)`；複合 FK `(category_id, ledger_id)`／`(created_by, ledger_id)` 綁死同帳本 |
 | `list_items` | `ledger_id`、`title text`、`store text null`、`estimated int null`、`category_id null`（null＝待辦）、`assignee_id null`、`due_on date null`、`done_at timestamptz null`、`entry_id null`、`sort int` |
 
-enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_method(equal|ratio|amount|common)`、`settled_state(open|settling|settled)`、`settlement_status(pending|settled|void)`。
+enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_method(equal|ratio|amount|common)`、`settled_state(open|settling|settled)`、`settlement_status(pending|settled|void)`、`funding(balance|budget)`。
 
-### 前端型別對照的兩個坑
+### 前端對照的兩個提醒
 
-1. **`budgets.limit_amount`**：`Budget.limit` 在 DB 叫 `limit_amount`（`limit` 是 SQL 保留字）。`select('id, ledger_id, category_id, month, limit_amount')`，寫入時同名。
+1. **餘額、信封剩餘、超支都不在 DB**（ADR-0007）：DB 只存撥款流水（`budget_allocation`）與帳目，餘額／剩餘／超支一律由前端推導，沒有 view 也沒有彙總欄位。
 2. **`SettlementStatus.void_`**：DB 的值是字串 `'void'`，Dart enum 名是 `void_`，序列化兩邊都要手動對映。
 
 ### check constraint（前端要先擋，否則 insert 會被 DB 打回）
@@ -117,7 +124,9 @@ enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_met
 - `entries_private_payer`：`scope = 'private'` 時 **`payer_id` 必須等於 `created_by`**（收入的私人筆也一樣要帶 `payer_id`，不能留 null）。
 - `entries_private_no_split`：private 筆 `split_method` 只能是 `common`（ADR-0003：私人不參與分攤）。
 - `entries_private_open`：private 筆 `settled_state` 只能是 `open`。
-- `budgets.month` 必須是該月 1 號；`limit_amount >= 0`。
+- `entries_funding_common_wallet_only`：`funding = 'budget'` 只允許**共同錢包的共同支出**（`payer_id is null` 且 `scope = 'shared'` 且 `kind = 'expense'`）；代墊與私人一律 `balance`。
+- `budget_allocation.amount <> 0`（0 既不是撥款也不是退回）。
+- `budget_allocation` 的分類：跨帳本由複合 FK 擋（`budget_allocation_category_same_ledger`）；收入分類由 trigger 擋（`budget allocation: category must be an expense category`）。
 
 ## RLS 一句話版
 
@@ -132,7 +141,8 @@ enum：`entry_kind(expense|income)`、`entry_scope(private|shared)`、`split_met
     繞過 RLS 的路徑還有 before delete trigger 擋（`entry settled: delete blocked`）。金額有誤一律開修正筆。
   - 把別人的 shared entry 改成 `private` 會踩到 update 的 with check（改完自己就不該還看得到），一樣被擋。
 - `entry_splits`／`line_items`：select 與 insert／update／delete 都跟隨父 `entry`，條件與 `entries` 的 select／update policy 逐字相同（`exists` 子查詢明寫，不只倚賴 `entries` 自身 RLS）。
-- `categories`／`budgets`／`list_items`：成員全權（增刪改查）。
+- `categories`／`list_items`：成員全權（增刪改查）。
+- `budget_allocation`：成員全權（增刪改查），但 **UPDATE 只給 `amount, occurred_on, note` 三欄**；insert policy 的 with check 是 `is_member(ledger_id) and created_by = my_member_id(ledger_id)`——**不能以別人的名義撥款**（形狀與 `entries` 相同，塞別人的 member id 會拿到 42501）。
 - `settlements`／`settlement_entries`／`settlement_signers`：**成員只讀**。前端沒有 insert／update／delete 權限，
   結算的一切寫入只能經由 RPC（`initiate_settlement`／`approve_settlement`／`cancel_settlement`）。
   （早期版本是「成員全權」，那讓任何成員都能直接寫一筆 `status='settled'` 的結算，完全繞過多簽。）
@@ -218,6 +228,13 @@ final settlement = await supabase.rpc('cancel_settlement', params: {'id': settle
 
 - `p_entry` 有 `id` → 更新該筆（找不到或看不到 raise `entry not found or not visible`）；沒有 `id` → 新增。
 - `created_by` 一律強制為呼叫者自己的 member id，`settled_state` 不受這支影響。
+- **`funding`（ADR-0007）**：`p_entry` 接受 `'funding': 'balance' | 'budget'`。
+  - 新增時省略 → `balance`（`coalesce(..., 'balance')`）。
+  - 更新時省略 → **不動**原值（`coalesce(..., e.funding)`），所以只改備註不會把資金來源洗掉。
+  - ⚠️ **把 `payer_id` 從 null 改成成員（改代墊）、把 `scope` 改 `private`、或把 `kind` 改 `income` 時，
+    必須在同一次呼叫裡送 `'funding': 'balance'`**——否則原本的 `budget` 會留著，撞到
+    check `entries_funding_common_wallet_only`（SQLSTATE **23514**）整筆失敗。
+    這條 check 的規則是：`funding = 'budget'` 只允許 `payer_id is null` 且 `scope = 'shared'` 且 `kind = 'expense'`。
 - **已結帳的帳目**：只能改分類與備註（子表兩個參數都留 `null`）。帶了 `p_splits` 或 `p_line_items` 會直接
   raise `entry settled: child tables locked`——不是擋你改細項內容，而是這支的子表寫法是「全刪重建」，
   在 settled 狀態下會被 policy 擋成半套（分攤保住、細項被刪光且沒有錯誤訊息）。
@@ -237,6 +254,7 @@ final entry = await supabase.rpc('upsert_entry', params: {
     'amount': 1000, 'category_id': categoryId,
     'occurred_on': '2026-09-02', 'note': '全聯買菜',
     'payer_id': myMemberId, 'split_method': 'equal',
+    'funding': 'balance', // 代墊只能是 balance；共同錢包的共同支出才可以送 'budget'
   },
   'p_splits': [
     {'member_id': myMemberId, 'share': 500},
@@ -310,16 +328,18 @@ PostgREST 每個 request 各自一個交易，所以：
 await supabase.from('entries').update({
   'amount': e.amount, 'note': e.note, 'category_id': e.categoryId,
   'occurred_on': ..., 'payer_id': ..., 'split_method': ..., 'scope': ..., 'kind': ...,
-  'is_adjustment': ...,
+  'is_adjustment': ..., 'funding': ...,
 }).eq('id', e.id);
 
 // 錯：toJson() 整個丟回去（含 settled_state / created_by / ledger_id）→ permission denied
 ```
-建議在 model 上另備一個 `toUpdateJson()`，固定只吐可寫的九個欄位。
+建議在 model 上另備一個 `toUpdateJson()`，固定只吐可寫的**十個**欄位
+（`kind, scope, amount, category_id, occurred_on, note, payer_id, split_method, is_adjustment, funding`）。
+漏掉 `funding` 不會報錯，只會讓資金來源永遠改不動——把代墊改回共同錢包時尤其看不出來。
 
 ## Realtime
 
-`supabase_realtime` publication 收錄：`entries`、`settlements`、`list_items`（publication 上仍吃 RLS，私人筆不會外流）。
+`supabase_realtime` publication 收錄：`entries`、`settlements`、`list_items`、`budget_allocation`（publication 上仍吃 RLS，私人筆不會外流）。
 
 ```dart
 supabase.channel('ledger:$ledgerId')
@@ -388,4 +408,4 @@ gitignore 的 `supabase/.temp/`，各 worktree 各一份。從「沒起過棧的
 
 種子資料 `seed.sql` 開頭有「僅供地端、勿灌雲端」警語（它會直接寫 `auth.users`、用固定 UUID 與明文密碼）。種子資料**不含 settlement**（entries 全部停在 `open`），這樣 `initiate_settlement` 的測試才有完整的候選集合可算。日後若要在種子裡放 settlement，涵蓋的 entries 必須同時標成 `settling`，否則狀態機從一開始就不一致。
 
-種子資料（`supabase/seed.sql`）：兩個使用者 `mike@test.local`／`wife@test.local`（密碼皆 `password`）、帳本「我們的家」（邀請碼 `A7K3QZM4XB`）、兩位成員、9 個分類、10 筆帳目（含一筆均分代墊、兩筆 mike 的私人筆）、6 筆預算、7 筆清單／待辦，與 `lib/domain/mock_data.dart` 同一組意義。
+種子資料（`supabase/seed.sql`）：兩個使用者 `mike@test.local`／`wife@test.local`（密碼皆 `password`）、帳本「我們的家」（邀請碼 `A7K3QZM4XB`）、兩位成員、9 個分類、10 筆帳目（含一筆均分代墊、兩筆 mike 的私人筆、一筆 `funding = 'budget'` 的共同錢包電費）、7 筆預算撥款（本月 5 筆、上月 2 筆）、7 筆清單／待辦，與 `lib/domain/mock_data.dart` 同一組意義。

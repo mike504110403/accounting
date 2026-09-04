@@ -1,3 +1,4 @@
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/stats/trend_math.dart';
 import 'package:accounting/features/stats/view_math.dart';
@@ -5,14 +6,22 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// 固定小資料集（不吃 DateTime.now()），每個顆粒度的桶數與數值都寫死期望值。
 ///
-/// 分類 c1（expense，不 rollover），2026-01 起上限 3100：
-///   2026-03 有 31 天 → 日預算 100；2026-04 有 30 天 → 日預算 103.333…
-/// 帳目：3/1 收入 10000、3/5 支出 500＋200、3/12 支出 1000、2/10 支出 800。期初 0。
+/// 帳目（全部共同錢包）：3/1 收入 10000、3/5 支出 500＋200、3/12 支出 1000、2/10 支出 800。共同期初 0。
+/// v1.3 起餘額與超支不再由分桶自己算，改由 [TrendInput.balanceAt]／[TrendInput.overspendAt]
+/// 兩個「算到某日」的函式供給；這裡把家庭視角的真函式接上去，驗的是「桶末日餵對了」。
 void main() {
   const c1 = Category(
       id: 'c1', ledgerId: 'l', kind: EntryKind.expense, name: '食品', icon: 'restaurant', sort: 0);
   const cIncome = Category(
       id: 'i1', ledgerId: 'l', kind: EntryKind.income, name: '薪水', icon: 'payments', sort: 0);
+
+  const ledger = Ledger(
+    id: 'l',
+    name: '我們的家',
+    inviteCode: 'A7K3QZ',
+    defaultRatio: {'m': 100},
+    openingBalanceShared: 0,
+  );
 
   Entry exp(String id, int amt, DateTime on, [String cat = 'c1']) => Entry(
         id: id,
@@ -42,17 +51,28 @@ void main() {
     exp('e-4', 800, DateTime(2026, 2, 10)),
   ];
 
-  final budgets = [
-    Budget(id: 'b1', ledgerId: 'l', categoryId: 'c1', month: DateTime(2026, 1, 1), limit: 3100),
-  ];
+  /// 家庭視角的輸入：餘額＝共同可用餘額、超支＝當月超支合計。
+  TrendInput familyInput(
+    List<Entry> es, {
+    List<BudgetAllocation> allocations = const [],
+    List<Category> categories = const [c1, cIncome],
+  }) =>
+      TrendInput(
+        items: viewEntries(es, ViewMode.family, 'm', const {'m': 100}),
+        categories: categories,
+        balanceAt: (until) =>
+            sharedAvailable(ledger: ledger, entries: es, allocations: allocations, until: until),
+        overspendAt: (until) =>
+            totalOverspend(entries: es, allocations: allocations, until: until),
+        categoryOverspendAt: (categoryId, until) => overspend(
+          allocations: allocations,
+          entries: es,
+          categoryId: categoryId,
+          until: until,
+        ),
+      );
 
-  final input = TrendInput(
-    items: viewEntries(entries, ViewMode.family, 'm', const {'m': 100}),
-    categories: const [c1, cIncome],
-    budgets: budgets,
-    rolloverBasis: entries,
-    opening: 0,
-  );
+  final input = familyInput(entries);
   final anchor = DateTime(2026, 3, 1);
 
   test('日顆粒度：當月每日一桶', () {
@@ -65,19 +85,15 @@ void main() {
 
     // 3/1：無支出，收入 10000，2/10 已花 800
     expect(b[0].spend, 0);
-    expect(b[0].budget, 100);
     expect(b[0].over, 0);
     expect(b[0].balance, 9200);
 
-    // 3/5：兩筆合計 700，日預算 100 → 超支 600
+    // 3/5：兩筆合計 700
     expect(b[4].spend, 700);
-    expect(b[4].budget, 100);
-    expect(b[4].over, 600);
     expect(b[4].balance, 8500);
 
     // 3/12：1000
     expect(b[11].spend, 1000);
-    expect(b[11].over, 900);
     expect(b[11].balance, 7500);
 
     // 月底無新帳，餘額持平
@@ -85,7 +101,7 @@ void main() {
     expect(b.last.balance, 7500);
   });
 
-  test('週顆粒度：最近 12 週、跨月週的預算按各月天數攤', () {
+  test('週顆粒度：最近 12 週', () {
     final w = bucketize(input, Granularity.week, anchor);
     expect(w.length, 12);
     // 3/31 是週二 → 最後一桶為 3/30 那週；往前 11 週 = 1/12
@@ -94,25 +110,16 @@ void main() {
     expect(w.last.label, '3/30');
     expect(w.first.start, DateTime(2026, 1, 12));
     expect(w.first.label, '1/12');
-
-    // 3/30、3/31 各 100 ＋ 4/1–4/5 各 3100/30 → 200 + 516.67 ≈ 717
-    expect(w.last.budget, 717);
     expect(w.last.spend, 0);
 
     final wk = w.firstWhere((x) => x.start == DateTime(2026, 3, 2));
     expect(wk.spend, 700);
-    expect(wk.budget, 700);
-    expect(wk.over, 0);
     expect(wk.balance, 8500);
 
     final wk2 = w.firstWhere((x) => x.start == DateTime(2026, 3, 9));
     expect(wk2.spend, 1000);
-    expect(wk2.budget, 700);
-    expect(wk2.over, 300);
     expect(wk2.balance, 7500);
 
-    // 1 月起上限 3100、1 月 31 天 → 日 100，整週 7×100
-    expect(w.first.budget, 700);
     expect(w.first.spend, 0);
     expect(w.first.balance, 0);
   });
@@ -127,24 +134,19 @@ void main() {
     expect(m.first.label, '4月');
 
     expect(m.last.spend, 1700);
-    expect(m.last.budget, 3100);
     expect(m.last.over, 0);
     expect(m.last.balance, 7500);
 
     final feb = m.firstWhere((x) => x.start == DateTime(2026, 2, 1));
     expect(feb.spend, 800);
-    expect(feb.budget, 3100);
-    expect(feb.over, 0);
     expect(feb.balance, -800);
 
-    // 預算起點前：沒預算算 0
     final dec = m.firstWhere((x) => x.start == DateTime(2025, 12, 1));
     expect(dec.spend, 0);
-    expect(dec.budget, 0);
     expect(dec.balance, 0);
   });
 
-  test('年顆粒度：最近 5 年，預算＝該年 12 個月加總', () {
+  test('年顆粒度：最近 5 年', () {
     final y = bucketize(input, Granularity.year, anchor);
     expect(y.length, 5);
     expect(y.map((b) => b.label).toList(), ['2022', '2023', '2024', '2025', '2026']);
@@ -152,82 +154,93 @@ void main() {
     expect(y.last.end, DateTime(2026, 12, 31));
 
     expect(y.last.spend, 2500); // 800 + 1700
-    expect(y.last.budget, 3100 * 12);
-    expect(y.last.over, 0);
     expect(y.last.balance, 7500);
-
-    expect(y[3].budget, 0); // 2025 無預算
     expect(y[3].spend, 0);
   });
 
-  test('超支＝max(0, 花費−預算)，不會出現負值', () {
-    final b = bucketize(input, Granularity.day, anchor);
-    expect(b.every((x) => x.over >= 0), isTrue);
-    expect(b.every((x) => x.over == (x.spend - x.budget > 0 ? x.spend - x.budget : 0)), isTrue);
+  test('餘額／超支一律以桶末日（含）為 until', () {
+    final seen = <DateTime>[];
+    final probe = TrendInput(
+      items: const [],
+      categories: const [c1],
+      balanceAt: (until) {
+        seen.add(until);
+        return 0;
+      },
+      overspendAt: (_) => 0,
+      categoryOverspendAt: (_, _) => 0,
+    );
+    final m = bucketize(probe, Granularity.month, anchor);
+    expect(seen, [for (final b in m) b.end]);
+    expect(seen.last, DateTime(2026, 3, 31));
   });
 
-  test('預算線吃 effectiveLimit：rollover 分類把上月結餘帶進來', () {
-    const roll = Category(
-        id: 'c2',
+  test('超支線吃 totalOverspend：撥款 1000 花 1500 → 該月起 500', () {
+    final es = [
+      ...entries,
+      Entry(
+        id: 'b-1',
         ledgerId: 'l',
         kind: EntryKind.expense,
-        name: '日用品',
-        icon: 'inventory_2',
-        sort: 1,
-        rollover: true);
-    final bs = [
-      Budget(id: 'b2', ledgerId: 'l', categoryId: 'c2', month: DateTime(2026, 1, 1), limit: 3000),
+        scope: EntryScope.shared,
+        amount: 1500,
+        categoryId: 'c1',
+        occurredOn: DateTime(2026, 3, 20),
+        createdBy: 'm',
+        funding: Funding.budget,
+      ),
     ];
-    final es = [exp('r-1', 1000, DateTime(2026, 1, 10), 'c2')];
-    final in2 = TrendInput(
-      items: viewEntries(es, ViewMode.family, 'm', const {'m': 100}),
-      categories: const [roll],
-      budgets: bs,
-      rolloverBasis: es,
-      opening: 0,
-    );
-    final m = bucketize(in2, Granularity.month, DateTime(2026, 2, 1));
-    // 1 月上限 3000 花 1000 → 2 月有效上限 3000 + 2000 = 5000
-    expect(m.last.budget, 5000);
-    expect(m.firstWhere((x) => x.start == DateTime(2026, 1, 1)).budget, 3000);
+    final allocations = [
+      BudgetAllocation(
+          id: 'al-1',
+          ledgerId: 'l',
+          categoryId: 'c1',
+          amount: 1000,
+          occurredOn: DateTime(2026, 3, 1),
+          createdBy: 'm'),
+    ];
+    final m = bucketize(familyInput(es, allocations: allocations), Granularity.month, anchor);
+    expect(m.last.over, 500);
+    // 3 月花費含這筆 1500
+    expect(m.last.spend, 3200);
+    // 上月桶末（2/28）沒有信封活動 → 超支 0（不跨月）
+    expect(m.firstWhere((x) => x.start == DateTime(2026, 2, 1)).over, 0);
   });
 
-  test('個人視角：預算線按 defaultRatio 折算，與花費線同口徑', () {
-    // 同一份資料改看個人視角（皆 common split → 份額各半），budgetShare 0.5
-    final personal = TrendInput(
-      items: viewEntries(entries, ViewMode.personal, 'm', const {'m': 50, 'w': 50}),
-      categories: const [c1, cIncome],
-      budgets: budgets,
-      rolloverBasis: entries,
-      opening: 0,
-      budgetShare: 0.5,
+  test('個人視角：桶內金額用我的份額、超支恆 0', () {
+    final shared = [
+      Entry(
+        id: 's-1',
+        ledgerId: 'l',
+        kind: EntryKind.expense,
+        scope: EntryScope.shared,
+        amount: 1000,
+        categoryId: 'c1',
+        occurredOn: DateTime(2026, 3, 4),
+        createdBy: 'm',
+        payerId: 'm',
+        splitMethod: SplitMethod.equal,
+        splits: const [
+          EntrySplit(entryId: 's-1', memberId: 'm', share: 500),
+          EntrySplit(entryId: 's-1', memberId: 'w', share: 500),
+        ],
+      ),
+    ];
+    const me = Member(
+        id: 'm', ledgerId: 'l', userId: 'u', displayName: 'Mike', openingBalancePersonal: 1000);
+    final in3 = TrendInput(
+      items: viewEntries(shared, ViewMode.personal, 'm', const {'m': 50, 'w': 50}),
+      categories: const [c1],
+      // 個人視角：個人餘額（代墊當下扣全額）、沒有信封所以超支恆 0
+      balanceAt: (until) =>
+          personalBalance(member: me, entries: shared, settlements: const [], until: until),
+      overspendAt: (_) => 0,
+      categoryOverspendAt: (_, _) => 0,
     );
-
-    final m = bucketize(personal, Granularity.month, anchor);
-    // 上限 3100 折半 → 1550；花費 (500+200+1000)/2 = 850
-    expect(m.last.budget, 1550);
-    expect(m.last.spend, 850);
+    final m = bucketize(in3, Granularity.month, anchor);
+    expect(m.last.spend, 500, reason: '花費是我的份額');
+    expect(m.last.balance, 0, reason: '期初 1000 − 代墊全額 1000');
     expect(m.last.over, 0);
-    // 期初 0 ＋ 收入 5000 − 2 月 400 − 3 月 850
-    expect(m.last.balance, 3750);
-
-    // 日桶：1550/31 = 50
-    final d = bucketize(personal, Granularity.day, anchor);
-    expect(d[0].budget, 50);
-    // 3/5 花 350 vs 日預算 50 → 超支 300（家庭視角同日是 700 vs 100 → 600）
-    expect(d[4].spend, 350);
-    expect(d[4].over, 300);
-
-    // 週桶 3/2–3/8：7×50
-    final w = bucketize(personal, Granularity.week, anchor);
-    expect(w.firstWhere((x) => x.start == DateTime(2026, 3, 2)).budget, 350);
-
-    // 年桶：12×1550
-    final y = bucketize(personal, Granularity.year, anchor);
-    expect(y.last.budget, 18600);
-
-    // 家庭視角不受影響（budgetShare 預設 1.0）
-    expect(bucketize(input, Granularity.month, anchor).last.budget, 3100);
   });
 
   group('bucketizeByCategory', () {
@@ -238,19 +251,12 @@ void main() {
       exp('t-1', 300, DateTime(2026, 3, 5), 'c2'),
       exp('t-2', 100, DateTime(2026, 2, 20), 'c2'),
     ];
-    final in2 = TrendInput(
-      items: viewEntries(es, ViewMode.family, 'm', const {'m': 100}),
-      categories: const [c1, c2, cIncome],
-      budgets: budgets,
-      rolloverBasis: es,
-      opening: 0,
-    );
+    final in2 = familyInput(es, categories: const [c1, c2, cIncome]);
 
     test('每個支出分類一組桶，收入分類不出現', () {
       final m = bucketizeByCategory(in2, Granularity.month, anchor);
       expect(m.keys.toSet(), {'c1', 'c2'});
       expect(m.containsKey('i1'), isFalse, reason: '收入分類沒有花費線');
-      // 桶的範圍與 bucketize 一致
       expect(m['c1']!.length, 12);
       expect(m['c1']!.last.label, '3月');
       expect(m['c1']!.last.start, DateTime(2026, 3, 1));
@@ -258,22 +264,12 @@ void main() {
 
     test('花費只收自己分類的帳', () {
       final m = bucketizeByCategory(in2, Granularity.month, anchor);
-      // c1：3 月 500+200+1000 = 1700、2 月 800
       expect(m['c1']!.last.spend, 1700);
       expect(m['c1']!.firstWhere((b) => b.start == DateTime(2026, 2, 1)).spend, 800);
-      // c2：3 月 300、2 月 100
       expect(m['c2']!.last.spend, 300);
       expect(m['c2']!.firstWhere((b) => b.start == DateTime(2026, 2, 1)).spend, 100);
-      // 兩者相加＝總覽的花費
       final all = bucketize(in2, Granularity.month, anchor);
       expect(m['c1']!.last.spend + m['c2']!.last.spend, all.last.spend);
-    });
-
-    test('預算只算自己分類；沒預算的分類算 0', () {
-      final m = bucketizeByCategory(in2, Granularity.month, anchor);
-      expect(m['c1']!.last.budget, 3100, reason: 'c1 有 3100');
-      expect(m['c2']!.last.budget, 0, reason: 'c2 沒設預算');
-      expect(m['c2']!.last.over, 300, reason: '沒預算時全額算超支');
     });
 
     test('balance 一律 0：分類沒有餘額概念', () {
@@ -283,6 +279,40 @@ void main() {
           expect(list.every((b) => b.balance == 0), isTrue, reason: '$g');
         }
       }
+    });
+
+    test('over 是該分類自己的超支，不是帳本合計', () {
+      // c1 撥款 1000、預算支出 1500 → 超支 500；c2 沒撥款也沒預算支出 → 0
+      final es = [
+        ...entries,
+        Entry(
+          id: 'b-1',
+          ledgerId: 'l',
+          kind: EntryKind.expense,
+          scope: EntryScope.shared,
+          amount: 1500,
+          categoryId: 'c1',
+          occurredOn: DateTime(2026, 3, 20),
+          createdBy: 'm',
+          funding: Funding.budget,
+        ),
+        exp('t-1', 300, DateTime(2026, 3, 5), 'c2'),
+      ];
+      final allocations = [
+        BudgetAllocation(
+            id: 'al-1',
+            ledgerId: 'l',
+            categoryId: 'c1',
+            amount: 1000,
+            occurredOn: DateTime(2026, 3, 1),
+            createdBy: 'm'),
+      ];
+      final in3 = familyInput(es, allocations: allocations, categories: const [c1, c2, cIncome]);
+      final m = bucketizeByCategory(in3, Granularity.month, anchor);
+      expect(m['c1']!.last.over, 500);
+      expect(m['c2']!.last.over, 0);
+      // 帳本合計也是 500，但那是總覽桶的事，分類桶各算各的
+      expect(bucketize(in3, Granularity.month, anchor).last.over, 500);
     });
 
     test('四種顆粒度的桶數與總覽一致', () {
@@ -299,37 +329,10 @@ void main() {
       });
     });
 
-    test('日顆粒度：預算按當月天數攤到單一分類', () {
+    test('日顆粒度：花費落在正確的日桶', () {
       final m = bucketizeByCategory(in2, Granularity.day, anchor);
-      expect(m['c1']![0].budget, 100, reason: '3100 / 31');
       expect(m['c1']![4].spend, 700);
       expect(m['c2']![4].spend, 300);
     });
-  });
-
-  test('個人視角：桶內金額用我的份額', () {
-    final shared = [
-      Entry(
-        id: 's-1',
-        ledgerId: 'l',
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1000,
-        categoryId: 'c1',
-        occurredOn: DateTime(2026, 3, 4),
-        createdBy: 'm',
-        splitMethod: SplitMethod.common,
-      ),
-    ];
-    final in3 = TrendInput(
-      items: viewEntries(shared, ViewMode.personal, 'm', const {'m': 50, 'w': 50}),
-      categories: const [c1],
-      budgets: budgets,
-      rolloverBasis: shared,
-      opening: 1000,
-    );
-    final m = bucketize(in3, Granularity.month, anchor);
-    expect(m.last.spend, 500);
-    expect(m.last.balance, 500);
   });
 }

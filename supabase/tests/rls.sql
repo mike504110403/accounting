@@ -41,7 +41,7 @@ declare
   v_allowed constant text[] := array[
     'create_ledger', 'join_ledger', 'initiate_settlement', 'approve_settlement',
     'cancel_settlement', 'required_signers', 'search_items', 'upsert_entry',
-    'rotate_invite_code', 'is_member', 'my_member_id'];
+    'rotate_invite_code', 'is_member', 'my_member_id', 'month_summary'];
 begin
   -- 掃 public 底下「全部」函式，不是只掃我列得出來的那幾支。
   select string_agg(format('%s→%s', p.proname, coalesce(nullif(a.grantee::regrole::text, '-'), 'PUBLIC')), ', ')
@@ -125,6 +125,29 @@ begin
     assert v_leaked is null,
       format('entries 這些欄位不該給 authenticated %s：%s', v_verb, v_leaked);
   end loop;
+end;
+$$;
+
+\echo '== rls: 前置檢查 budget_allocation 的 INSERT／UPDATE 都是欄位級授權（ADR-0007）=='
+do $$
+declare
+  v_cols text;
+begin
+  -- UPDATE：只有這三欄（改 ledger_id／category_id／created_by ＝ 換一筆撥款，請刪掉重開）。
+  select string_agg(cp.column_name, ', ' order by cp.column_name) into v_cols
+  from information_schema.column_privileges cp
+  where cp.table_schema = 'public' and cp.table_name = 'budget_allocation'
+    and cp.grantee = 'authenticated' and cp.privilege_type = 'UPDATE';
+  assert v_cols = 'amount, note, occurred_on',
+    format('budget_allocation 的 UPDATE 欄位應是 amount, note, occurred_on，實際 %s', coalesce(v_cols, '（一欄都沒有）'));
+
+  -- INSERT：id 與 created_at 不給前端填（比照 entries）。
+  select string_agg(cp.column_name, ', ' order by cp.column_name) into v_cols
+  from information_schema.column_privileges cp
+  where cp.table_schema = 'public' and cp.table_name = 'budget_allocation'
+    and cp.grantee = 'authenticated' and cp.privilege_type = 'INSERT';
+  assert v_cols = 'amount, category_id, created_by, ledger_id, note, occurred_on',
+    format('budget_allocation 的 INSERT 欄位不對：%s', coalesce(v_cols, '（一欄都沒有）'));
 end;
 $$;
 
@@ -215,7 +238,7 @@ begin
   assert (select count(*) from public.entries) = 10, format('mike 應看到 10 筆 entries，實際 %s', (select count(*) from public.entries));
   assert (select count(*) from public.entry_splits) = 10, 'entry_splits 讀不到';
   assert (select count(*) from public.line_items) = 8, 'line_items 讀不到';
-  assert (select count(*) from public.budgets) = 6, 'budgets 讀不到';
+  assert (select count(*) from public.budget_allocation) = 7, 'budget_allocation 讀不到';
   assert (select count(*) from public.list_items) = 7, 'list_items 讀不到';
   -- 這三張種子沒資料，重點是「查得動、不報錯」。
   assert (select count(*) from public.settlements) = 0, 'settlements 讀不到';

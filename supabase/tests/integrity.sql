@@ -400,14 +400,17 @@ begin
   end;
   assert v_blocked, '清單竟然能掛別的帳本的分類';
 
-  -- 應失敗⑤：預算掛別的帳本的分類。
+  -- 應失敗⑤：撥款掛別的帳本的分類。
   v_blocked := false;
   begin
-    insert into public.budgets (ledger_id, category_id, month, limit_amount)
-    values ('10000000-0000-0000-0000-000000000001', v_other_cat, date_trunc('month', current_date)::date, 100);
+    insert into public.budget_allocation (ledger_id, category_id, amount, occurred_on, created_by)
+    values ('10000000-0000-0000-0000-000000000001', v_other_cat, 100, current_date,
+            '20000000-0000-0000-0000-000000000001');
   exception when others then v_blocked := true; v_err := sqlerrm;
   end;
-  assert v_blocked, '預算竟然能掛別的帳本的分類';
+  assert v_blocked, '撥款竟然能掛別的帳本的分類';
+  assert v_err like '%budget_allocation_category_same_ledger%', format('錯誤訊息不對：%s', v_err);
+  raise notice '  預期的失敗：%', v_err;
 
   -- 應失敗⑥：settlement_entries 收別的帳本的 entry。
   v_blocked := false;

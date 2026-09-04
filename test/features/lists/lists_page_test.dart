@@ -1,30 +1,32 @@
-import 'package:accounting/app/format.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/lists/lists_page.dart';
+import 'package:accounting/features/lists/checkout_sheet.dart';
 import 'package:accounting/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../support/fixtures.dart';
+
 class _ThrowingEntriesAdd extends EntriesNotifier {
   @override
-  void add(Entry e) => throw Exception('boom');
+  Future<Entry> add(Entry e) => throw Exception('boom');
 }
 
 class _ThrowingListItemsAdd extends ListItemsNotifier {
   @override
-  void add(ListItem i) => throw Exception('boom');
+  Future<ListItem> add(ListItem i) => throw Exception('boom');
 }
 
 class _ThrowingListItemsRemove extends ListItemsNotifier {
   @override
-  void remove(String id) => throw Exception('boom');
+  Future<void> remove(String id) => throw Exception('boom');
 }
 
 class _ThrowingListItemsUpdate extends ListItemsNotifier {
   @override
-  void update(ListItem i) => throw Exception('boom');
+  Future<void> update(ListItem i) => throw Exception('boom');
 }
 
 /// 只有第二次 update 丟例外（第三次以後的呼叫，也就是補償迴圈的復原呼叫，會成功）——
@@ -35,20 +37,10 @@ class _ThrowingListItemsUpdateOnSecond extends ListItemsNotifier {
   int _n = 0;
 
   @override
-  void update(ListItem i) {
+  Future<void> update(ListItem i) {
     if (++_n == 2) throw Exception('boom');
-    super.update(i);
+    return super.update(i);
   }
-}
-
-/// 固定 dueOn 測試用 fixture（避免依賴 mock_data 種子當下 DateTime.now() 的時刻）。
-/// 用 constructor 注入而非頂層可變全域，避免測試間互相汙染。
-class _FixedDueListItemsNotifier extends ListItemsNotifier {
-  _FixedDueListItemsNotifier(this.items);
-  final List<ListItem> items;
-
-  @override
-  List<ListItem> build() => items;
 }
 
 /// 手機寬度視窗（跟 stats_page_test.dart 的 phone() 同一慣例），用來自查 390px 不爆版。
@@ -74,6 +66,25 @@ Future<ProviderContainer> _pumpListsPage(WidgetTester tester) async {
   addTearDown(container.dispose);
   await _pumpWithContainer(tester, container);
   return container;
+}
+
+
+/// 新增購物項目改步驟精靈（2026-09-03）：名稱→店家→預估→分類→負責人，一步一欄。
+Future<void> _walkAddSheet(WidgetTester tester, {required String name, String? store, String? est}) async {
+  await tester.enterText(find.byKey(const Key('add-name-field')), name);
+  await tester.tap(find.byKey(const Key('add-next-button')));
+  await tester.pumpAndSettle();
+  if (store != null) await tester.enterText(find.byKey(const Key('add-store-field')), store);
+  await tester.tap(find.byKey(const Key('add-next-button')));
+  await tester.pumpAndSettle();
+  if (est != null) await tester.enterText(find.byKey(const Key('add-est-field')), est);
+  await tester.tap(find.byKey(const Key('add-next-button')));
+  await tester.pumpAndSettle();
+  // 分類（滾輪預設第一個）與負責人（預設未指定）不動，直接走到送出。
+  await tester.tap(find.byKey(const Key('add-next-button')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('add-next-button')));
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -221,31 +232,6 @@ void main() {
     expect(find.text('清單'), findsOneWidget);
   });
 
-  testWidgets('待辦到期日＝今天＋3 天（日期邊界，去掉時分秒）顯示「即將到期」', (tester) async {
-    final today = DateTime.now();
-    final dateOnly = DateTime(today.year, today.month, today.day);
-    final farDueOn = dateOnly.add(const Duration(days: 4));
-    final fixture = [
-      ListItem(id: 't-1', ledgerId: kLedgerId, title: '繳管理費', assigneeId: kMeId, dueOn: dateOnly.add(const Duration(days: 3))),
-      ListItem(id: 't-2', ledgerId: kLedgerId, title: '已過期任務', assigneeId: kMeId, dueOn: dateOnly.subtract(const Duration(days: 1))),
-      ListItem(id: 't-3', ledgerId: kLedgerId, title: '還早任務', assigneeId: kMeId, dueOn: farDueOn),
-    ];
-    final container = ProviderContainer(overrides: [listItemsProvider.overrideWith(() => _FixedDueListItemsNotifier(fixture))]);
-    addTearDown(container.dispose);
-    await _pumpWithContainer(tester, container);
-
-    await tester.tap(find.text('待辦'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('繳管理費'), findsOneWidget);
-    expect(find.text('即將到期'), findsOneWidget);
-    expect(find.text('已過期'), findsOneWidget);
-    expect(find.text('還早任務'), findsOneWidget);
-    // normal 分支不換成標籤，直接顯示日期，釘住渲染。
-    final farTile = find.widgetWithText(ListTile, '還早任務');
-    expect(find.descendant(of: farTile, matching: find.text(fmtDate(farDueOn))), findsOneWidget);
-  });
-
   testWidgets('新增購物項目後出現在指定店家分組', (tester) async {
     final container = await _pumpListsPage(tester);
 
@@ -253,13 +239,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('新增購物項目'), findsOneWidget);
 
-    final fields = find.byType(TextField);
-    await tester.enterText(fields.at(0), '可頌');
-    await tester.enterText(fields.at(1), '超市');
-    await tester.enterText(fields.at(2), '65');
-
-    await tester.tap(find.widgetWithText(FilledButton, '新增'));
-    await tester.pumpAndSettle();
+    await _walkAddSheet(tester, name: '可頌', store: '超市', est: '65');
 
     final items = container.read(listItemsProvider);
     final added = items.firstWhere((i) => i.title == '可頌');
@@ -268,37 +248,28 @@ void main() {
     expect(find.text('可頌'), findsOneWidget);
   });
 
-  testWidgets('新增待辦後出現在待辦分頁', (tester) async {
+  testWidgets('結帳方式：切成員代墊＋均分 → entry 帶 payer/splits，資金列消失', (tester) async {
     final container = await _pumpListsPage(tester);
 
-    await tester.tap(find.text('待辦'));
+    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('checkout-payer-common')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('checkout-payer-$kMeId')));
+    await tester.pumpAndSettle();
+    // 代墊不走預算：資金列消失
+    expect(find.byKey(const Key('checkout-funding-budget')), findsNothing);
+    expect(find.byKey(const Key('checkout-split-equal')), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, '確認'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pumpAndSettle();
-    expect(find.text('新增待辦'), findsOneWidget);
-
-    await tester.enterText(find.byType(TextField).first, '倒垃圾');
-    await tester.tap(find.widgetWithText(FilledButton, '新增'));
-    await tester.pumpAndSettle();
-
-    expect(container.read(listItemsProvider).any((i) => i.title == '倒垃圾' && i.isTodo), isTrue);
-    expect(find.text('倒垃圾'), findsOneWidget);
-  });
-
-  testWidgets('待辦勾選 → doneAt 寫入、checkbox 打勾', (tester) async {
-    final container = await _pumpListsPage(tester);
-
-    await tester.tap(find.text('待辦'));
-    await tester.pumpAndSettle();
-
-    final tile = find.widgetWithText(ListTile, '繳管理費');
-    final checkbox = find.descendant(of: tile, matching: find.byType(Checkbox));
-    await tester.tap(checkbox);
-    await tester.pumpAndSettle();
-
-    final item = container.read(listItemsProvider).firstWhere((i) => i.id == 'l-6');
-    expect(item.isDone, isTrue);
+    final entry = container.read(entriesProvider).firstWhere(
+        (e) => e.lineItems.length == 1 && e.lineItems.single.name == '酸奶');
+    expect(entry.payerId, kMeId);
+    expect(entry.splitMethod, SplitMethod.equal);
+    expect(entry.funding, Funding.balance);
+    expect(entry.splits.map((s) => s.share).reduce((a, b) => a + b), entry.amount);
   });
 
   testWidgets('滑動刪除確認後從清單移除', (tester) async {
@@ -375,6 +346,65 @@ void main() {
     expect(items.firstWhere((i) => i.id == 'l-3').isDone, isFalse); // 麵包：第二次 update 本來就丟例外
   });
 
+  testWidgets('結帳第二步失敗：repository 裡不留孤兒 entry，錯誤顯示在 sheet 內', (tester) async {
+    // 兩步之間沒有交易：第一步已經寫進 DB，第二步炸掉就必須真的把那筆刪回去。
+    // 只看 provider state 不夠——state 對、DB 留著孤兒，才是這裡真正要防的失敗。
+    final repo = FailingRepository(failUpdateListItem: true);
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    final entriesBefore = (await repo.fetchEntries(kLedgerId)).length;
+    await _pumpWithContainer(tester, container);
+
+    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '確認'));
+    await tester.pumpAndSettle();
+
+    expect(find.descendant(of: find.byType(CheckoutSheet), matching: find.text('boom')), findsOneWidget);
+    expect(find.byType(CheckoutSheet), findsOneWidget, reason: '失敗不關 sheet，讓使用者能重試');
+    expect((await repo.fetchEntries(kLedgerId)).length, entriesBefore, reason: 'repository 裡不留孤兒 entry');
+    expect(container.read(entriesProvider).length, entriesBefore);
+    expect((await repo.fetchListItems(kLedgerId)).firstWhere((i) => i.id == 'l-2').isDone, isFalse);
+  });
+
+  testWidgets('多項結帳第二項才失敗：repository 裡兩項都被復原、entry 也刪掉', (tester) async {
+    final repo = FailingRepository(failUpdateListItemOnCall: 1); // 只有第二次失敗，補償的呼叫仍會成功
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    final entriesBefore = (await repo.fetchEntries(kLedgerId)).length;
+    await _pumpWithContainer(tester, container);
+
+    await tester.longPress(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '麵包'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '完成'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '確認'));
+    await tester.pumpAndSettle();
+
+    expect((await repo.fetchEntries(kLedgerId)).length, entriesBefore);
+    final items = await repo.fetchListItems(kLedgerId);
+    expect(items.firstWhere((i) => i.id == 'l-2').isDone, isFalse, reason: '第一項已寫入，補償要把它改回去');
+    expect(items.firstWhere((i) => i.id == 'l-3').isDone, isFalse);
+  });
+
+  testWidgets('新增購物項目失敗：錯誤顯示在 sheet 內且 sheet 不關', (tester) async {
+    final container = ProviderContainer(
+      overrides: [ledgerRepositoryProvider.overrideWithValue(FailingRepository(failAddListItem: true))],
+    );
+    addTearDown(container.dispose);
+    await _pumpWithContainer(tester, container);
+
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    await _walkAddSheet(tester, name: '可頌');
+
+    expect(find.text('boom'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, '新增'), findsOneWidget, reason: '失敗不關 sheet');
+    expect(container.read(listItemsProvider).any((i) => i.title == '可頌'), isFalse);
+  });
+
   testWidgets('金額欄清空 → 確認鈕 disabled、entries 不變', (tester) async {
     final container = await _pumpListsPage(tester);
     final entriesBefore = container.read(entriesProvider).length;
@@ -402,9 +432,7 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.add));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).at(0), '可頌');
-    await tester.tap(find.widgetWithText(FilledButton, '新增'));
-    await tester.pumpAndSettle();
+    await _walkAddSheet(tester, name: '可頌');
 
     expect(find.text('新增失敗，請稍後再試'), findsOneWidget);
   });
@@ -423,22 +451,6 @@ void main() {
     expect(container.read(listItemsProvider).any((i) => i.id == 'l-1'), isTrue);
   });
 
-  testWidgets('待辦勾選失敗顯示 SnackBar', (tester) async {
-    final container = ProviderContainer(overrides: [listItemsProvider.overrideWith(_ThrowingListItemsUpdate.new)]);
-    addTearDown(container.dispose);
-    await _pumpWithContainer(tester, container);
-
-    await tester.tap(find.text('待辦'));
-    await tester.pumpAndSettle();
-
-    final tile = find.widgetWithText(ListTile, '繳管理費');
-    final checkbox = find.descendant(of: tile, matching: find.byType(Checkbox));
-    await tester.tap(checkbox);
-    await tester.pumpAndSettle();
-
-    expect(find.text('更新失敗，請稍後再試'), findsOneWidget);
-  });
-
   testWidgets('資訊密度精簡：購物列去 Chip、分類與負責人擇一顯示、新增 sheet 標籤在左去說明文字', (tester) async {
     await _pumpListsPage(tester);
 
@@ -453,16 +465,17 @@ void main() {
     expect(find.descendant(of: breadTile, matching: find.byType(CircleAvatar)), findsNothing);
     expect(find.descendant(of: breadTile, matching: find.byType(Icon)), findsOneWidget);
 
-    // 新增購物項目 sheet：標籤在左（純文字，不是浮動 labelText），去掉「（可留空）」說明文字。
+    // 新增購物項目 sheet 改步驟精靈：開場只秀第一步「名稱」，不同時堆五個欄位。
     await tester.tap(find.byIcon(Icons.add));
     await tester.pumpAndSettle();
-    expect(find.text('店家'), findsOneWidget);
-    expect(find.text('店家（可留空）'), findsNothing);
+    expect(find.text('名稱'), findsOneWidget);
+    expect(find.text('店家'), findsNothing);
+    expect(find.text('1/5'), findsOneWidget);
     Navigator.of(tester.element(find.text('新增購物項目'))).pop();
     await tester.pumpAndSettle();
   });
 
-  testWidgets('390px 不爆版（無 overflow）：購物清單、待辦、結帳 sheet、新增 sheet 都要過', (tester) async {
+  testWidgets('390px 不爆版（無 overflow）：購物清單、結帳 sheet、新增 sheet 都要過', (tester) async {
     await _phone(tester);
     await _pumpListsPage(tester);
     expect(tester.takeException(), isNull);
@@ -496,24 +509,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
-    // 新增購物項目 sheet。
+    // 新增購物項目 sheet（步驟精靈逐步走過，每步都不爆版）。
     await tester.tap(find.byIcon(Icons.add));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
+    await tester.enterText(find.byKey(const Key('add-name-field')), 'x');
+    for (var i = 0; i < 4; i++) {
+      await tester.tap(find.byKey(const Key('add-next-button')));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    }
     Navigator.of(tester.element(find.text('新增購物項目'))).pop();
     await tester.pumpAndSettle();
-
-    // 待辦分頁與新增待辦 sheet。
-    await tester.tap(find.text('待辦'));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('日期／到期日列點擊目標 ≥ 44px、點標籤（不只右邊值）也能開日期選擇器', (tester) async {
+  testWidgets('結帳 sheet 日期列點擊目標 ≥ 44px、點標籤（不只右邊值）也能開日期選擇器', (tester) async {
     await _pumpListsPage(tester);
 
     // 結帳 sheet 的日期列。
@@ -530,21 +540,6 @@ void main() {
     Navigator.of(tester.element(find.byType(DatePickerDialog))).pop();
     await tester.pumpAndSettle();
     Navigator.of(tester.element(find.text('確認結帳'))).pop(); // 關掉結帳 sheet
-    await tester.pumpAndSettle();
-
-    // 新增待辦 sheet 的到期日列，同一套元件、同一個規則。
-    await tester.tap(find.text('待辦'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pumpAndSettle();
-    final todoDueRow = find.byKey(const Key('todo-due-row'));
-    expect(todoDueRow, findsOneWidget);
-    expect(tester.getSize(todoDueRow).height, greaterThanOrEqualTo(44.0));
-
-    await tester.tap(find.descendant(of: todoDueRow, matching: find.text('到期日')));
-    await tester.pumpAndSettle();
-    expect(find.byType(DatePickerDialog), findsOneWidget);
-    Navigator.of(tester.element(find.byType(DatePickerDialog))).pop();
     await tester.pumpAndSettle();
   });
 }

@@ -1,0 +1,114 @@
+/// Realtime：訂閱四張進 publication 的表，事件到達就重抓該表。
+///
+/// 只送「哪張表變了」，不吃 payload——payload 仍吃 RLS 也仍可能漏（批次寫入合併事件），
+/// 重抓整表才是唯一能保證與 DB 一致的做法。
+library;
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../domain/mock_data.dart';
+import 'current_ledger.dart';
+
+enum LedgerTable { entries, settlements, listItems, budgetAllocation }
+
+const _tableNames = {
+  LedgerTable.entries: 'entries',
+  LedgerTable.settlements: 'settlements',
+  LedgerTable.listItems: 'list_items',
+  LedgerTable.budgetAllocation: 'budget_allocation',
+};
+
+abstract class RealtimeSource {
+  void subscribe(String ledgerId, void Function(LedgerTable table) onChange);
+  Future<void> unsubscribe();
+}
+
+/// 沒有連線時什麼都不做（測試與 `USE_MOCK` 的預設）。
+class NoopRealtimeSource implements RealtimeSource {
+  const NoopRealtimeSource();
+
+  @override
+  void subscribe(String ledgerId, void Function(LedgerTable table) onChange) {}
+
+  @override
+  Future<void> unsubscribe() async {}
+}
+
+class SupabaseRealtimeSource implements RealtimeSource {
+  SupabaseRealtimeSource(this._client);
+
+  final SupabaseClient _client;
+  RealtimeChannel? _channel;
+
+  @override
+  void subscribe(String ledgerId, void Function(LedgerTable table) onChange) {
+    var channel = _client.channel('ledger:$ledgerId');
+    for (final entry in _tableNames.entries) {
+      channel = channel.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: entry.value,
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'ledger_id',
+          value: ledgerId,
+        ),
+        callback: (_) => onChange(entry.key),
+      );
+      // DELETE 的 payload 在預設 replica identity 下**只有主鍵**，沒有 `ledger_id`，
+      // 所以上面那個帶 filter 的訂閱收不到刪除事件（對方刪一筆帳，我這邊永遠不知道）。
+      // 這裡再掛一個不帶 filter 的 DELETE 訂閱，收到就保守地整表重抓——
+      // 重抓本身仍吃 RLS，別的帳本的刪除頂多讓我們多打一次自己的查詢。
+      channel = channel.onPostgresChanges(
+        event: PostgresChangeEvent.delete,
+        schema: 'public',
+        table: entry.value,
+        callback: (_) => onChange(entry.key),
+      );
+    }
+    _channel = channel..subscribe();
+  }
+
+  @override
+  Future<void> unsubscribe() async {
+    final channel = _channel;
+    _channel = null;
+    if (channel != null) await _client.removeChannel(channel);
+  }
+}
+
+final realtimeSourceProvider = Provider<RealtimeSource>((ref) => const NoopRealtimeSource());
+
+/// 收到事件後重抓對應的表。
+///
+/// 結算事件連帶重抓 entries：多簽落地時 `settled_state` 是 trigger 改的，
+/// 只重抓 settlements 的話對方那邊金額不會變成鎖住。
+Future<void> applyRealtimeChange(Ref ref, LedgerTable table) async {
+  try {
+    switch (table) {
+      case LedgerTable.entries:
+        await ref.read(entriesProvider.notifier).refresh();
+      case LedgerTable.settlements:
+        await ref.read(settlementsProvider.notifier).refresh();
+        await ref.read(entriesProvider.notifier).refresh();
+      case LedgerTable.listItems:
+        await ref.read(listItemsProvider.notifier).refresh();
+      case LedgerTable.budgetAllocation:
+        await ref.read(allocationsProvider.notifier).refresh();
+    }
+  } catch (e, st) {
+    // 背景刷新失敗不能變成 uncaught，也不該打斷使用者當下的操作。
+    debugPrint('Realtime 重抓失敗（$table）: $e\n$st');
+  }
+}
+
+/// 訂閱的生命週期掛在這個 provider 上：`AccountingApp` watch 它，換帳本自動重訂、登出自動退訂。
+final ledgerRealtimeProvider = Provider<void>((ref) {
+  final ledgerId = ref.watch(currentLedgerIdProvider);
+  final source = ref.watch(realtimeSourceProvider);
+  if (ledgerId == null) return;
+  source.subscribe(ledgerId, (table) => applyRealtimeChange(ref, table));
+  ref.onDispose(source.unsubscribe);
+});

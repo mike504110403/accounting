@@ -1,13 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../app/category_icon.dart';
 import '../../app/format.dart';
 import '../../app/month_app_bar.dart';
-import '../../domain/budget_math.dart';
+import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
+import '../../app/circle_slide_action.dart';
+import '../../app/tutorial.dart';
 import 'entry_colors.dart';
 import 'search_page.dart';
 import 'settlement_math.dart';
@@ -20,9 +23,112 @@ class EntriesPage extends ConsumerStatefulWidget {
   ConsumerState<EntriesPage> createState() => _EntriesPageState();
 }
 
+/// 列表排序（Mike 裁示 2026-09-03）：預設建立時間倒序，可切金額高→低／低→高。
+enum _EntrySort { created, amountDesc, amountAsc }
+
 class _EntriesPageState extends ConsumerState<EntriesPage> {
   DateTime _month = monthOf(DateTime.now());
+
+  @override
+  void initState() {
+    super.initState();
+    // 首次進 app 的新手導覽（tutorial.dart；看過就不再開）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(tutorialProvider.notifier).maybeStart();
+    });
+  }
   ViewMode _view = ViewMode.family;
+
+  // 篩選與分頁（Mike 裁示 2026-09-03）：分類、日期區間；一次 20 筆、滑到底再放 20 筆。
+  static const _pageSize = 20;
+  String? _filterCategoryId;
+  DateTimeRange? _range;
+  _EntrySort _sort = _EntrySort.created;
+  int _visibleCount = _pageSize;
+
+  void _resetPaging() => _visibleCount = _pageSize;
+
+  DateTime _dayOf(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  bool _inPeriod(Entry e) {
+    final r = _range;
+    if (r == null) return sameMonth(e.occurredOn, _month);
+    final d = _dayOf(e.occurredOn);
+    return !d.isBefore(_dayOf(r.start)) && !d.isAfter(_dayOf(r.end));
+  }
+
+  /// 建立時間倒序；mock／舊資料沒有 createdAt 就退回記帳日再退 id，穩定可重現。
+  int _cmpCreatedDesc(Entry a, Entry b) {
+    final ca = a.createdAt, cb = b.createdAt;
+    if (ca != null && cb != null) return cb.compareTo(ca);
+    final byDate = b.occurredOn.compareTo(a.occurredOn);
+    if (byDate != 0) return byDate;
+    return b.id.compareTo(a.id);
+  }
+
+  Future<void> _pickRange() async {
+    final now = DateTime.now();
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+      initialDateRange: _range ??
+          DateTimeRange(start: _month, end: DateTime(_month.year, _month.month + 1, 0)),
+      currentDate: now,
+    );
+    if (picked != null && mounted) {
+      setState(() {
+        _range = picked;
+        _resetPaging();
+      });
+    }
+  }
+
+  Future<void> _pickFilterCategory(List<Category> categories) {
+    return showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                key: const Key('filter-cat-all'),
+                label: const Text('全部分類'),
+                selected: _filterCategoryId == null,
+                onSelected: (_) {
+                  setState(() {
+                    _filterCategoryId = null;
+                    _resetPaging();
+                  });
+                  Navigator.of(ctx).pop();
+                },
+              ),
+              for (final c in categories)
+                ChoiceChip(
+                  key: Key('filter-cat-${c.id}'),
+                  label: Text(c.name),
+                  selected: _filterCategoryId == c.id,
+                  onSelected: (_) {
+                    setState(() {
+                      _filterCategoryId = c.id;
+                      _resetPaging();
+                    });
+                    Navigator.of(ctx).pop();
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 結算 RPC 進行中：按鈕停用，避免重複送出（一帳本同時只允許一個 pending 結算）。
+  bool _busy = false;
 
   void _setMonth(DateTime m) => setState(() => _month = monthOf(m));
 
@@ -31,120 +137,72 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  /// 本視角看得到的 entry：家庭＝只看共同；個人＝自己的私人＋共同。
-  bool _visible(Entry e, String me) =>
-      e.scope == EntryScope.shared || (_view == ViewMode.personal && e.createdBy == me);
+  /// 左滑刪除：確認框＋repository 守衛（結算中／已結帳的筆 repository 會擋，訊息 toast 出來）。
+  Future<void> _deleteEntry(Entry e) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('刪除這筆帳目？'),
+        content: const Text('刪除後無法復原。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('刪除')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      await ref.read(entriesProvider.notifier).remove(e.id);
+    } on LedgerException catch (e) {
+      _toast(e.message);
+    } catch (_) {
+      _toast('刪除失敗，請稍後再試');
+    }
+  }
+
+  /// 本視角看得到的 entry：家庭＝只看共同；個人＝自己的私人＋共同支出（份額）。
+  /// 共同收入進共同餘額，不列進個人視角（spec 帳務規則 v1.3）。
+  bool _visible(Entry e, String me) {
+    if (_view == ViewMode.family) return e.scope == EntryScope.shared;
+    if (e.scope == EntryScope.private) return e.createdBy == me;
+    return e.isExpense;
+  }
 
   /// 本視角下這筆算多少：家庭看全額，個人看自己的份額。
   int _shown(Entry e, String me, Map<String, int> ratio) =>
       _view == ViewMode.family ? e.amount : myPortion(e, me, ratio);
 
-  /// 把 settlement 的既有欄位帶著新的簽核集合重建；簽完就落 settled。
-  Settlement _withApproval(Settlement s, Set<String> approvedBy) {
-    // 需簽者＝淨額非零成員−發起人（ADR-0002），與已簽集合無關，可直接比對。
-    final done = s.requiredSigners.difference(approvedBy).isEmpty;
-    return Settlement(
-      id: s.id,
-      ledgerId: s.ledgerId,
-      status: done ? SettlementStatus.settled : s.status,
-      initiatedBy: s.initiatedBy,
-      createdAt: s.createdAt,
-      settledAt: done ? DateTime.now() : s.settledAt,
-      nets: s.nets,
-      entryIds: s.entryIds,
-      approvedBy: approvedBy,
-    );
-  }
-
-  /// 補償：把 entries 寫回原狀（真正的原子性由波 2 的 Postgres RPC 保證，這裡是 mock 層補償）。
-  void _restoreEntries(List<Entry> originals) {
+  /// 同意簽核：`approve_settlement` RPC 在同一交易裡插 approval、到齊由 trigger 落 settled，
+  /// 所以前端不需要任何補償——波 1 那段 mock 補償已整段刪除。
+  Future<void> _approve(Settlement s) async {
+    setState(() => _busy = true);
     try {
-      for (final e in originals) {
-        ref.read(entriesProvider.notifier).update(e);
-      }
+      final next = await ref.read(settlementsProvider.notifier).approve(s.id);
+      _toast(next.status == SettlementStatus.settled ? '已完成結算' : '已送出同意');
+    } on LedgerException catch (e) {
+      _toast(e.message);
     } catch (e, st) {
-      debugPrint('結算補償寫回失敗: $e\n$st');
-    }
-  }
-
-  /// 同意簽核。先寫 entries（可補償），settlement 寫入是提交點；
-  /// 原子性由波 2 RPC 保證，此為 mock 層補償。
-  void _approve(Settlement s) {
-    final me = ref.read(currentMemberIdProvider);
-    final next = _withApproval(s, {...s.approvedBy, me});
-    final done = next.status == SettlementStatus.settled;
-
-    final originals = <Entry>[];
-    if (done) {
-      for (final e in ref.read(entriesProvider)) {
-        if (next.entryIds.contains(e.id)) originals.add(e);
-      }
-    }
-
-    try {
-      for (final e in originals) {
-        ref.read(entriesProvider.notifier).update(e.copyWith(settledState: SettledState.settled));
-      }
-    } catch (e, st) {
-      debugPrint('簽核寫入 entries 失敗: $e\n$st');
-      _restoreEntries(originals);
+      debugPrint('簽核失敗: $e\n$st');
       _toast('簽核失敗，請稍後再試');
-      return;
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
-
-    try {
-      ref.read(settlementsProvider.notifier).update(next);
-    } catch (e, st) {
-      debugPrint('簽核寫入 settlement 失敗: $e\n$st');
-      _restoreEntries(originals);
-      _toast('簽核失敗，請稍後再試');
-      return;
-    }
-    _toast(done ? '已完成結算' : '已送出同意');
   }
 
-  /// 發起結算。先把 entries 轉狀態（可補償），add settlement 是提交點；
-  /// 原子性由波 2 RPC 保證，此為 mock 層補償。
-  void _startSettlement(List<Entry> targets, List<Member> members, String ledgerId) {
-    if (targets.isEmpty) return;
-    final me = ref.read(currentMemberIdProvider);
-    final nets = computeNets(targets, members);
-    final entryIds = [for (final e in targets) e.id];
-    final draft = Settlement(
-      id: 'st-${DateTime.now().microsecondsSinceEpoch}',
-      ledgerId: ledgerId,
-      status: SettlementStatus.pending,
-      initiatedBy: me,
-      createdAt: DateTime.now(),
-      nets: nets,
-      entryIds: entryIds,
-      approvedBy: const {},
-    );
-    // 沒有人需要簽（需簽者＝淨額非零成員−發起人）時直接成立，否則會卡成永遠 pending。
-    final settleNow = draft.fullyApproved;
-    final settlement = settleNow ? _withApproval(draft, const {}) : draft;
-    final nextState = settleNow ? SettledState.settled : SettledState.settling;
-
+  /// 發起結算：涵蓋條件、淨額取整（最大餘數法）、守恆檢查全在 `initiate_settlement` 裡。
+  Future<void> _startSettlement(String ledgerId) async {
+    setState(() => _busy = true);
     try {
-      for (final e in targets) {
-        ref.read(entriesProvider.notifier).update(e.copyWith(settledState: nextState));
-      }
+      final s = await ref.read(settlementsProvider.notifier).initiate(ledgerId);
+      _toast(s.status == SettlementStatus.settled ? '已完成結算' : '已發起結算，等待簽核');
+    } on LedgerException catch (e) {
+      _toast(e.message);
     } catch (e, st) {
-      debugPrint('發起結算寫入 entries 失敗: $e\n$st');
-      _restoreEntries(targets);
+      debugPrint('發起結算失敗: $e\n$st');
       _toast('發起結算失敗，請稍後再試');
-      return;
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
-
-    try {
-      ref.read(settlementsProvider.notifier).add(settlement);
-    } catch (e, st) {
-      debugPrint('發起結算寫入 settlement 失敗: $e\n$st');
-      _restoreEntries(targets);
-      _toast('發起結算失敗，請稍後再試');
-      return;
-    }
-    _toast(settleNow ? '已完成結算' : '已發起結算，等待簽核');
   }
 
   @override
@@ -156,13 +214,27 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     final all = ref.watch(entriesProvider);
     final settlements = ref.watch(settlementsProvider);
 
-    final monthEntries = [
+    final filtered = [
       for (final e in all)
-        if (_visible(e, me) && sameMonth(e.occurredOn, _month)) e,
-    ]..sort((a, b) => b.occurredOn.compareTo(a.occurredOn));
+        if (_visible(e, me) &&
+            _inPeriod(e) &&
+            (_filterCategoryId == null || e.categoryId == _filterCategoryId))
+          e,
+    ]..sort(switch (_sort) {
+        _EntrySort.created => _cmpCreatedDesc,
+        _EntrySort.amountDesc => (a, b) {
+            final c = b.amount.compareTo(a.amount);
+            return c != 0 ? c : _cmpCreatedDesc(a, b);
+          },
+        _EntrySort.amountAsc => (a, b) {
+            final c = a.amount.compareTo(b.amount);
+            return c != 0 ? c : _cmpCreatedDesc(a, b);
+          },
+      });
 
+    // 摘要吃整個篩選結果（不受分頁影響）。
     var income = 0, expense = 0;
-    for (final e in monthEntries) {
+    for (final e in filtered) {
       final v = _shown(e, me, ledger.defaultRatio);
       if (e.isExpense) {
         expense += v;
@@ -170,6 +242,9 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         income += v;
       }
     }
+
+    final paged = filtered.take(_visibleCount).toList();
+    final hasMore = filtered.length > _visibleCount;
 
     final pending = [
       for (final s in settlements)
@@ -180,18 +255,53 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         if (isSettleable(e)) e,
     ];
 
+    // 依日分組只在預設排序有意義；金額排序時攤平不分組。
+    final grouped = _sort == _EntrySort.created;
     final groups = <DateTime, List<Entry>>{};
-    for (final e in monthEntries) {
-      final k = DateTime(e.occurredOn.year, e.occurredOn.month, e.occurredOn.day);
+    for (final e in paged) {
+      final k = _dayOf(e.occurredOn);
       (groups[k] ??= []).add(e);
     }
     final days = groups.keys.toList()..sort((a, b) => b.compareTo(a));
+
+    Widget entryRow(Entry e) => Slidable(
+          key: ValueKey('slide-${e.id}'),
+          endActionPane: ActionPane(
+            motion: const DrawerMotion(),
+            extentRatio: 0.34,
+            children: [
+              // 圓形 icon、無文字（Mike 裁示 2026-09-03）。
+              CircleSlideAction(
+                icon: Icons.edit_outlined,
+                background: Theme.of(context).colorScheme.secondaryContainer,
+                foreground: Theme.of(context).colorScheme.onSecondaryContainer,
+                tooltip: '編輯',
+                onPressed: () => context.push('/entries/${e.id}'),
+              ),
+              CircleSlideAction(
+                icon: Icons.delete_outline,
+                background: Theme.of(context).colorScheme.errorContainer,
+                foreground: Theme.of(context).colorScheme.onErrorContainer,
+                tooltip: '刪除',
+                onPressed: () => _deleteEntry(e),
+              ),
+            ],
+          ),
+          child: _EntryTile(
+            entry: e,
+            categories: categories,
+            members: members,
+            amount: _shown(e, me, ledger.defaultRatio),
+            onTap: () => context.push('/entries/${e.id}'),
+          ),
+        );
 
     return Scaffold(
       appBar: MonthAppBar(
         month: _month,
         onMonthChanged: _setMonth,
         view: _view,
+        toggleKey: tutorialKey('view-toggle'),
         onViewChanged: (v) => setState(() => _view = v),
         leading: IconButton(
           icon: const Icon(Icons.search),
@@ -202,6 +312,7 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         ),
         actions: [
           IconButton(
+            key: tutorialKey('settings-gear'),
             icon: const Icon(Icons.settings_outlined),
             tooltip: '設定',
             onPressed: () => context.push('/settings'),
@@ -209,6 +320,9 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
+        key: tutorialKey('fab-add'),
+        heroTag: 'fab-entries', // 兩個 tab 各有 FAB，預設 hero tag 會相撞
+
         onPressed: () => context.push('/entries/new'),
         icon: const Icon(Icons.add),
         label: const Text('新增'),
@@ -220,7 +334,16 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
             child: Column(
               children: [
                 Expanded(
-                  child: ListView(
+                  child: NotificationListener<ScrollNotification>(
+                    onNotification: (n) {
+                      // 滑近底部就再放 20 筆（資料已在快照裡，放行渲染即可）。
+                      if (hasMore && n.metrics.pixels >= n.metrics.maxScrollExtent - 200) {
+                        setState(() => _visibleCount += _pageSize);
+                      }
+                      return false;
+                    },
+                    child: ListView(
+                    key: tutorialKey('entry-list'),
                     padding: const EdgeInsets.only(bottom: 96),
                     children: [
                       if (pending.isNotEmpty)
@@ -228,41 +351,123 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                           settlement: pending.first,
                           members: members,
                           me: me,
-                          onApprove: () => _approve(pending.first),
+                          onApprove: _busy ? null : () => _approve(pending.first),
                         )
                       else if (settleable.isNotEmpty)
                         _SettlementBar.start(
                           nets: computeNets(settleable, members),
                           me: me,
                           count: settleable.length,
-                          onStart: () => _startSettlement(settleable, members, ledger.id),
+                          onStart: _busy ? null : () => _startSettlement(ledger.id),
                         ),
                       _MonthSummary(income: income, expense: expense),
-                      if (days.isEmpty) const _EmptyState(),
-                      for (final d in days) ...[
-                        _DayHeader(
-                          day: d,
-                          subtotal: groups[d]!.fold<int>(
-                            0,
-                            (a, e) => a + (e.isExpense ? _shown(e, me, ledger.defaultRatio) : -_shown(e, me, ledger.defaultRatio)),
-                          ),
-                        ),
-                        Card(
-                          child: Column(
-                            children: [
-                              for (final e in groups[d]!)
-                                _EntryTile(
-                                  entry: e,
-                                  categories: categories,
-                                  members: members,
-                                  amount: _shown(e, me, ledger.defaultRatio),
-                                  onTap: () => context.push('/entries/${e.id}'),
+                      // 篩選與排序列（Mike 裁示 2026-09-03）。
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                        child: Row(
+                          children: [
+                            // chips 水平可捲、標籤不截斷（Mike 裁示 2026-09-03：時間要完整顯示）。
+                            Expanded(
+                              child: SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    InputChip(
+                                      key: const Key('filter-category-chip'),
+                                      showCheckmark: false,
+                                      label: Text(_filterCategoryName(categories)),
+                                      selected: _filterCategoryId != null,
+                                      onPressed: () => _pickFilterCategory([...categories]..sort((a, b) => a.sort.compareTo(b.sort))),
+                                      onDeleted: _filterCategoryId == null
+                                          ? null
+                                          : () => setState(() {
+                                                _filterCategoryId = null;
+                                                _resetPaging();
+                                              }),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    InputChip(
+                                      key: const Key('filter-range-chip'),
+                                      showCheckmark: false,
+                                      label: Text(_rangeLabel()),
+                                      selected: _range != null,
+                                      onPressed: _pickRange,
+                                      onDeleted: _range == null
+                                          ? null
+                                          : () => setState(() {
+                                                _range = null;
+                                                _resetPaging();
+                                              }),
+                                    ),
+                                  ],
                                 ),
-                            ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            PopupMenuButton<_EntrySort>(
+                              key: const Key('sort-chip'),
+                              initialValue: _sort,
+                              tooltip: '排序',
+                              onSelected: (v) => setState(() {
+                                _sort = v;
+                                _resetPaging();
+                              }),
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(key: Key('sort-created'), value: _EntrySort.created, child: Text('建立時間（新→舊）')),
+                                PopupMenuItem(key: Key('sort-amount-desc'), value: _EntrySort.amountDesc, child: Text('金額（高→低）')),
+                                PopupMenuItem(key: Key('sort-amount-asc'), value: _EntrySort.amountAsc, child: Text('金額（低→高）')),
+                              ],
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.swap_vert, size: 18),
+                                    const SizedBox(width: 2),
+                                    Text(_sortLabel(), style: Theme.of(context).textTheme.labelSmall),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (paged.isEmpty) const _EmptyState(),
+                      if (grouped)
+                        for (final d in days) ...[
+                          _DayHeader(
+                            day: d,
+                            subtotal: groups[d]!.fold<int>(
+                              0,
+                              // 損益慣例：收入正、支出負，與列上金額的 +/− 一致。
+                              (a, e) => a + (e.isExpense ? -_shown(e, me, ledger.defaultRatio) : _shown(e, me, ledger.defaultRatio)),
+                            ),
+                          ),
+                          Card(
+                            clipBehavior: Clip.antiAlias, // 左滑動作背景不露出圓角外
+                            child: Column(children: [for (final e in groups[d]!) entryRow(e)]),
+                          ),
+                        ]
+                      else if (paged.isNotEmpty)
+                        // 金額排序：跨日攤平、不分組（分組會打斷排序）。
+                        Card(
+                          clipBehavior: Clip.antiAlias,
+                          child: Column(children: [for (final e in paged) entryRow(e)]),
+                        ),
+                      if (hasMore)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          child: Center(
+                            child: Text('往下滑載入更多（${paged.length}/${filtered.length}）',
+                                key: const Key('load-more-hint'),
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
                           ),
                         ),
-                      ],
                     ],
+                  ),
                   ),
                 ),
               ],
@@ -272,6 +477,26 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
       ),
     );
   }
+
+  String _filterCategoryName(List<Category> categories) {
+    if (_filterCategoryId == null) return '全部分類';
+    for (final c in categories) {
+      if (c.id == _filterCategoryId) return c.name;
+    }
+    return '分類';
+  }
+
+  String _rangeLabel() {
+    final r = _range;
+    if (r == null) return '本月';
+    return '${r.start.month}/${r.start.day}–${r.end.month}/${r.end.day}';
+  }
+
+  String _sortLabel() => switch (_sort) {
+        _EntrySort.created => '最新',
+        _EntrySort.amountDesc => '金額高→低',
+        _EntrySort.amountAsc => '金額低→高',
+      };
 }
 
 class _MonthSummary extends StatelessWidget {
@@ -466,7 +691,7 @@ class _SettlementBar extends StatelessWidget {
     required Settlement settlement,
     required List<Member> members,
     required String me,
-    required VoidCallback onApprove,
+    required VoidCallback? onApprove,
   }) {
     String name(String id) {
       for (final m in members) {
@@ -493,7 +718,7 @@ class _SettlementBar extends StatelessWidget {
     required Map<String, int> nets,
     required String me,
     required int count,
-    required VoidCallback onStart,
+    required VoidCallback? onStart,
   }) {
     final balanced = nets.values.every((v) => v == 0);
     final myNet = nets[me] ?? 0;

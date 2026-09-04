@@ -3,8 +3,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../app/tutorial.dart';
+
 import '../../app/format.dart';
 import '../../app/theme_mode.dart';
+import '../../data/auth.dart';
+import '../../data/current_ledger.dart';
+import '../../data/ledger_repository.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 
@@ -62,7 +67,7 @@ void _openSheet(BuildContext context, WidgetBuilder builder) {
 
 /// 一行摘要列：標籤在左、值在右，單行（資訊密度：Mike 裁示，不疊兩行）。點擊開 bottom sheet 編輯（或直接動作）。
 class _SettingsRow extends StatelessWidget {
-  const _SettingsRow({required this.label, this.value, this.trailing, this.onTap});
+  const _SettingsRow({super.key, required this.label, this.value, this.trailing, this.onTap});
   final String label;
   final String? value;
   final Widget? trailing;
@@ -120,23 +125,46 @@ class _LedgerCard extends ConsumerWidget {
           _SettingsRow(
             label: '邀請碼',
             value: ledger.inviteCode,
-            trailing: IconButton(
-              icon: const Icon(Icons.copy_outlined),
-              onPressed: () async {
-                final messenger = ScaffoldMessenger.of(context);
-                try {
-                  await Clipboard.setData(ClipboardData(text: ledger.inviteCode));
-                  messenger.showSnackBar(const SnackBar(content: Text('已複製邀請碼')));
-                } catch (_) {
-                  messenger.showSnackBar(const SnackBar(content: Text('複製失敗，請重試')));
-                }
-              },
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  key: const Key('copy-invite-code'),
+                  icon: const Icon(Icons.copy_outlined),
+                  tooltip: '複製邀請碼',
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    try {
+                      await Clipboard.setData(ClipboardData(text: ledger.inviteCode));
+                      messenger.showSnackBar(const SnackBar(content: Text('已複製邀請碼')));
+                    } catch (_) {
+                      messenger.showSnackBar(const SnackBar(content: Text('複製失敗，請重試')));
+                    }
+                  },
+                ),
+                IconButton(
+                  key: const Key('rotate-invite-code'),
+                  icon: const Icon(Icons.refresh),
+                  tooltip: '重新產生邀請碼（舊碼立刻失效）',
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    try {
+                      await ref.read(ledgerStateProvider.notifier).rotateInviteCode();
+                      messenger.showSnackBar(const SnackBar(content: Text('已產生新的邀請碼')));
+                    } catch (e) {
+                      messenger.showSnackBar(
+                        SnackBar(content: Text(e is LedgerException ? e.message : '產生失敗，請重試')),
+                      );
+                    }
+                  },
+                ),
+              ],
             ),
           ),
           _SettingsRow(
             label: '帳本切換',
             value: ledger.name,
-            onTap: () => _openSheet(context, (_) => _LedgerSwitchSheet(ledgerName: ledger.name)),
+            onTap: () => _openSheet(context, (_) => const _LedgerSwitchSheet()),
           ),
         ],
       ),
@@ -154,6 +182,7 @@ class _LedgerNameSheet extends ConsumerStatefulWidget {
 class _LedgerNameSheetState extends ConsumerState<_LedgerNameSheet> {
   late final TextEditingController _controller;
   String? _error;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -167,7 +196,8 @@ class _LedgerNameSheetState extends ConsumerState<_LedgerNameSheet> {
     super.dispose();
   }
 
-  void _save(Ledger ledger) {
+  Future<void> _save(Ledger ledger) async {
+    if (_saving) return;
     final name = _controller.text.trim();
     if (name.isEmpty) {
       setState(() => _error = '請輸入名稱');
@@ -176,12 +206,21 @@ class _LedgerNameSheetState extends ConsumerState<_LedgerNameSheet> {
     // sheet 蓋在上面時 ScaffoldMessenger 的 SnackBar 會被 sheet 擋住看不到（MAJOR-2）：
     // 錯誤改顯示在 sheet 內；成功則先 pop 讓出畫面、再用 pop 前存好的 messenger 補 SnackBar。
     final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     try {
-      ref.read(ledgerStateProvider.notifier).update(_copyLedger(ledger, name: name));
+      await ref.read(ledgerStateProvider.notifier).update(_copyLedger(ledger, name: name));
+      if (!mounted) return;
       Navigator.of(context).pop();
       messenger.showSnackBar(const SnackBar(content: Text('已儲存')));
-    } catch (_) {
-      setState(() => _error = '儲存失敗，請重試');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
+      });
     }
   }
 
@@ -205,7 +244,11 @@ class _LedgerNameSheetState extends ConsumerState<_LedgerNameSheet> {
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
-            child: FilledButton(key: const ValueKey('save-ledger-name-button'), onPressed: () => _save(ledger), child: const Text('儲存')),
+            child: FilledButton(
+              key: const ValueKey('save-ledger-name-button'),
+              onPressed: _saving ? null : () => _save(ledger),
+              child: Text(_saving ? '儲存中…' : '儲存'),
+            ),
           ),
         ],
       ),
@@ -213,98 +256,178 @@ class _LedgerNameSheetState extends ConsumerState<_LedgerNameSheet> {
   }
 }
 
-class _LedgerSwitchSheet extends StatefulWidget {
-  const _LedgerSwitchSheet({required this.ledgerName});
-  final String ledgerName;
+/// 帳本切換／加入／新增。三件事都是真的寫入：
+/// 切換＝重載快照、加入＝`join_ledger`（10 碼邀請碼）、新增＝`create_ledger`。
+class _LedgerSwitchSheet extends ConsumerStatefulWidget {
+  const _LedgerSwitchSheet();
 
   @override
-  State<_LedgerSwitchSheet> createState() => _LedgerSwitchSheetState();
+  ConsumerState<_LedgerSwitchSheet> createState() => _LedgerSwitchSheetState();
 }
 
-class _LedgerSwitchSheetState extends State<_LedgerSwitchSheet> {
+class _LedgerSwitchSheetState extends ConsumerState<_LedgerSwitchSheet> {
   final _joinController = TextEditingController();
-  String? _error; // 驗證錯誤（紅字）
-  String? _info; // 波 2 待接後端的提示（一般字）
+  final _newNameController = TextEditingController(text: '我們的家');
+  String? _error;
+  bool _busy = false;
+  bool _creating = false;
+  List<Ledger>? _ledgers;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadLedgers();
+  }
 
   @override
   void dispose() {
     _joinController.dispose();
+    _newNameController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadLedgers() async {
+    try {
+      final list = await ref.read(ledgerRepositoryProvider).myLedgers();
+      if (mounted) setState(() => _ledgers = list);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _ledgers = const [];
+        _error = e is LedgerException ? e.message : '讀取帳本清單失敗，請重試';
+      });
+    }
+  }
+
+  /// 三條路共用的收尾：選定帳本 → 重載快照 → 關掉 sheet。
+  Future<void> _run(Future<String> Function() action) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final ledgerId = await action();
+      await ref.read(currentLedgerIdProvider.notifier).select(ledgerId);
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e is LedgerException ? e.message : '操作失敗，請重試';
+      });
+    }
+  }
+
+  Future<void> _join() async {
+    final code = _joinController.text.trim().toUpperCase();
+    if (code.length != kInviteCodeLength) {
+      setState(() => _error = '請輸入 $kInviteCodeLength 碼邀請碼');
+      return;
+    }
+    await _run(() async => (await ref.read(ledgerRepositoryProvider).joinLedger(code)).id);
+  }
+
+  Future<void> _create() async {
+    final name = _newNameController.text.trim();
+    if (name.isEmpty) {
+      setState(() => _error = '請輸入帳本名稱');
+      return;
+    }
+    await _run(() async => (await ref.read(ledgerRepositoryProvider).createLedger(name)).id);
   }
 
   @override
   Widget build(BuildContext context) {
+    final currentId = ref.watch(ledgerProvider).id;
+    final ledgers = _ledgers;
     return Padding(
       padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).viewInsets.bottom + 16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('帳本切換', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Icon(Icons.check_circle, size: 18),
-              const SizedBox(width: 8),
-              const Text('目前帳本'),
-              const Spacer(),
-              Text(widget.ledgerName, style: Theme.of(context).textTheme.bodyMedium),
-            ],
-          ),
-          const Divider(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _joinController,
-                  maxLength: 6,
-                  decoration: const InputDecoration(labelText: '輸入 6 碼邀請碼', counterText: ''),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('帳本切換', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 12),
+            if (ledgers == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('載入中…'),
+              )
+            else
+              for (final l in ledgers)
+                ListTile(
+                  key: ValueKey('ledger-option-${l.id}'),
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(l.id == currentId ? Icons.check_circle : Icons.circle_outlined, size: 18),
+                  title: Text(l.name),
+                  enabled: !_busy && l.id != currentId,
+                  onTap: () => _run(() async => l.id),
+                ),
+            const Divider(height: 24),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    key: const ValueKey('join-code-field'),
+                    controller: _joinController,
+                    maxLength: kInviteCodeLength,
+                    textCapitalization: TextCapitalization.characters,
+                    decoration: const InputDecoration(
+                      labelText: '輸入 $kInviteCodeLength 碼邀請碼',
+                      counterText: '',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  key: const ValueKey('join-ledger-button'),
+                  onPressed: _busy ? null : _join,
+                  child: const Text('加入'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (_creating) ...[
+              TextField(
+                key: const ValueKey('new-ledger-name-field'),
+                controller: _newNameController,
+                decoration: const InputDecoration(labelText: '新帳本名稱'),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  key: const ValueKey('create-ledger-button'),
+                  onPressed: _busy ? null : _create,
+                  child: const Text('建立'),
                 ),
               ),
-              const SizedBox(width: 8),
-              FilledButton(
-                onPressed: () {
-                  if (_joinController.text.trim().length != 6) {
-                    setState(() {
-                      _error = '請輸入 6 碼邀請碼';
-                      _info = null;
-                    });
-                    return;
-                  }
-                  setState(() {
-                    _error = null;
-                    _info = '波 2 接後端';
-                  });
-                },
-                child: const Text('加入'),
+            ] else
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  key: const ValueKey('new-ledger-button'),
+                  onPressed: _busy ? null : () => setState(() => _creating = true),
+                  icon: const Icon(Icons.add),
+                  label: const Text('新增帳本'),
+                ),
               ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              onPressed: () => setState(() {
-                _error = null;
-                _info = '波 2 接後端';
-              }),
-              icon: const Icon(Icons.add),
-              label: const Text('新增帳本'),
-            ),
-          ),
-          // sheet 蓋在最上層，ScaffoldMessenger 的 SnackBar 會被擋住看不到（MAJOR-2）：狀態改顯示在 sheet 內；
-          // 錯誤與一般提示分開上色，錯誤才套 colorScheme.error。
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(_error!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error)),
-            ),
-          if (_info != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(_info!, style: Theme.of(context).textTheme.bodySmall),
-            ),
-        ],
+            // sheet 蓋在最上層，SnackBar 會被擋住看不到（MAJOR-2）：狀態改顯示在 sheet 內。
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  _error!,
+                  style: Theme.of(context)
+                      .textTheme
+                      .bodySmall
+                      ?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -420,6 +543,7 @@ class _RatioSheet extends ConsumerStatefulWidget {
 class _RatioSheetState extends ConsumerState<_RatioSheet> {
   final Map<String, TextEditingController> _controllers = {};
   String? _error;
+  bool _saving = false;
 
   TextEditingController _controllerFor(Member m, Map<String, int> ratio) =>
       _controllers.putIfAbsent(m.id, () => TextEditingController(text: (ratio[m.id] ?? 0).toString()));
@@ -432,7 +556,8 @@ class _RatioSheetState extends ConsumerState<_RatioSheet> {
     super.dispose();
   }
 
-  void _save(Ledger ledger, List<Member> members) {
+  Future<void> _save(Ledger ledger, List<Member> members) async {
+    if (_saving) return;
     final newRatio = <String, int>{};
     var sum = 0;
     for (final m in members) {
@@ -446,12 +571,21 @@ class _RatioSheetState extends ConsumerState<_RatioSheet> {
     }
     // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功先 pop 再補 SnackBar。
     final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     try {
-      ref.read(ledgerStateProvider.notifier).update(_copyLedger(ledger, defaultRatio: newRatio));
+      await ref.read(ledgerStateProvider.notifier).update(_copyLedger(ledger, defaultRatio: newRatio));
+      if (!mounted) return;
       Navigator.of(context).pop();
       messenger.showSnackBar(const SnackBar(content: Text('已儲存')));
-    } catch (_) {
-      setState(() => _error = '儲存失敗，請重試');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
+      });
     }
   }
 
@@ -491,7 +625,11 @@ class _RatioSheetState extends ConsumerState<_RatioSheet> {
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
-            child: FilledButton(key: const ValueKey('save-ratio-button'), onPressed: () => _save(ledger, members), child: const Text('儲存比例')),
+            child: FilledButton(
+              key: const ValueKey('save-ratio-button'),
+              onPressed: _saving ? null : () => _save(ledger, members),
+              child: Text(_saving ? '儲存中…' : '儲存比例'),
+            ),
           ),
         ],
       ),
@@ -510,6 +648,7 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
   late final TextEditingController _sharedController;
   late final TextEditingController _personalController;
   String? _error;
+  bool _saving = false;
 
   @override
   void initState() {
@@ -530,7 +669,8 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
 
   // 一顆「儲存」同時存共同與個人兩欄（任一失敗都停在 sheet 內顯示錯誤，不半途 pop）。
   // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功先 pop 再補 SnackBar。
-  void _save(Ledger ledger, Member? me) {
+  Future<void> _save(Ledger ledger, Member? me) async {
+    if (_saving) return;
     final sharedV = int.tryParse(_sharedController.text.trim());
     if (sharedV == null) {
       setState(() => _error = '請輸入有效金額');
@@ -543,25 +683,39 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
     }
     final messenger = ScaffoldMessenger.of(context);
     final ledgerNotifier = ref.read(ledgerStateProvider.notifier);
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     try {
-      ledgerNotifier.update(_copyLedger(ledger, openingBalanceShared: sharedV));
-    } catch (_) {
-      setState(() => _error = '儲存失敗，請重試');
+      await ledgerNotifier.update(_copyLedger(ledger, openingBalanceShared: sharedV));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
+      });
       return;
     }
     if (me != null) {
       try {
-        ref.read(membersStateProvider.notifier).update(Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, openingBalancePersonal: personalV!));
-      } catch (_) {
-        // 個人欄寫入失敗時把已寫進去的共同欄退回原值，讓「儲存失敗」文案與事實一致（兩欄都沒存）。
+        await ref.read(membersStateProvider.notifier).update(Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, openingBalancePersonal: personalV!));
+      } catch (e) {
+        // 兩張表沒有共同交易，個人欄寫入失敗時把已寫進去的共同欄退回原值，
+        // 讓「儲存失敗」文案與事實一致（兩欄都沒存）。
         // 退回本身若也炸，吞掉：本來就已在失敗路徑、sheet 仍留在畫面讓使用者重試。
         try {
-          ledgerNotifier.update(ledger);
+          await ledgerNotifier.update(ledger);
         } catch (_) {}
-        setState(() => _error = '儲存失敗，請重試');
+        if (!mounted) return;
+        setState(() {
+          _saving = false;
+          _error = e is LedgerException ? e.message : '儲存失敗，請重試';
+        });
         return;
       }
     }
+    if (!mounted) return;
     Navigator.of(context).pop();
     messenger.showSnackBar(const SnackBar(content: Text('已儲存')));
   }
@@ -607,7 +761,11 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
           const SizedBox(height: 12),
           SizedBox(
             width: double.infinity,
-            child: FilledButton(key: const ValueKey('save-opening-button'), onPressed: () => _save(ledger, me), child: const Text('儲存')),
+            child: FilledButton(
+              key: const ValueKey('save-opening-button'),
+              onPressed: _saving ? null : () => _save(ledger, me),
+              child: Text(_saving ? '儲存中…' : '儲存'),
+            ),
           ),
         ],
       ),
@@ -615,21 +773,39 @@ class _OpeningBalanceSheetState extends ConsumerState<_OpeningBalanceSheet> {
   }
 }
 
-class _OtherCard extends StatelessWidget {
+class _OtherCard extends ConsumerWidget {
   const _OtherCard();
 
+  /// 登出。帳本選擇與快照的清理統一由 `AuthNotifier` 的登入狀態監聽做
+  /// （登出、token 過期、別的分頁換帳號都會走到同一條路）。
+  Future<void> _signOut(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(authProvider.notifier).signOut();
+      if (context.mounted) context.go('/login');
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(e is LedgerException ? e.message : '登出失敗，請重試')),
+      );
+    }
+  }
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Card(
       child: Column(
         children: [
-          _SettingsRow(
-            label: '分類管理',
-            onTap: () => context.push('/settings/categories'),
+          KeyedSubtree(
+            key: tutorialKey('settings-categories'),
+            child: _SettingsRow(
+              label: '分類管理',
+              onTap: () => context.push('/settings/categories'),
+            ),
           ),
           _SettingsRow(
+            key: const Key('sign-out-row'),
             label: '登出',
-            onTap: () => ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('登出：波 2 接後端'))),
+            onTap: () => _signOut(context, ref),
           ),
         ],
       ),

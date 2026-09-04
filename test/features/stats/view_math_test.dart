@@ -1,3 +1,4 @@
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/stats/trend_math.dart';
@@ -34,11 +35,11 @@ void main() {
       expect(hers.firstWhere((i) => i.entry.note == '全聯買菜').amount, 284);
     });
 
-    test('個人視角：common 錢包共同支出依 default_ratio 折半', () {
+    test('個人視角：common 錢包共同支出依 default_ratio 折半；共同收入不出現', () {
       final mine = view(ViewMode.personal, kMeId);
       expect(mine.firstWhere((i) => i.entry.note == '房租').amount, 13000);
-      expect(mine.firstWhere((i) => i.entry.note == '薪水' && i.entry.occurredOn.day == 5).amount,
-          26000);
+      // 共同收入進共同餘額，不進個人視角（spec v1.3）。
+      expect(hasNote(mine, '薪水'), isFalse);
     });
 
     test('私人筆只在本人的個人視角出現', () {
@@ -84,20 +85,22 @@ void main() {
         {'c-daily': 1520, 'c-dining': 1280, 'c-food': 680, 'c-transport': 420},
       );
 
-      // bucketize：本月桶的花費含這四筆（家庭視角本月支出合計 32767）
+      // bucketize：本月桶的花費含這四筆（家庭視角本月支出合計 36467
+      //   ＝26000 房租＋2300 電費＋567＋1280＋1520＋420＋680＋2400 大採購＋1300 週末外食）。
+      // 這條測的是「settling 的帳有沒有正常進 spend」，balance 口徑不是重點，
+      // 餵一個常數即可（真正的 v1.3 balance 口徑驗證在 monthSummary 那組測試）。
       final m = bucketize(
         TrendInput(
           items: fam,
           categories: container.read(categoriesProvider),
-          budgets: container.read(budgetsProvider),
-          rolloverBasis: entries.where((e) => e.scope == EntryScope.shared).toList(),
-          opening: ledger.openingBalanceShared,
+          balanceAt: (_) => 0,
+          overspendAt: (_) => 0,
+          categoryOverspendAt: (_, _) => 0,
         ),
         Granularity.month,
         DateTime.now(),
       );
-      expect(m.last.spend, 32767);
-      expect(m.last.balance, 154033);
+      expect(m.last.spend, 36467);
     });
 
     test('家庭視角只取 shared 且金額全額', () {
@@ -108,32 +111,55 @@ void main() {
   });
 
   group('monthSummary', () {
-    test('家庭視角本月摘要與假資料手算一致', () {
+    test('家庭視角本月摘要與假資料手算一致（balance 改 v1.3 sharedAvailable）', () {
+      final allocations = container.read(allocationsProvider);
       final s = monthSummary(
         items: view(ViewMode.family, kMeId),
         month: DateTime.now(),
-        opening: ledger.openingBalanceShared,
+        balanceAt: (until) => sharedAvailable(
+          ledger: ledger,
+          entries: entries,
+          allocations: allocations,
+          until: until,
+        ),
       );
       // 收入：薪水 52000（私人接案 8000 不算）
       expect(s.income, 52000);
-      // 支出：26000+2300+567+1280+1520+420+680（私人 Steam 350 不算）
-      expect(s.expense, 32767);
-      expect(s.net, 19233);
-      // 期初 120000 ＋（本月 52000 ＋ 上月 52000）−（本月 32767 ＋ 上月 37200）
-      expect(s.balance, 154033);
+      // 支出：26000+2300+567+1280+1520+420+680+2400+1300（私人 Steam 350 不算）
+      expect(s.expense, 36467);
+      expect(s.net, 15533);
+      // v1.3：balance 不再是「視角收支累計」，改吃 sharedAvailable（月底）。
+      // 共同餘額＝期初 120000 ＋（本月 52000＋上月 52000）共同收入
+      //   −（本月 26000+2300+2400+1300＋上月 26000+6200+3900+1100）共同錢包支出（payerId 為空）
+      //   ＝154800（代墊的 567、1280、1520、420、680 走個人，不動共同餘額）；
+      // 當月信封剩餘合計＝食品 3600＋餐飲 2700＋日常用品 1500＋水電 700＋交通 2000＝10500；
+      // sharedAvailable＝154800−10500＝144300（brief 手算基準）。
+      expect(s.balance, 144300);
     });
 
-    test('個人視角本月摘要（Mike）與手算一致', () {
+    test('個人視角本月摘要（Mike）與手算一致（balance 改 v1.3 personalBalance）', () {
+      final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
+      final settlements = container.read(settlementsProvider);
       final s = monthSummary(
         items: view(ViewMode.personal, kMeId),
         month: DateTime.now(),
-        opening: 50000,
+        balanceAt: (until) => personalBalance(
+          member: me,
+          entries: entries,
+          settlements: settlements,
+          until: until,
+        ),
       );
-      // 薪水一半 26000 ＋ 私人接案 8000
-      expect(s.income, 34000);
-      // 13000+1150+284+640+760+350+210+340
-      expect(s.expense, 16734);
-      expect(s.net, 17266);
+      // 只有私人接案 8000（共同薪水進共同餘額，不進個人視角）
+      expect(s.income, 8000);
+      // 13000+1150+284+640+760+350+210+340+1200（大採購半）+650（週末外食半）
+      expect(s.expense, 18584);
+      expect(s.net, -10584);
+      // v1.3：balance 改吃 personalBalance（月底）。
+      // 期初 50000 ＋ 私人收入 8000（接案）− 私人支出 350（Steam）
+      //   − 代墊全額 567（全聯 e-5，payerId Mike）− 1520（Costco e-7，payerId Mike）
+      //   ＝55563（s-1 結算 pending 未 settled，nets 不算；共同收支不動個人餘額）。
+      expect(s.balance, 55563);
     });
   });
 
@@ -147,17 +173,18 @@ void main() {
 
     test('依分類：只算支出、依金額降冪', () {
       final s = pieSlices(thisMonth(ViewMode.family), PieBy.category);
+      // c-food＝567+680+2400、c-dining＝1280+1300
       expect(s.map((x) => x.key).toList(),
-          ['c-house', 'c-util', 'c-daily', 'c-dining', 'c-food', 'c-transport']);
-      expect(s.map((x) => x.amount).toList(), [26000, 2300, 1520, 1280, 1247, 420]);
+          ['c-house', 'c-food', 'c-dining', 'c-util', 'c-daily', 'c-transport']);
+      expect(s.map((x) => x.amount).toList(), [26000, 3647, 2580, 2300, 1520, 420]);
       expect(s.any((x) => x.key == 'c-salary'), isFalse, reason: '收入不進圓餅');
     });
 
     test('依成員：common 錢包歸「共同錢包」一項', () {
       final s = pieSlices(thisMonth(ViewMode.family), PieBy.member);
       expect(s.map((x) => x.key).toList(), [kCommonWalletKey, kWifeId, kMeId]);
-      // 房租 26000 ＋ 電費 2300 皆 common
-      expect(s.first.amount, 28300);
+      // 房租 26000 ＋ 電費 2300 ＋ 大採購 2400 ＋ 週末外食 1300 皆 common
+      expect(s.first.amount, 32000);
       // 老婆：1280 + 420 + 680；Mike：567 + 1520
       expect(s[1].amount, 2380);
       expect(s[2].amount, 2087);

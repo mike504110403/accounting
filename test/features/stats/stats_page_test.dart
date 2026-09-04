@@ -14,6 +14,8 @@ import 'package:syncfusion_flutter_charts/charts.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import '../../support/fixtures.dart';
+
 /// 注意：`router`（`lib/app/router.dart`）是 top-level 單例，**跨測試共用**。
 /// 任何用 `AccountingApp` 開機的測試都會沿用上一條測試留下的路由位置，
 /// 所以需要特定分頁時一律先 `router.go(...)`，不要假設開機在 `/entries`。
@@ -24,11 +26,18 @@ class _FixedEntries extends EntriesNotifier {
   List<Entry> build() => seed;
 }
 
-class _FixedBudgets extends BudgetsNotifier {
-  _FixedBudgets(this.seed);
-  final List<Budget> seed;
+class _FixedAllocations extends AllocationsNotifier {
+  _FixedAllocations(this.seed);
+  final List<BudgetAllocation> seed;
   @override
-  List<Budget> build() => seed;
+  List<BudgetAllocation> build() => seed;
+}
+
+class _FixedSettlements extends SettlementsNotifier {
+  _FixedSettlements(this.seed);
+  final List<Settlement> seed;
+  @override
+  List<Settlement> build() => seed;
 }
 
 void main() {
@@ -109,18 +118,44 @@ void main() {
     ),
   ];
 
+  final allocations = <BudgetAllocation>[
+    BudgetAllocation(
+      id: 'al-1',
+      ledgerId: kLedgerId,
+      categoryId: 'c-food',
+      amount: 3000,
+      occurredOn: day(1),
+      createdBy: kMeId,
+    ),
+  ];
+
   // 回傳型別交給推論：flutter_riverpod 3 沒有匯出 `Override` 這個型別名。
   overridesFor({
     List<Entry>? entries,
-    List<Budget>? budgets,
+    List<BudgetAllocation>? allocations,
     Ledger? ledgerValue,
     List<Category>? categoriesValue,
+    List<Member>? membersValue,
+    List<Settlement>? settlementsValue,
   }) => [
         ledgerProvider.overrideWithValue(ledgerValue ?? ledger),
-        membersProvider.overrideWithValue(members),
+        membersProvider.overrideWithValue(membersValue ?? members),
         categoriesProvider.overrideWithValue(categoriesValue ?? categories),
         entriesProvider.overrideWith(() => _FixedEntries(entries ?? seed)),
-        budgetsProvider.overrideWith(() => _FixedBudgets(budgets ?? const [])),
+        allocationsProvider.overrideWith(() => _FixedAllocations(allocations ?? const [])),
+        // 這組 fixture 自成一格：結算狀態也要顯式控制，個人餘額斷言才不會
+        // 暗中吃到全域 mock 的 s-1（雖然它是 pending、目前算不到，但別讓
+        // 測試的正確性依賴「剛好沒被算到」這種巧合）。
+        settlementsProvider.overrideWith(() => _FixedSettlements(settlementsValue ?? const [])),
+        // month_summary（衍生數字改吃 DB）：InMemory repo 餵同一份 fixture。
+        ledgerRepositoryProvider.overrideWithValue(repoWith(
+          ledger: ledgerValue ?? ledger,
+          members: membersValue ?? members,
+          categories: categoriesValue ?? categories,
+          entries: entries ?? seed,
+          allocations: allocations ?? const [],
+          settlements: settlementsValue ?? const [],
+        )),
       ];
 
   Future<void> phone(WidgetTester tester) async {
@@ -144,17 +179,21 @@ void main() {
   Future<void> pumpStats(
     WidgetTester tester, {
     List<Entry>? entries,
-    List<Budget>? budgets,
+    List<BudgetAllocation>? allocations,
     Ledger? ledgerValue,
     List<Category>? categoriesValue,
+    List<Member>? membersValue,
+    List<Settlement>? settlementsValue,
   }) async {
     await phone(tester);
     await tester.pumpWidget(ProviderScope(
       overrides: overridesFor(
         entries: entries,
-        budgets: budgets,
+        allocations: allocations,
         ledgerValue: ledgerValue,
         categoriesValue: categoriesValue,
+        membersValue: membersValue,
+        settlementsValue: settlementsValue,
       ),
       child: const MaterialApp(home: StatsPage()),
     ));
@@ -173,15 +212,16 @@ void main() {
 
     expect(find.byType(StatsPage), findsOneWidget);
     expect(find.text('月摘要'), findsOneWidget);
-    expect(inSummary(find.text('餘額')), findsOneWidget);
+    // balance 標籤是「可用餘額」（v1.3，家庭／個人共用同一套字，
+    // 見 stats_page._SummaryCard、trend_card.TrendLineX.label）。
+    expect(inSummary(find.text('可用餘額')), findsOneWidget);
     expect(find.text('支出分布'), findsOneWidget);
     expect(find.text('趨勢'), findsOneWidget);
     expect(find.text('家庭'), findsOneWidget);
     expect(find.byType(SfCircularChart), findsOneWidget);
     expect(find.byType(SfCartesianChart), findsOneWidget);
-    // 自製切換列一排四條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
-    // （限定在 TrendCard 內找：'預算' 同時也是底部 Tab 的名稱）
-    for (final l in ['花費', '預算', '超支', '餘額']) {
+    // 自製切換列一排三條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
+    for (final l in ['花費', '超支', '可用餘額']) {
       expect(find.descendant(of: find.byType(TrendCard), matching: find.text(l)), findsOneWidget,
           reason: '切換列應有 $l');
     }
@@ -196,9 +236,11 @@ void main() {
     expect(find.byType(SegmentedButton<ViewMode>), findsOneWidget);
 
     // 透過共用元件切到個人，頁面確實跟著換算
+    // v1.3 個人餘額（personalBalance）：期初 1000 − 私人支出 100（x-3）＝900
+    // （x-1 是 shared 收入、x-2 是無 payerId 的共同錢包支出，皆不動個人餘額）。
     await tester.tap(find.descendant(of: toggle, matching: find.text('個人')));
     await tester.pumpAndSettle();
-    expect(inSummary(find.text('1,200')), findsOneWidget);
+    expect(inSummary(find.text('900')), findsOneWidget);
   });
 
   testWidgets('趨勢預設顆粒度是「月」', (tester) async {
@@ -212,7 +254,8 @@ void main() {
   testWidgets('月摘要：家庭視角數值 ＋ 切個人後改成我的份額', (tester) async {
     await pumpStats(tester);
 
-    // 家庭：收入 1000、支出 400（私人 100 不算）、損益 600、餘額 5000+600
+    // 家庭：收入 1000、支出 400（私人 100 不算）、損益 600
+    // 可用餘額（v1.3 sharedAvailable，無撥款）：期初 5000 ＋1000 收入 −400 共同錢包支出＝5600
     expect(inSummary(find.text('1,000')), findsOneWidget);
     expect(inSummary(find.text('400')), findsOneWidget);
     expect(inSummary(find.text('600')), findsOneWidget);
@@ -221,11 +264,14 @@ void main() {
     await tester.tap(find.text('個人'));
     await tester.pumpAndSettle();
 
-    // 個人：收入 500、支出 200+100=300、損益 200、餘額 1000+200
-    expect(inSummary(find.text('500')), findsOneWidget);
+    // 個人：收入 0（x-1 共同收入進共同餘額，不進個人視角）、支出 200+100=300、損益 −300
+    // 可用餘額（v1.3 personalBalance）：期初 1000 − 私人支出 100（x-3）＝900
+    // （x-2 的 200 是我在共同支出的份額，viewEntries 換算給月摘要「支出」看，
+    //  但 personalBalance 只認 payerId==me 的代墊全額，x-2 沒有 payerId 不算）
+    expect(inSummary(find.text('0')), findsOneWidget);
     expect(inSummary(find.text('300')), findsOneWidget);
-    expect(inSummary(find.text('200')), findsOneWidget);
-    expect(inSummary(find.text('1,200')), findsOneWidget);
+    expect(inSummary(find.text('-300')), findsOneWidget);
+    expect(inSummary(find.text('900')), findsOneWidget);
   });
 
   testWidgets('點月份標題開年月滾輪：點彈窗外不變、「本月」跳回本月', (tester) async {
@@ -292,6 +338,25 @@ void main() {
     expect(tester.getSize(find.byType(SfCartesianChart)).height, kTrendChartHeight);
   });
 
+  testWidgets('個人視角空資料同樣顯示提示、圖區保留高度（兩線都 0，過濾邏輯沒被視角改壞）',
+      (tester) async {
+    // 個人視角只有花費／餘額兩線，要讓兩者都是 0：Mike 期初改 0、無帳。
+    const zeroMembers = [
+      Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike'),
+      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆'),
+    ];
+    await pumpStats(tester, entries: const [], membersValue: zeroMembers);
+
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+
+    expect(inTrend(find.text('超支')), findsNothing, reason: '個人視角本來就沒有超支 toggle');
+    expect(find.text('這個範圍沒有資料'), findsOneWidget);
+    expect(find.byType(SfCartesianChart), findsOneWidget);
+    expect(tester.getSize(find.byType(SfCartesianChart)).height, kTrendChartHeight);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('只有收入時趨勢照畫（餘額也算資料）', (tester) async {
     const zeroOpening = Ledger(
       id: kLedgerId,
@@ -307,8 +372,8 @@ void main() {
     expect(find.text('這個範圍沒有資料'), findsNothing);
     expect(find.byType(SfCartesianChart), findsOneWidget);
 
-    // 點切換列的「餘額」打開該線，圖仍正常
-    await tester.tap(inTrend(find.text('餘額')));
+    // 點切換列的「可用餘額」打開該線，圖仍正常（家庭視角標籤，v1.3）
+    await tester.tap(inTrend(find.text('可用餘額')));
     await tester.pumpAndSettle();
     expect(find.byType(SfCartesianChart), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -376,11 +441,8 @@ void main() {
     expect(find.byType(ChoiceChip), findsAtLeastNWidgets(4));
   });
 
-  testWidgets('趨勢：四種顆粒度都畫得出來、四條線可開關', (tester) async {
-    final budgets = [
-      Budget(id: 'b', ledgerId: kLedgerId, categoryId: 'c-food', month: thisMonth, limit: 3000),
-    ];
-    await pumpStats(tester, budgets: budgets);
+  testWidgets('趨勢：四種顆粒度都畫得出來', (tester) async {
+    await pumpStats(tester, allocations: allocations);
 
     for (final g in ['日', '週', '月', '年']) {
       await tester.tap(find.descendant(of: find.byType(TrendCard), matching: find.text(g)));
@@ -393,10 +455,7 @@ void main() {
   });
 
   testWidgets('切換列開關線別：series 數量隨之增減、全關顯示提示、圖區高度不變', (tester) async {
-    final budgets = [
-      Budget(id: 'b', ledgerId: kLedgerId, categoryId: 'c-food', month: thisMonth, limit: 3000),
-    ];
-    await pumpStats(tester, budgets: budgets);
+    await pumpStats(tester, allocations: allocations);
 
     int seriesCount() =>
         tester.widget<SfCartesianChart>(find.byType(SfCartesianChart)).series.length;
@@ -405,23 +464,21 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    // 餘額預設收起 → 三條
-    expect(seriesCount(), 3);
+    // 餘額預設收起 → 兩條
+    expect(seriesCount(), 2);
     expect(find.text('請至少開啟一條線'), findsNothing);
 
-    // 打開餘額 → 四條
-    await toggle('餘額');
-    expect(seriesCount(), 4);
+    // 打開可用餘額（家庭視角標籤，v1.3） → 三條
+    await toggle('可用餘額');
+    expect(seriesCount(), 3);
 
     // 逐條關掉，series 跟著減少
-    await toggle('餘額');
-    expect(seriesCount(), 3);
-    await toggle('超支');
+    await toggle('可用餘額');
     expect(seriesCount(), 2);
-    await toggle('預算');
+    await toggle('超支');
     expect(seriesCount(), 1);
 
-    // 四條全關 → series 空、提示出現、圖區高度不變
+    // 三條全關 → series 空、提示出現、圖區高度不變
     await toggle('花費');
     expect(seriesCount(), 0);
     expect(find.text('請至少開啟一條線'), findsOneWidget);
@@ -452,13 +509,13 @@ void main() {
     // 餘額線預設隱藏 → 負區間沒有任何線經過，下界不該放開
     expect(yAxis().minimum, 0);
 
-    // 打開餘額線 → 下界放開，讓 −400 畫得出來
-    await tester.tap(inTrend(find.text('餘額')));
+    // 打開可用餘額線（家庭視角標籤，v1.3） → 下界放開，讓 −400 畫得出來
+    await tester.tap(inTrend(find.text('可用餘額')));
     await tester.pumpAndSettle();
     expect(yAxis().minimum, isNull);
 
     // 再關回去 → 又釘回 0
-    await tester.tap(inTrend(find.text('餘額')));
+    await tester.tap(inTrend(find.text('可用餘額')));
     await tester.pumpAndSettle();
     expect(yAxis().minimum, 0);
   });
@@ -549,9 +606,7 @@ void main() {
 
   testWidgets('頂部列用共用 MonthAppBar，位置與帳目頁一致', (tester) async {
     await phone(tester);
-    // router 是 top-level 單例，會帶著前一條測試留下的位置。不能假設開機在 /entries，
-    // 否則「帳目頁的 rect」量到的其實是統計頁自己，比對就變成恆真的假守衛。
-    router.go('/entries');
+    // router 現在是 per-container（routerProvider），開機一定停在 /entries。
     await tester.pumpWidget(const ProviderScope(child: AccountingApp()));
     await tester.pumpAndSettle();
 
@@ -585,8 +640,8 @@ void main() {
     int seriesCount() =>
         tester.widget<SfCartesianChart>(find.byType(SfCartesianChart)).series.length;
 
-    // 總覽：三條（餘額預設收起）
-    expect(seriesCount(), 3);
+    // 總覽：兩條（餘額預設收起）
+    expect(seriesCount(), 2);
     expect(inTrend(find.text('花費')), findsOneWidget);
 
     // 先改顆粒度，驗證切 tab 不會被重設
@@ -623,19 +678,16 @@ void main() {
     await tester.tap(inTrend(find.text('總覽')));
     await tester.pumpAndSettle();
     expect(inTrend(find.text('花費')), findsOneWidget);
-    expect(seriesCount(), 3);
+    expect(seriesCount(), 2);
     expect(
       tester.widget<SegmentedButton<Granularity>>(find.byKey(const Key('trend-granularity'))).selected,
       {Granularity.year},
     );
   });
 
-  testWidgets('各分類：有預算但整段沒花錢，仍算沒資料', (tester) async {
-    // 分類版只畫花費線，拿 budget 一起判會讓圖上一條平的 0 被當成「有資料」
-    final budgets = [
-      Budget(id: 'b', ledgerId: kLedgerId, categoryId: 'c-food', month: thisMonth, limit: 3000),
-    ];
-    await pumpStats(tester, entries: const [], budgets: budgets);
+  testWidgets('各分類：有撥款但整段沒花錢，仍算沒資料', (tester) async {
+    // 分類版只畫花費線，拿別的欄位一起判會讓圖上一條平的 0 被當成「有資料」
+    await pumpStats(tester, entries: const [], allocations: allocations);
     await tester.tap(inTrend(find.text('各分類')));
     await tester.pumpAndSettle();
 
@@ -666,7 +718,6 @@ void main() {
               start: DateTime(2026, i + 1, 1),
               end: DateTime(2026, i + 1, 28),
               spend: 100,
-              budget: 0,
               over: 100,
               balance: 0,
             ),
@@ -681,6 +732,7 @@ void main() {
                 expenseCategories: cats,
                 granularity: Granularity.month,
                 onGranularityChanged: (_) {},
+                viewMode: ViewMode.family,
               ),
             ]),
           ),
@@ -720,7 +772,8 @@ void main() {
     // 所以只把這幾個控制字釘成唯一，避免同一組操作在兩處用同一個詞。
     //
     // 已知且刻意保留的例外（不要拿這條守衛去「修」它們）：
-    //   - 「餘額」：月摘要的一格 vs 趨勢的線別，兩者確實是同一個量、不同呈現。
+    //   - 「可用餘額」：月摘要的一格 vs 趨勢的線別，兩者確實是同一個量、不同呈現
+    //     （v1.3 起兩者字面也統一了，兩處都叫「可用餘額」——見 trend_card.TrendLineX.label）。
     //   - 「預算」：趨勢的線別 vs 底部 Tab 的頁名，跨層級，不會被誤讀成同一個控制。
     //
     // 更重要的是：**分類名稱由使用者自訂**，完全可能取名叫「總覽」「整月」甚至「花費」，
@@ -734,8 +787,8 @@ void main() {
   testWidgets('資訊密度：月摘要一列四格、圓餅圖例只有名稱與金額', (tester) async {
     await pumpStats(tester);
 
-    // 月摘要四格，沒有額外說明列
-    for (final l in ['收入', '支出', '損益', '餘額']) {
+    // 月摘要四格，沒有額外說明列（家庭視角標籤是「可用餘額」，v1.3）
+    for (final l in ['收入', '支出', '損益', '可用餘額']) {
       expect(inSummary(find.text(l)), findsOneWidget);
     }
     expect(find.text('累計餘額'), findsNothing);
@@ -823,12 +876,144 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.byType(SfCircularChart), findsOneWidget);
     expect(find.byType(SfCartesianChart), findsOneWidget);
-    // 自製切換列一排四條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
-    // （限定在 TrendCard 內找：'預算' 同時也是底部 Tab 的名稱）
-    for (final l in ['花費', '預算', '超支', '餘額']) {
+    // 自製切換列一排三條線，取代原本的 FilterChip 與 Syncfusion 內建 legend
+    for (final l in ['花費', '超支', '可用餘額']) {
       expect(find.descendant(of: find.byType(TrendCard), matching: find.text(l)), findsOneWidget,
           reason: '切換列應有 $l');
     }
     expect(find.byType(FilterChip), findsNothing);
+
+    // 深色主題下切個人視角：不炸，線別標籤不變（不依視角變，見下方 label 說明）。
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(inTrend(find.text('可用餘額')), findsOneWidget);
+  });
+
+  testWidgets('個人視角超支恆 0：TrendInput.overspendAt 不吃 totalOverspend（不靠 UI 沒畫出來就當沒事）',
+      (tester) async {
+    // 「超支」toggle 在個人視角本來就不畫（見下一條測試），光看畫面測不出
+    // overspendAt 有沒有被錯接成 totalOverspend；直接讀 TrendCard.buckets 是
+    // stats_page._mode==personal 分支「overspendAt 恆傳回 0」這條規則唯一的守衛，
+    // 屬合法的 widget 層斷言（不是繞過畫面，是畫面本來就不呈現這個量）。
+    // 用真的會超支的資料（撥款 1000、預算支出 5000）：家庭視角這個月 over 必須 > 0，
+    // 若個人視角量到同一個非 0 值，就代表 overspendAt 被錯接了。
+    final overspendEntries = [
+      Entry(
+        id: 'ov-1',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        scope: EntryScope.shared,
+        amount: 5000,
+        categoryId: 'c-food',
+        occurredOn: day(5),
+        createdBy: kMeId,
+        splitMethod: SplitMethod.common,
+        funding: Funding.budget,
+      ),
+    ];
+    final overspendAllocations = [
+      BudgetAllocation(
+        id: 'ov-al-1',
+        ledgerId: kLedgerId,
+        categoryId: 'c-food',
+        amount: 1000,
+        occurredOn: day(1),
+        createdBy: kMeId,
+      ),
+    ];
+
+    await pumpStats(tester, entries: overspendEntries, allocations: overspendAllocations);
+    final familyOver =
+        tester.widget<TrendCard>(find.byType(TrendCard)).buckets.last.over;
+    expect(familyOver, greaterThan(0), reason: '固定樣本應該真的超支，這條斷言才有意義');
+
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+
+    final personalOver =
+        tester.widget<TrendCard>(find.byType(TrendCard)).buckets.last.over;
+    expect(personalOver, 0,
+        reason: '個人視角沒有信封，overspendAt 應恆傳回 0，不是 totalOverspend 的真實計算值');
+  });
+
+  testWidgets('線別依視角：家庭三個 toggle、個人兩個且無「超支」；切視角 _hidden 不殘留不存在的線',
+      (tester) async {
+    await pumpStats(tester, allocations: allocations);
+
+    int seriesCount() =>
+        tester.widget<SfCartesianChart>(find.byType(SfCartesianChart)).series.length;
+    Future<void> tapToggle(String label) async {
+      await tester.tap(find.descendant(of: find.byType(TrendCard), matching: find.text(label)));
+      await tester.pumpAndSettle();
+    }
+
+    // 家庭：三個 toggle，預設花費／超支開、可用餘額關 → 2 條 series
+    for (final l in ['花費', '超支', '可用餘額']) {
+      expect(inTrend(find.text(l)), findsOneWidget);
+    }
+    expect(seriesCount(), 2);
+
+    // 使用者手動收起「超支」，模擬帶著設定切視角
+    await tapToggle('超支');
+    expect(seriesCount(), 1);
+
+    // 切個人：沒有「超支」toggle（個人沒有信封，v1.3），只剩花費／可用餘額兩個
+    // （標籤不依視角變：個人也叫「可用餘額」，spec：個人視角＝個人可用餘額）
+    await tester.tap(find.text('個人'));
+    await tester.pumpAndSettle();
+    expect(inTrend(find.text('超支')), findsNothing);
+    expect(inTrend(find.text('花費')), findsOneWidget);
+    expect(inTrend(find.text('可用餘額')), findsOneWidget);
+    expect(seriesCount(), 1, reason: '花費仍開、可用餘額仍收起（沿用切視角前的設定）');
+
+    // 切回家庭：超支重新出現，且回到「預設可見」——不殘留切個人前手動關閉的狀態
+    // （它在個人視角期間並不存在，不該假裝「還記得」；比照分類刪除又復原的既有規則）
+    await tester.tap(find.text('家庭'));
+    await tester.pumpAndSettle();
+    expect(inTrend(find.text('超支')), findsOneWidget);
+    expect(seriesCount(), 2, reason: '花費＋重新可見的超支；可用餘額仍收起');
+  });
+
+  testWidgets('真實組裝：家庭視角月摘要可用餘額符合 v1.3 手算基準（本月 144,300／上月 134,700）',
+      (tester) async {
+    await phone(tester);
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(UncontrolledProviderScope(container: container, child: const AccountingApp()));
+    await tester.pumpAndSettle();
+    container.read(routerProvider).go('/stats');
+    await tester.pumpAndSettle();
+
+    expect(find.byType(StatsPage), findsOneWidget);
+    // sharedAvailable（月底）＝共同餘額 154800 − 當月信封剩餘合計 10500（手算見 brief）
+    expect(inSummary(find.text('144,300')), findsOneWidget);
+
+    await tester.fling(find.byKey(const Key('month-title')), const Offset(120, 0), 800);
+    await tester.pumpAndSettle();
+    // 上月：共同餘額 134800 − 上月信封剩餘合計 100
+    expect(inSummary(find.text('134,700')), findsOneWidget);
+  });
+
+  testWidgets('真實組裝（seam）：AccountingApp 開機切個人視角，沒有「超支」toggle，月摘要餘額＝手算個人餘額',
+      (tester) async {
+    await phone(tester);
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(UncontrolledProviderScope(container: container, child: const AccountingApp()));
+    await tester.pumpAndSettle();
+    container.read(routerProvider).go('/stats');
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.descendant(
+        of: find.byKey(const Key('view-mode-toggle')), matching: find.text('個人')));
+    await tester.pumpAndSettle();
+
+    // 個人視角沒有「超支」toggle（v1.3：個人沒有信封，恆 0 不給開關）
+    expect(inTrend(find.text('超支')), findsNothing);
+    // personalBalance 手算：期初 50000 ＋ 私人收入 8000（接案）− 私人支出 350（Steam）
+    //   − 代墊全額 567（全聯 e-5，payerId Mike）− 1520（Costco e-7，payerId Mike）＝55563
+    // （s-1 結算 pending 未 settled，nets 不算；與 view_math_test 的手算對照一致）
+    expect(inSummary(find.text('55,563')), findsOneWidget);
   });
 }

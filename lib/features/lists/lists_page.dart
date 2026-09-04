@@ -3,12 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
+import '../../app/tutorial.dart';
 import 'add_item_sheets.dart';
 import 'checkout_sheet.dart';
 import 'shopping_tab.dart';
-import 'todo_tab.dart';
 
-/// 清單頁：購物清單／待辦兩個 Tab；購物清單支援長按多選後一次結帳。
+/// 清單頁＝購物清單（待辦 tab 已拿掉——Mike 手測裁示 2026-09-03）；長按多選後一次結帳。
 class ListsPage extends ConsumerStatefulWidget {
   const ListsPage({super.key});
 
@@ -16,22 +16,9 @@ class ListsPage extends ConsumerStatefulWidget {
   ConsumerState<ListsPage> createState() => _ListsPageState();
 }
 
-class _ListsPageState extends ConsumerState<ListsPage> with SingleTickerProviderStateMixin {
-  late final TabController _tabController;
+class _ListsPageState extends ConsumerState<ListsPage> {
   bool _selecting = false;
   final Set<String> _selectedIds = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 2, vsync: this);
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
 
   void _enterSelecting(String id) => setState(() {
         _selecting = true;
@@ -74,31 +61,25 @@ class _ListsPageState extends ConsumerState<ListsPage> with SingleTickerProvider
               child: const Text('完成'),
             ),
         ],
-        bottom: _selecting ? null : TabBar(controller: _tabController, tabs: const [Tab(text: '購物清單'), Tab(text: '待辦')]),
       ),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 560),
-          child: TabBarView(
-            controller: _tabController,
-            physics: _selecting ? const NeverScrollableScrollPhysics() : null,
-            children: [
-              ShoppingTab(
-                selecting: _selecting,
-                selectedIds: _selectedIds,
-                onLongPressItem: _enterSelecting,
-                onToggleSelected: _toggleSelected,
-                onCheckoutOne: _checkoutOne,
-              ),
-              const TodoTab(),
-            ],
+          child: ShoppingTab(
+            selecting: _selecting,
+            selectedIds: _selectedIds,
+            onLongPressItem: _enterSelecting,
+            onToggleSelected: _toggleSelected,
+            onCheckoutOne: _checkoutOne,
           ),
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _tabController.index == 0
-            ? showAddShoppingItemSheet(context: context)
-            : showAddTodoItemSheet(context: context),
+        key: tutorialKey('lists-fab'),
+        heroTag: 'fab-lists',
+        tooltip: '新增購物項目', // 也是語意標籤（e2e 與無障礙都靠它）
+
+        onPressed: () => showAddShoppingItemSheet(context: context),
         child: const Icon(Icons.add),
       ),
     );

@@ -9,34 +9,42 @@ import 'trend_math.dart';
 /// 趨勢卡的兩個檢視。
 enum TrendTab { overview, byCategory }
 
-/// 四條趨勢線。順序即切換列與 series 的順序。
-enum TrendLine { spend, budget, over, balance }
+/// 三條趨勢線（v1.3 拿掉預算線）。順序即切換列與 series 的順序。
+///
+/// 實際顯示的子集依視角而定（[_linesFor]）：家庭三條都畫，個人沒有信封所以
+/// 沒有「超支」，只畫 [spend]／[balance]。
+enum TrendLine { spend, over, balance }
 
 extension TrendLineX on TrendLine {
+  /// 字面不依視角變：家庭是共同可用餘額、個人是個人可用餘額，兩者都叫
+  /// 「可用餘額」（spec：個人視角＝個人可用餘額）——與月摘要卡同一套用詞。
   String get label => switch (this) {
         TrendLine.spend => '花費',
-        TrendLine.budget => '預算',
         TrendLine.over => '超支',
-        TrendLine.balance => '餘額',
+        TrendLine.balance => '可用餘額',
       };
 
   Color color(ColorScheme cs) => switch (this) {
         TrendLine.spend => spendColor(cs),
-        TrendLine.budget => budgetColor(cs),
         TrendLine.over => overColor(cs),
         TrendLine.balance => balanceColor(cs),
       };
 
   double valueOf(Bucket b) => switch (this) {
         TrendLine.spend => b.spend.toDouble(),
-        TrendLine.budget => b.budget.toDouble(),
         TrendLine.over => b.over.toDouble(),
         TrendLine.balance => b.balance.toDouble(),
       };
 
-  /// 餘額量級比其他三條大一個數量級，同一 y 軸會把它們壓平，所以預設收起來。
+  /// 餘額量級比其他兩條大一個數量級，同一 y 軸會把它們壓平，所以預設收起來。
   bool get initiallyVisible => this != TrendLine.balance;
 }
+
+/// 總覽線別依視角的子集：家庭三條都畫；個人沒有信封（超支恆 0），不給「超支」toggle。
+/// 順序沿用 [TrendLine.values]，即切換列與 series 的順序。
+List<TrendLine> _linesFor(ViewMode mode) => mode == ViewMode.personal
+    ? const [TrendLine.spend, TrendLine.balance]
+    : const [TrendLine.spend, TrendLine.over, TrendLine.balance];
 
 /// 圖區固定高度：沒資料時也保留版位，只是蓋一層提示，避免切顆粒度時整頁跳動。
 const double kTrendChartHeight = 260;
@@ -53,12 +61,14 @@ class TrendCard extends StatefulWidget {
     required this.expenseCategories,
     required this.granularity,
     required this.onGranularityChanged,
+    required this.viewMode,
   });
 
-  /// 總覽：四條線共用的桶。
+  /// 總覽：三條線共用的桶（家庭）或兩條線共用的桶（個人——超支恆 0 但欄位仍在，不畫而已）。
   final List<Bucket> buckets;
 
-  /// 依分類：categoryId → 該分類的桶（只讀 spend）。
+  /// 依分類：categoryId → 該分類的桶。`spend` 與 `over`（該分類當月超支）有意義，
+  /// `balance` 恆 0；目前的分類版圖只畫 `spend`。
   final Map<String, List<Bucket>> byCategory;
 
   /// 支出分類，**順序即配色索引**——與圓餅共用同一套 index，兩張圖同分類同色。
@@ -66,6 +76,10 @@ class TrendCard extends StatefulWidget {
 
   final Granularity granularity;
   final ValueChanged<Granularity> onGranularityChanged;
+
+  /// 統計頁目前的視角：決定總覽線別子集（[_linesFor]）——個人沒有信封，
+  /// 不畫「超支」。線的標籤字不依視角變（見 [TrendLineX.label]）。
+  final ViewMode viewMode;
 
   @override
   State<TrendCard> createState() => _TrendCardState();
@@ -77,10 +91,9 @@ class _TrendCardState extends State<TrendCard> {
   TrendTab _tab = TrendTab.overview;
 
   /// 總覽被收起的線。這是可見狀態的唯一來源（series 清單只放不在這裡面的）。
-  late final Set<TrendLine> _hidden = {
-    for (final l in TrendLine.values)
-      if (!l.initiallyVisible) l,
-  };
+  /// 初值依 [TrendCard.viewMode] 而定，所以要在 [initState]（能讀 `widget`）設，
+  /// 不能寫成欄位初始值（field initializer 跑在 `widget` 賦值之前）。
+  late final Set<TrendLine> _hidden;
 
   /// 依分類被收起的分類，預設全開。
   final Set<String> _hiddenCats = {};
@@ -88,6 +101,10 @@ class _TrendCardState extends State<TrendCard> {
   @override
   void initState() {
     super.initState();
+    _hidden = {
+      for (final l in _linesFor(widget.viewMode))
+        if (!l.initiallyVisible) l,
+    };
     // TrackballBehavior 的建構子有副作用（載入 marker 圖），只建一次。
     _trackball = TrackballBehavior(
       enable: true,
@@ -103,6 +120,15 @@ class _TrendCardState extends State<TrendCard> {
     // 分類可在設定頁刪除；殘留的 id 會讓「全部都關掉」的判斷永遠算不準。
     final ids = {for (final c in widget.expenseCategories) c.id};
     _hiddenCats.retainWhere(ids.contains);
+
+    // 視角切換時線別集合會變（家庭三線／個人兩線，見 [_linesFor]）：不存在的線
+    // 移出 `_hidden`（個人視角只剩兩條，`_hidden` 裡若還留著家庭獨有的「超支」，
+    // 往後每次判斷都得多過濾一次不存在的殘留值，白白留一個陷阱）。
+    // 家庭／個人唯一的差集只有 `over`，且 `over.initiallyVisible` 恆為 true，
+    // 所以「新出現的線套預設可見性」這段補線邏輯永遠不會真的收起任何東西，
+    // 是死碼——不寫，靠 `over` 重新出現時本來就不在 `_hidden` 裡即可（它剛剛才
+    // 被上面這行移除）。
+    _hidden.retainWhere(_linesFor(widget.viewMode).contains);
   }
 
   @override
@@ -112,7 +138,7 @@ class _TrendCardState extends State<TrendCard> {
     final overview = _tab == TrendTab.overview;
 
     final visibleLines = [
-      for (final l in TrendLine.values)
+      for (final l in _linesFor(widget.viewMode))
         if (!_hidden.contains(l)) l,
     ];
     final visibleCats = [
@@ -203,18 +229,20 @@ class _TrendCardState extends State<TrendCard> {
     visualDensity: VisualDensity.compact,
   );
 
+  // 只看視角實際會畫的線（[_linesFor]）：個人視角沒有超支線，over 是否為 0
+  // 不該影響「這個範圍有沒有資料」的判斷（雖然個人視角 over 現況恆 0，這裡仍
+  // 明確依線別子集判斷，不靠這個巧合）。
   bool _overviewEmpty() =>
       widget.buckets.isEmpty ||
-      widget.buckets.every((b) => b.spend == 0 && b.budget == 0 && b.balance == 0);
+      widget.buckets.every((b) => _linesFor(widget.viewMode).every((l) => l.valueOf(b) == 0));
 
-  // 分類版畫的只有花費線，所以「有沒有資料」只看 spend；
-  // 拿 budget 一起判會讓「有預算但整段沒花錢」被當成有資料，圖上卻是一條平的 0。
+  // 分類版畫的只有花費線，所以「有沒有資料」只看 spend。
   bool _categoryEmpty() =>
       widget.byCategory.values.every((list) => list.every((b) => b.spend == 0));
 
   Widget _lineToggles(ColorScheme cs) => Row(
         children: [
-          for (final l in TrendLine.values)
+          for (final l in _linesFor(widget.viewMode))
             Expanded(
               child: _Toggle(
                 label: l.label,

@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
+
+import '../../app/circle_slide_action.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/category_icon.dart';
@@ -68,21 +71,22 @@ class _CategoryReorderList extends ConsumerWidget {
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
       buildDefaultDragHandles: false,
-      onReorderItem: (oldIndex, newIndex) => ref
-          .read(categoriesStateProvider.notifier)
-          .reorder(kind, oldIndex, newIndex),
+      onReorderItem: (oldIndex, newIndex) => _reorder(context, ref, oldIndex, newIndex),
       children: [
+        // 左滑顯示編輯／刪除（Mike 手測回饋 2026-09-03），列上只留拖曳把手。
         for (var i = 0; i < categories.length; i++)
-          ListTile(
+          Slidable(
             key: ValueKey(categories[i].id),
-            leading: Icon(categoryIcon(categories[i].icon)),
-            title: Text(categories[i].name),
-            subtitle: categories[i].rollover ? const Text('累計 rollover') : null,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
+            endActionPane: ActionPane(
+              motion: const DrawerMotion(),
+              extentRatio: 0.34,
               children: [
-                IconButton(
-                  icon: const Icon(Icons.edit_outlined),
+                // 圓形 icon、無文字（Mike 裁示 2026-09-03）。
+                CircleSlideAction(
+                  icon: Icons.edit_outlined,
+                  background: Theme.of(context).colorScheme.secondaryContainer,
+                  foreground: Theme.of(context).colorScheme.onSecondaryContainer,
+                  tooltip: '編輯',
                   onPressed: () => showModalBottomSheet<void>(
                     context: context,
                     isScrollControlled: true,
@@ -93,35 +97,55 @@ class _CategoryReorderList extends ConsumerWidget {
                     ),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline),
+                CircleSlideAction(
+                  icon: Icons.delete_outline,
+                  background: Theme.of(context).colorScheme.errorContainer,
+                  foreground: Theme.of(context).colorScheme.onErrorContainer,
+                  tooltip: '刪除',
                   onPressed: () => _delete(context, ref, categories[i]),
                 ),
-                ReorderableDragStartListener(
-                  index: i,
-                  child: const Icon(Icons.drag_handle),
-                ),
               ],
+            ),
+            child: ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+              leading: Icon(categoryIcon(categories[i].icon), size: 20),
+              title: Text(categories[i].name),
+              trailing: ReorderableDragStartListener(
+                index: i,
+                child: const Icon(Icons.drag_handle),
+              ),
             ),
           ),
       ],
     );
   }
 
-  void _delete(BuildContext context, WidgetRef ref, Category c) {
+  Future<void> _reorder(BuildContext context, WidgetRef ref, int oldIndex, int newIndex) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await ref.read(categoriesStateProvider.notifier).reorder(kind, oldIndex, newIndex);
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(e is LedgerException ? e.message : '排序儲存失敗，請重試')),
+      );
+    }
+  }
+
+  Future<void> _delete(BuildContext context, WidgetRef ref, Category c) async {
+    final messenger = ScaffoldMessenger.of(context);
     final inUse = ref.read(entriesProvider).any((e) => e.categoryId == c.id);
     if (inUse) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('此分類已有帳目使用，無法刪除')));
+      messenger.showSnackBar(const SnackBar(content: Text('此分類已有帳目使用，無法刪除')));
       return;
     }
     try {
-      ref.read(categoriesStateProvider.notifier).remove(c.id);
-    } catch (_) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('刪除失敗，請重試')));
+      await ref.read(categoriesStateProvider.notifier).remove(c.id);
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text(e is LedgerException ? e.message : '刪除失敗，請重試')),
+      );
     }
   }
 }
@@ -142,8 +166,8 @@ class _CategoryEditorSheetState extends ConsumerState<_CategoryEditorSheet> {
     text: widget.existing?.name ?? '',
   );
   late String _icon = widget.existing?.icon ?? categoryIconNames.first;
-  late bool _rollover = widget.existing?.rollover ?? false;
   String? _error;
+  bool _saving = false;
 
   @override
   void dispose() {
@@ -151,19 +175,24 @@ class _CategoryEditorSheetState extends ConsumerState<_CategoryEditorSheet> {
     super.dispose();
   }
 
-  void _save() {
+  Future<void> _save() async {
+    if (_saving) return;
     final name = _nameController.text.trim();
     if (name.isEmpty) {
       setState(() => _error = '請輸入名稱');
       return;
     }
     final kind = widget.existing?.kind ?? widget.kind;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
     // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功直接 pop（本來就不彈 SnackBar）。
     try {
       final notifier = ref.read(categoriesStateProvider.notifier);
       if (widget.existing != null) {
         final c = widget.existing!;
-        notifier.update(
+        await notifier.update(
           Category(
             id: c.id,
             ledgerId: c.ledgerId,
@@ -171,32 +200,54 @@ class _CategoryEditorSheetState extends ConsumerState<_CategoryEditorSheet> {
             name: name,
             icon: _icon,
             sort: c.sort,
-            rollover: _rollover,
           ),
         );
       } else {
         final all = ref.read(categoriesProvider);
         final nextSort = all.where((c) => c.kind == kind).length;
-        notifier.add(
+        await notifier.add(
           Category(
-            id: 'c-${DateTime.now().microsecondsSinceEpoch}',
-            ledgerId: kLedgerId,
+            // id 留空＝新筆，由 repository（Supabase 由 DB）產生。
+            id: '',
+            ledgerId: ref.read(ledgerProvider).id,
             kind: kind,
             name: name,
             icon: _icon,
             sort: nextSort,
-            rollover: _rollover,
           ),
         );
       }
-      Navigator.of(context).pop();
-    } catch (_) {
-      setState(() => _error = '儲存失敗，請重試');
+      if (mounted) Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
+      });
     }
+  }
+
+  /// 步驟精靈（Mike 裁示 2026-09-03）：一次只秀一個要填的內容——步驟 0 名稱、步驟 1 圖示。
+  int _step = 0;
+
+  void _next() {
+    if (_step == 0) {
+      if (_nameController.text.trim().isEmpty) {
+        setState(() => _error = '請輸入名稱');
+        return;
+      }
+      setState(() {
+        _error = null;
+        _step = 1;
+      });
+      return;
+    }
+    _save();
   }
 
   @override
   Widget build(BuildContext context) {
+    final last = _step == 1;
     return Padding(
       padding: EdgeInsets.fromLTRB(
         16,
@@ -208,53 +259,71 @@ class _CategoryEditorSheetState extends ConsumerState<_CategoryEditorSheet> {
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              widget.existing == null ? '新增分類' : '編輯分類',
-              style: Theme.of(context).textTheme.titleLarge,
+            Row(
+              children: [
+                if (_step > 0)
+                  IconButton(
+                    key: const ValueKey('category-back-button'),
+                    icon: const Icon(Icons.arrow_back),
+                    onPressed: _saving ? null : () => setState(() => _step = 0),
+                  )
+                else
+                  const SizedBox(width: 48),
+                Expanded(
+                  child: Text(
+                    widget.existing == null ? '新增分類' : '編輯分類',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                SizedBox(
+                  width: 48,
+                  child: Text('${_step + 1}/2',
+                      textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall),
+                ),
+              ],
             ),
+            const SizedBox(height: 20),
+            Text(_step == 0 ? '名稱' : '圖示', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: 12),
-            TextField(
-              key: const ValueKey('category-name-field'),
-              controller: _nameController,
-              decoration: const InputDecoration(labelText: '名稱'),
-              autofocus: true,
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 160,
-              child: GridView.count(
-                crossAxisCount: 6,
-                mainAxisSpacing: 4,
-                crossAxisSpacing: 4,
-                children: [
-                  for (final name in categoryIconNames)
-                    InkWell(
-                      onTap: () => setState(() => _icon = name),
-                      child: Container(
-                        margin: const EdgeInsets.all(2),
-                        decoration: BoxDecoration(
-                          border: Border.all(
-                            color: _icon == name
-                                ? Theme.of(context).colorScheme.primary
-                                : Colors.transparent,
-                            width: 2,
+            if (_step == 0)
+              TextField(
+                key: const ValueKey('category-name-field'),
+                controller: _nameController,
+                decoration: const InputDecoration(isDense: true),
+                autofocus: true,
+                onSubmitted: (_) => _next(),
+              )
+            else
+              SizedBox(
+                height: 160,
+                child: GridView.count(
+                  crossAxisCount: 6,
+                  mainAxisSpacing: 4,
+                  crossAxisSpacing: 4,
+                  children: [
+                    for (final name in categoryIconNames)
+                      InkWell(
+                        onTap: () => setState(() => _icon = name),
+                        child: Container(
+                          margin: const EdgeInsets.all(2),
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: _icon == name
+                                  ? Theme.of(context).colorScheme.primary
+                                  : Colors.transparent,
+                              width: 2,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                          borderRadius: BorderRadius.circular(8),
+                          child: Icon(categoryIcon(name)),
                         ),
-                        child: Icon(categoryIcon(name)),
                       ),
-                    ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('累計 rollover'),
-              value: _rollover,
-              onChanged: (v) => setState(() => _rollover = v),
-            ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
@@ -263,12 +332,13 @@ class _CategoryEditorSheetState extends ConsumerState<_CategoryEditorSheet> {
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               ),
+            const SizedBox(height: 24),
             SizedBox(
               width: double.infinity,
               child: FilledButton(
                 key: const ValueKey('save-category-button'),
-                onPressed: _save,
-                child: const Text('儲存'),
+                onPressed: _saving ? null : _next,
+                child: Text(_saving ? '儲存中…' : (last ? '儲存' : '下一步')),
               ),
             ),
           ],

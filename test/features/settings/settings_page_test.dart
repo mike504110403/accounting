@@ -3,6 +3,7 @@ import 'package:accounting/app/theme_mode.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/settings/category_page.dart';
+import 'package:accounting/data/current_ledger.dart';
 import 'package:accounting/features/settings/settings_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -11,25 +12,32 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../support/fixtures.dart';
+
 class _ThrowingLedgerNotifier extends LedgerNotifier {
   @override
-  void update(Ledger l) => throw Exception('boom');
+  Future<void> update(Ledger l) => throw Exception('boom');
 }
 
 class _ThrowingCategoriesNotifier extends CategoriesNotifier {
   @override
-  void add(Category c) => throw Exception('boom');
+  Future<Category> add(Category c) => throw Exception('boom');
 }
 
 class _ThrowingMembersNotifier extends MembersNotifier {
   @override
-  void update(Member m) => throw Exception('boom');
+  Future<void> update(Member m) => throw Exception('boom');
 }
 
-Finder _rowIcon(String rowText, IconData icon) => find.descendant(
-      of: find.ancestor(of: find.text(rowText), matching: find.byType(ListTile)),
-      matching: find.byIcon(icon),
-    );
+/// 分類列改左滑顯示編輯／刪除（2026-09-03）：先把該列往左拖開 action pane，再點對應圖示。
+Future<void> _swipeRowAction(WidgetTester tester, String rowText, IconData icon) async {
+  final tile = find.ancestor(of: find.text(rowText), matching: find.byType(ListTile));
+  await tester.ensureVisible(tile);
+  await tester.drag(tile, const Offset(-220, 0));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byIcon(icon));
+  await tester.pumpAndSettle();
+}
 
 /// 帶最小 go_router（/settings、/settings/categories）的測試殼，比照真實 router.dart 的接法，
 /// 讓「分類管理」列的 context.push 能實際導頁。每次呼叫都建新的 GoRouter，測試之間不共用導頁狀態。
@@ -118,8 +126,7 @@ void main() {
     final container = await _pump(tester);
 
     await _openCategoryPage(tester);
-    await tester.tap(_rowIcon('食品', Icons.delete_outline));
-    await tester.pumpAndSettle();
+    await _swipeRowAction(tester, '食品', Icons.delete_outline);
 
     expect(find.text('此分類已有帳目使用，無法刪除'), findsOneWidget);
     expect(container.read(categoriesProvider).any((c) => c.id == 'c-food'), isTrue);
@@ -133,15 +140,16 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('add-category-expense')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const ValueKey('category-name-field')), '寵物');
+    // 步驟精靈：名稱 → 下一步 → 圖示 → 儲存（同一顆鈕）。
+    await tester.tap(find.byKey(const ValueKey('save-category-button')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('save-category-button')));
     await tester.pumpAndSettle();
 
     expect(find.text('寵物'), findsOneWidget);
     expect(container.read(categoriesProvider).length, before + 1);
 
-    await tester.ensureVisible(_rowIcon('寵物', Icons.delete_outline)); // 真主題列高較大，新列在 800×600 落到畫面外
-    await tester.tap(_rowIcon('寵物', Icons.delete_outline));
-    await tester.pumpAndSettle();
+    await _swipeRowAction(tester, '寵物', Icons.delete_outline);
 
     expect(find.text('寵物'), findsNothing);
     expect(container.read(categoriesProvider).length, before);
@@ -151,9 +159,10 @@ void main() {
     final container = await _pump(tester);
 
     await _openCategoryPage(tester);
-    await tester.tap(_rowIcon('交通', Icons.edit_outlined));
-    await tester.pumpAndSettle();
+    await _swipeRowAction(tester, '交通', Icons.edit_outlined);
     await tester.enterText(find.byKey(const ValueKey('category-name-field')), '交通費');
+    await tester.tap(find.byKey(const ValueKey('save-category-button')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('save-category-button')));
     await tester.pumpAndSettle();
 
@@ -198,16 +207,55 @@ void main() {
     expect(find.text('已複製邀請碼'), findsOneWidget);
   });
 
-  testWidgets('帳本切換 sheet：說明文字拿掉，目前帳本改單行標籤在左值在右', (tester) async {
+  testWidgets('帳本切換 sheet：列出所屬帳本，目前那本打勾且不可再點', (tester) async {
     await _pump(tester);
 
     await tester.tap(find.text('帳本切換'));
     await tester.pumpAndSettle();
 
-    expect(find.text('目前帳本'), findsOneWidget);
-    // 主頁「帳本名稱」列＋「帳本切換」列的摘要值，加上 sheet 內「目前帳本」的值，都是同一個 ledger.name。
-    expect(find.text('我們的家'), findsNWidgets(3));
-    expect(find.text('加入其他帳本'), findsNothing); // 舊的說明文字已拿掉，欄位靠自己的 labelText 表意
+    final option = find.byKey(const ValueKey('ledger-option-$kLedgerId'));
+    expect(option, findsOneWidget);
+    expect(find.descendant(of: option, matching: find.byIcon(Icons.check_circle)), findsOneWidget);
+    expect(tester.widget<ListTile>(option).enabled, isFalse, reason: '已經在這本了，不該還能點');
+    expect(find.text('加入其他帳本'), findsNothing); // 說明文字拿掉，欄位靠自己的 labelText 表意
+  });
+
+  testWidgets('帳本切換 sheet：加入帳本用正確的 10 碼邀請碼可切過去', (tester) async {
+    final other = Ledger(
+      id: 'ledger-2',
+      name: '第二本',
+      inviteCode: 'BBBBBBBBBB',
+      defaultRatio: const {kMeId: 100},
+    );
+    final container = ProviderContainer(overrides: [
+      ledgerRepositoryProvider.overrideWithValue(repoWith(ledger: other, entries: const [], settlements: const [])),
+    ]);
+    await _pump(tester, container);
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byKey(const ValueKey('join-code-field')), 'bbbbbbbbbb');
+    await tester.tap(find.byKey(const ValueKey('join-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('join-code-field')), findsNothing, reason: '成功後 sheet 收掉');
+    expect(container.read(currentLedgerIdProvider), 'ledger-2');
+  });
+
+  testWidgets('帳本切換 sheet：新增帳本走 create_ledger，切到新帳本', (tester) async {
+    final container = ProviderContainer();
+    await _pump(tester, container);
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('new-ledger-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('new-ledger-name-field')), '小家庭');
+    await tester.tap(find.byKey(const ValueKey('create-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(container.read(ledgerProvider).name, '小家庭');
+    expect(container.read(entriesProvider), isEmpty, reason: '換帳本＝整份快照換掉，不得殘留上一本的帳目');
   });
 
   testWidgets('期初餘額列的值文字不被攔腰截斷（MAJOR-1：Spacer+Flexible 平分寬度的舊 bug，取最緊的樣本列）', (tester) async {
@@ -267,11 +315,15 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('add-category-expense')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const ValueKey('category-name-field')), '寵物');
+    // 步驟精靈：名稱 → 下一步 → 圖示 → 儲存（同一顆鈕）。
+    await tester.tap(find.byKey(const ValueKey('save-category-button')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('save-category-button')));
     await tester.pumpAndSettle();
 
     expect(find.text('儲存失敗，請重試'), findsOneWidget);
-    expect(find.byKey(const ValueKey('category-name-field')), findsOneWidget); // sheet 沒關
+    // sheet 沒關（步驟精靈停在圖示步，名稱欄不在畫面上，改驗儲存鈕仍在）。
+    expect(find.byKey(const ValueKey('save-category-button')), findsOneWidget);
     expect(container.read(categoriesProvider).length, before);
   });
 
@@ -293,22 +345,41 @@ void main() {
     expect(container.read(ledgerProvider).openingBalanceShared, sharedBefore);
   });
 
-  testWidgets('帳本切換 sheet：驗證錯誤用 error 色、波 2 提示用一般色，兩者互斥', (tester) async {
-    await _pump(tester);
+  testWidgets('帳本切換 sheet：碼長不對與錯碼都用 error 色顯示在 sheet 內，不切帳本', (tester) async {
+    final container = ProviderContainer();
+    await _pump(tester, container);
     await tester.tap(find.text('帳本切換'));
     await tester.pumpAndSettle();
-    final errorColor = Theme.of(tester.element(find.text('加入'))).colorScheme.error; // 「帳本切換」同時是設定列與 sheet 標題，拿 sheet 內獨有的元素取主題
+    // 「帳本切換」同時是設定列與 sheet 標題，拿 sheet 內獨有的元素取主題
+    final errorColor = Theme.of(tester.element(find.text('加入'))).colorScheme.error;
 
     await tester.tap(find.text('加入')); // 空碼
     await tester.pumpAndSettle();
-    final errorText = tester.widget<Text>(find.text('請輸入 6 碼邀請碼'));
-    expect(errorText.style?.color, errorColor);
+    expect(tester.widget<Text>(find.text('請輸入 10 碼邀請碼')).style?.color, errorColor);
 
-    await tester.tap(find.text('新增帳本'));
+    await tester.enterText(find.byKey(const ValueKey('join-code-field')), 'ZZZZZZZZZZ');
+    await tester.tap(find.byKey(const ValueKey('join-ledger-button')));
     await tester.pumpAndSettle();
-    expect(find.text('請輸入 6 碼邀請碼'), findsNothing);
-    final infoText = tester.widget<Text>(find.text('波 2 接後端'));
-    expect(infoText.style?.color, isNot(errorColor));
+    expect(find.text('請輸入 10 碼邀請碼'), findsNothing);
+    expect(tester.widget<Text>(find.text('邀請碼不正確')).style?.color, errorColor);
+    expect(find.byKey(const ValueKey('join-code-field')), findsOneWidget, reason: '失敗不關 sheet');
+    expect(container.read(ledgerProvider).id, kLedgerId, reason: '錯碼不該切走');
+  });
+
+  testWidgets('邀請碼列：顯示 10 碼，「重新產生」換一組新碼', (tester) async {
+    final container = ProviderContainer();
+    await _pump(tester, container);
+    final before = container.read(ledgerProvider).inviteCode;
+    expect(before.length, 10);
+    expect(find.text(before), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('rotate-invite-code')));
+    await tester.pumpAndSettle();
+
+    final after = container.read(ledgerProvider).inviteCode;
+    expect(after.length, 10);
+    expect(after, isNot(before));
+    expect(find.text(after), findsOneWidget);
   });
 
   testWidgets('切夜晚後 themeModeProvider 為 dark', (tester) async {

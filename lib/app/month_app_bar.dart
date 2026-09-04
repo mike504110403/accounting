@@ -15,6 +15,7 @@ class MonthAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onViewChanged,
     this.leading,
     this.actions,
+    this.toggleKey,
   });
 
   final DateTime month;
@@ -23,6 +24,9 @@ class MonthAppBar extends StatelessWidget implements PreferredSizeWidget {
   final ValueChanged<ViewMode> onViewChanged;
   final Widget? leading;
   final List<Widget>? actions;
+
+  /// 新手導覽聚焦用（只有帳目頁傳；GlobalKey 不能同時掛在兩頁）。
+  final Key? toggleKey;
 
   static const double toggleHeight = 56;
 
@@ -42,7 +46,7 @@ class MonthAppBar extends StatelessWidget implements PreferredSizeWidget {
         preferredSize: const Size.fromHeight(toggleHeight),
         child: SizedBox(
           height: toggleHeight,
-          child: ViewModeToggle(value: view, onChanged: onViewChanged),
+          child: KeyedSubtree(key: toggleKey, child: ViewModeToggle(value: view, onChanged: onViewChanged)),
         ),
       ),
     );

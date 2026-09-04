@@ -3,7 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/format.dart';
 import '../../app/month_app_bar.dart';
-import '../../domain/budget_math.dart';
+import '../../domain/balance_math.dart';
+import '../../data/month_summary_provider.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import 'pie_card.dart';
@@ -12,7 +13,7 @@ import 'trend_card.dart';
 import 'trend_math.dart';
 import 'view_math.dart';
 
-/// 統計頁：月摘要、支出圓餅、四條趨勢線；家庭／個人兩視角（ADR-0003）。
+/// 統計頁：月摘要、支出圓餅、三條趨勢線；家庭／個人兩視角（ADR-0003、ADR-0007）。
 class StatsPage extends ConsumerStatefulWidget {
   const StatsPage({super.key});
 
@@ -62,22 +63,44 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final members = ref.watch(membersProvider);
     final categories = ref.watch(categoriesProvider);
     final entries = ref.watch(entriesProvider);
-    final budgets = ref.watch(budgetsProvider);
+    final allocations = ref.watch(allocationsProvider);
+    final settlements = ref.watch(settlementsProvider);
 
-    Member? meMember;
+    Member? found;
     for (final m in members) {
-      if (m.id == me) meMember = m;
+      if (m.id == me) found = m;
     }
+    // final 才能在下面的 closure 裡吃到型別提升（非 final 的區域變數在 closure 內不提升）。
+    final meMember = found;
 
     final personal = _mode == ViewMode.personal;
     final items = viewEntries(entries, _mode, me, ledger.defaultRatio);
-    final opening = personal
-        ? (meMember?.openingBalancePersonal ?? 0)
-        : ledger.openingBalanceShared;
-    // 個人視角的花費是我的份額，預算線同步折算成我的份額上限。
-    final budgetShare = personal ? (ledger.defaultRatio[me] ?? 0) / 100.0 : 1.0;
 
-    final summary = monthSummary(items: items, month: _month, opening: opening);
+    // 可用餘額（ADR-0007，v1.3）：家庭＝共同可用餘額、個人＝個人可用餘額。
+    // 月摘要與趨勢的餘額線吃同一個函式，避免兩處各自判斷視角、算出兩套答案。
+    final int Function(DateTime until) balanceAt = personal
+        ? (until) => meMember == null
+            ? 0
+            : personalAvailable(
+                member: meMember,
+                entries: entries,
+                settlements: settlements,
+                until: until,
+              )
+        : (until) => sharedAvailable(
+              ledger: ledger,
+              entries: entries,
+              allocations: allocations,
+              until: until,
+            );
+
+    // 月摘要卡的可用餘額改吃 DB month_summary（Mike 裁示 2026-09-03）；趨勢線的
+    // 逐桶餘額仍是前端依 server 列現算（逐桶打 RPC 成本過高，已記驗證債）。
+    final server = ref.watch(monthSummaryProvider(lastDayOfMonth(_month))).value;
+    final int Function(DateTime until) cardBalanceAt = server == null
+        ? balanceAt
+        : (_) => personal ? (server.personalBalance ?? 0) : server.sharedAvailable;
+    final summary = monthSummary(items: items, month: _month, balanceAt: cardBalanceAt);
 
     final weeks = weekRangesOfMonth(_month);
     final week = _resolveWeek(weeks);
@@ -96,14 +119,27 @@ class _StatsPageState extends ConsumerState<StatsPage> {
         if (c.kind == EntryKind.expense) c,
     ];
 
+    // 超支線的視角差異（ADR-0007）：家庭＝當月超支合計；個人沒有信封，恆 0。
+    // 餘額線與月摘要共用上面算好的 balanceAt。
     final trendInput = TrendInput(
       items: items,
       categories: categories,
-      budgets: budgets,
-      // 預算上限是帳本設定，rollover 鏈一律用共同帳的實際支出算，不隨視角變。
-      rolloverBasis: entries.where((e) => e.scope == EntryScope.shared).toList(),
-      opening: opening,
-      budgetShare: budgetShare,
+      balanceAt: balanceAt,
+      overspendAt: personal
+          ? (_) => 0
+          : (until) => totalOverspend(
+                entries: entries,
+                allocations: allocations,
+                until: until,
+              ),
+      categoryOverspendAt: personal
+          ? (_, _) => 0
+          : (categoryId, until) => overspend(
+                allocations: allocations,
+                entries: entries,
+                categoryId: categoryId,
+                until: until,
+              ),
     );
     final buckets = bucketize(trendInput, _granularity, _month);
     final byCategory = bucketizeByCategory(trendInput, _granularity, _month);
@@ -143,6 +179,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
               expenseCategories: expenseCats,
               granularity: _granularity,
               onGranularityChanged: (v) => setState(() => _granularity = v),
+              viewMode: _mode,
             ),
           ],
         ),
@@ -201,18 +238,29 @@ class _SummaryCard extends StatelessWidget {
     final cs = theme.colorScheme;
     return StatsCard(
       title: '月摘要',
-      // 資訊密度：一列四格數字，不加說明文字。
-      child: Row(
+      // 兩行各兩格（Mike 裁示 2026-09-03）：上行收入／支出、下行損益／可用餘額。
+      child: Column(
         key: const Key('month-summary'),
         children: [
-          _Figure(label: '收入', value: summary.income, color: cs.primary),
-          _Figure(label: '支出', value: summary.expense, color: cs.error),
-          _Figure(
-            label: '損益',
-            value: summary.net,
-            color: summary.net >= 0 ? cs.primary : cs.error,
+          Row(
+            children: [
+              _Figure(label: '收入', value: summary.income, color: cs.primary),
+              _Figure(label: '支出', value: summary.expense, color: cs.error),
+            ],
           ),
-          _Figure(label: '餘額', value: summary.balance, color: cs.onSurface),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              _Figure(
+                label: '損益',
+                value: summary.net,
+                color: summary.net >= 0 ? cs.primary : cs.error,
+              ),
+              // 標籤字只留一份：直接借趨勢餘額線的 label，不依視角變（個人視角也是
+              // 「個人可用餘額」），兩處同字用同一個 source，不會各自漂移。
+              _Figure(label: TrendLine.balance.label, value: summary.balance, color: cs.onSurface),
+            ],
+          ),
         ],
       ),
     );

@@ -2,18 +2,12 @@
 /// 不含 UI；供 widget 呼叫，也直接被單元測試覆蓋。
 library;
 
+import '../../domain/balance_math.dart';
 import '../../domain/models.dart';
+import '../entries/split_math.dart';
 
 /// 沒有店家的購物項目分組標籤。
 const kNoStoreLabel = '未分店家';
-
-int _seq = 0;
-
-/// 產生本機端唯一 id（波 1 記憶體 repository 用；波 2 換 Supabase 後由 DB 產生）。
-String newListId(String prefix) {
-  _seq++;
-  return '$prefix-${DateTime.now().microsecondsSinceEpoch}-$_seq';
-}
 
 /// 依 `store` 分組（null → [kNoStoreLabel]），組內依 `sort` 排序；
 /// 分組本身依店名字母序，[kNoStoreLabel] 固定排最後。
@@ -40,6 +34,8 @@ Map<String, List<ListItem>> groupByStore(List<ListItem> items) {
 /// - `total` 由呼叫端決定（可手改，ADR-0001 允許與細項加總有差額）。
 /// - note 用第一個有填店家的項目店名，都沒有則「購物」。
 /// - 依 ADR-0005 新增共同支出預設：payer 共同錢包、split common。
+/// - funding 依 [defaultFunding]（該分類在結帳當月有撥款 → budget，否則 balance）；
+///   多項結帳同一分類，規則對整批一致套用。
 Entry buildEntryFromItems({
   required List<ListItem> items,
   required Map<String, int> actuals,
@@ -48,9 +44,18 @@ Entry buildEntryFromItems({
   required DateTime date,
   required String ledgerId,
   required String me,
+  required Iterable<BudgetAllocation> allocations,
+  // 結帳方式（Mike 裁示 2026-09-04：與支出表單同一組選項）。
+  String? payerId, // null＝共同錢包
+  SplitMethod splitMethod = SplitMethod.common,
+  Funding? funding, // null＝共同錢包依 defaultFunding；代墊一律 balance（Entry 不變式）
+  List<Member> members = const [],
+  Map<String, int> ratio = const {},
+  Map<String, int> manual = const {},
 }) {
   assert(items.isNotEmpty);
-  final entryId = newListId('e');
+  // id 一律留空字串＝新筆，交給 repository（Supabase 由 DB）產生。
+  const entryId = '';
   String? storeName;
   for (final item in items) {
     if (item.store != null && item.store!.isNotEmpty) {
@@ -61,13 +66,19 @@ Entry buildEntryFromItems({
   final lineItems = <LineItem>[
     for (var i = 0; i < items.length; i++)
       LineItem(
-        id: newListId('li'),
+        id: '',
         entryId: entryId,
         name: items[i].title,
         amount: actuals[items[i].id] ?? items[i].estimated ?? 0,
         sort: i,
       ),
   ];
+  final splits = payerId == null
+      ? const <EntrySplit>[]
+      : toEntrySplits(
+          entryId,
+          buildSplits(amount: total, method: splitMethod, members: members, ratio: ratio, manual: manual),
+        );
   return Entry(
     id: entryId,
     ledgerId: ledgerId,
@@ -78,7 +89,12 @@ Entry buildEntryFromItems({
     occurredOn: date,
     createdBy: me,
     note: storeName ?? '購物',
-    splitMethod: SplitMethod.common,
+    payerId: payerId,
+    splitMethod: payerId == null ? SplitMethod.common : splitMethod,
+    funding: payerId != null
+        ? Funding.balance
+        : (funding ?? defaultFunding(allocations: allocations, categoryId: categoryId, month: date)),
+    splits: splits,
     lineItems: lineItems,
   );
 }
@@ -128,17 +144,4 @@ int resolveDoneAmount(ListItem item, List<Entry> entries, List<ListItem> allItem
     return sameNameLineItems[rank].amount ?? entry.amount;
   }
   return entry.amount;
-}
-
-/// 待辦到期狀態：過期、3 天內即將到期、正常、無到期日。
-enum DueStatus { none, overdue, soon, normal }
-
-DueStatus dueStatus(DateTime? dueOn, DateTime now) {
-  if (dueOn == null) return DueStatus.none;
-  final today = DateTime(now.year, now.month, now.day);
-  final due = DateTime(dueOn.year, dueOn.month, dueOn.day);
-  final diffDays = due.difference(today).inDays;
-  if (diffDays < 0) return DueStatus.overdue;
-  if (diffDays <= 3) return DueStatus.soon;
-  return DueStatus.normal;
 }
