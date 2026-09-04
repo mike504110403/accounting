@@ -2,7 +2,7 @@
 # https://supabase.com/docs/guides/local-development/cli/config
 # A string used to distinguish different Supabase projects on the same host. Defaults to the
 # working directory name when running `supabase init`.
-# project_id 決定地端容器與 volume 的名字（supabase_db_<project_id> …）。
+# project_id 決定地端容器與 volume 的名字（supabase_db_<project_id> …）。統一為 accounting（2026-09-04 Mike 裁示：永遠同一組）。
 # 這個檔案進 git，所以**每個 worktree 的 project_id 都一樣**，也就是所有 worktree
 # 共用同一組地端容器。因此：
 #   * 同一時間只能從一個 worktree 操作地端棧（start / stop / db reset）。
@@ -10,7 +10,7 @@
 #     因為那個目錄的 supabase/.temp（CLI 狀態，gitignore）跟正在跑的容器對不上。
 #   * 已經 `supabase link` 過的 worktree 更要小心：在那裡下 db reset 有打到雲端的風險。
 # 地端棧目前由 accounting-wt-db 這個 worktree 起的。
-project_id = "accounting-wt-db"
+project_id = "accounting"
 
 [api]
 enabled = true

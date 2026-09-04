@@ -810,6 +810,18 @@ void main() {
     expect(e.lineItems.single.name, '蛋');
   });
 
+  testWidgets('分類選擇器：點側邊 icon 聚焦即選中', (tester) async {
+    await pumpApp(tester);
+    await openNewForm(tester);
+    final wheelF = find.byKey(const Key('category-wheel'));
+    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-food');
+
+    // 「餐飲」在側邊：點它要動畫聚焦過去並成為選中。
+    await tester.tap(find.descendant(of: wheelF, matching: find.text('餐飲')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-dining');
+  });
+
   testWidgets('分類滾輪預設選第一個分類：不動分類直接存 → categoryId=食品', (tester) async {
     final c = await pumpApp(tester);
     final before = c.read(entriesProvider).length;

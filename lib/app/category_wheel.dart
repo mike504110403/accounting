@@ -86,7 +86,15 @@ class _CategoryWheelState extends State<CategoryWheel> {
           itemBuilder: (_, i) {
             final c = widget.categories[i % _n];
             final selected = c.id == widget.selectedId;
-            return Center(
+            return GestureDetector(
+              // 點側邊 icon 也要聚焦過去（Mike 裁示 2026-09-04）：動畫捲到該頁即選中。
+              behavior: HitTestBehavior.opaque,
+              onTap: () => _controller.animateToPage(
+                i,
+                duration: const Duration(milliseconds: 250),
+                curve: Curves.easeOut,
+              ),
+              child: Center(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -115,6 +123,7 @@ class _CategoryWheelState extends State<CategoryWheel> {
                     ),
                   ),
                 ],
+              ),
               ),
             );
           },

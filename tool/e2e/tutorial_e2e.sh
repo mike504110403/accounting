@@ -22,16 +22,24 @@ sleep 8
 PW eval "() => { const el = document.querySelector('flt-semantics-placeholder'); if (el) el.click(); return 'ok'; }" >/dev/null
 sleep 3
 
-ACCT="e2e-tut-$(date +%s)@example.com"
+# 固定測試帳號（Mike 裁示 2026-09-04：不要每次開新的）；瀏覽器資料每次清空，
+# 導覽照樣從頭跑（tutorialDone 記在 localStorage）。帳號第一次跑會自動註冊＋建帳本。
+ACCT="e2e-tutorial@example.com"
 echo "帳號: $ACCT"
 click_ref 'textbox "Email"'; PW type "$ACCT" >/dev/null
 click_ref 'textbox "密碼"'; PW type "testtest123" >/dev/null
-click_ref 'button "註冊新帳號"'; sleep 6
-must 'button "建立新帳本' '首登關 0：二選一'
-click_ref 'button "建立新帳本'; sleep 2
-click_ref 'button "建立帳本"'; sleep 6
-must 'button "分享邀請"' '建立後停在分享關（邀請碼＋分享鈕）'
-click_ref 'button "開始使用"'; sleep 5
+click_ref 'button "登入"'; sleep 6
+if PW snapshot 2>/dev/null | grep -qE 'button "登入"'; then
+  # 還在登入頁＝帳號不存在：走註冊＋首登（僅首次會經過這段）
+  click_ref 'button "註冊新帳號"'; sleep 6
+  must 'button "建立新帳本' '首登關 0：二選一'
+  click_ref 'button "建立新帳本'; sleep 2
+  click_ref 'button "建立帳本"'; sleep 6
+  must 'button "分享邀請"' '建立後停在分享關（邀請碼＋分享鈕）'
+  click_ref 'button "開始使用"'; sleep 5
+else
+  echo 'OK: 既有測試帳號直接登入（略過註冊/首登段）'
+fi
 
 must '記帳入口 1/12' '導覽自動開場（步 1）'
 click_ref 'button "下一步"'; sleep 2
