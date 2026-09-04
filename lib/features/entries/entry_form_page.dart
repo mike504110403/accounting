@@ -19,8 +19,11 @@ import 'split_math.dart';
 /// 版面依 spec v1.1「資訊密度」：單一平面列表、細標題分段、說明只在錯誤時出現、
 /// 折疊區收起只留一行摘要、儲存鈕固定在底部。
 class EntryFormPage extends ConsumerStatefulWidget {
-  const EntryFormPage({super.key, this.entryId, this.template, this.readOnly = false});
+  const EntryFormPage({super.key, this.entryId, this.template, this.readOnly = false, this.startEdit = false});
   final String? entryId;
+
+  /// 進明細後立刻啟動「編輯＝沖銷重記」流程（左滑「編輯」帶進來）。
+  final bool startEdit;
 
   /// 點列表進來＝唯讀明細（欄位全 disable，細項可展開）；左滑「編輯」才進可編輯模式。
   final bool readOnly;
@@ -129,6 +132,10 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         _note.text = tpl.note;
         _payerId = tpl.scope == EntryScope.private ? tpl.createdBy : tpl.payerId;
         _method = tpl.splitMethod;
+        if (tpl.fromBudget && tpl.payerId == null) {
+          _funding = Funding.budget;
+          _fundingTouched = true;
+        }
         for (final li in tpl.lineItems) {
           _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
         }
@@ -153,7 +160,12 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       return;
     }
     _original = found;
-    _step = _confirmStep; // 編輯：直接進單頁精簡明細（Mike 裁示 2026-09-03），點欄位開彈窗改
+    _step = _confirmStep; // 進來＝單頁明細
+    if (widget.startEdit) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _reverseAndRedo();
+      });
+    }
     _kind = found.kind;
     _scope = found.scope;
     _amount.text = found.amount.toString();
@@ -495,14 +507,15 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
         title: Text(_original == null ? '新增' : (_readOnly ? '明細' : '編輯')),
         leading: IconButton(icon: const Icon(Icons.close), tooltip: '關閉', onPressed: () => context.pop()),
         actions: [
-          if (_readOnly)
+          if (_readOnly && !(_original?.isAdjustment ?? false))
             IconButton(
               key: const Key('enter-edit'),
               icon: const Icon(Icons.edit_outlined),
-              tooltip: '編輯',
-              onPressed: () => context.pushReplacement('/entries/${widget.entryId}?edit=1'),
+              tooltip: '編輯（沖銷重記）',
+              onPressed: _saving ? null : _reverseAndRedo,
             ),
-          if (_original != null && !_readOnly && !_locked)
+          // 刪除入口移到唯讀明細（編輯模式已由沖銷重記取代）；結算中仍鎖。
+          if (_original != null && _readOnly && !_locked)
             PopupMenuButton<String>(
               key: const Key('entry-menu'),
               onSelected: (v) {
@@ -813,7 +826,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       ),
 
     ];
-    final reversed = editing && _settled && hasReversal(ref.watch(entriesProvider), _original!);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -881,37 +893,32 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ],
             ),
           ),
-        if (editing && _settled) ...[
-          const SizedBox(height: 16),
-          OutlinedButton.icon(
-            key: const Key('reverse-entry'),
-            icon: const Icon(Icons.undo, size: 18),
-            onPressed: reversed || _saving ? null : _reverseAndRedo,
-            label: Text(reversed ? '已沖銷' : '沖銷並重新記一筆'),
-          ),
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text(
-              reversed
-                  ? '這筆已有反向紀錄；如需再記，直接新增即可。'
-                  : '會先記一筆一模一樣的反向紀錄（拆帳、預算、餘額沿原路回退），再帶你用原資訊重新記一筆。',
-              textAlign: TextAlign.center,
-              style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
-            ),
-          ),
-        ],
       ],
     );
   }
 
-  /// 沖銷（Mike 裁示 2026-09-04）：寫入反向紀錄 → 帶原資訊進「新增」精靈重記。
+  /// 編輯＝沖銷重記（Mike 裁示 2026-09-04 第二版，適用所有筆）：
+  /// 原筆保留（標已沖銷）→ 寫入等額反向紀錄（分攤／預算／餘額沿原路回退）→
+  /// 帶原資訊進「新增」精靈重記成新的一筆。結算中與沖銷紀錄本身不可編輯。
   Future<void> _reverseAndRedo() async {
     final orig = _original!;
+    if (orig.isAdjustment) {
+      _toast('沖銷紀錄不可編輯');
+      return;
+    }
+    if (_settling) {
+      _toast('結算中不可編輯，簽核完成後再處理');
+      return;
+    }
+    if (hasReversal(ref.read(entriesProvider), orig)) {
+      _toast('這筆已沖銷過；直接新增即可');
+      return;
+    }
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('沖銷這筆帳目？'),
-        content: const Text('會新增一筆等額反向的紀錄把它整筆抵銷（分攤與預算一併回退），接著用原資訊重新記一筆。'),
+        title: const Text('編輯這筆帳目？'),
+        content: const Text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（分攤與預算一併回退），接著用原資訊重新記一筆。'),
         actions: [
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
           FilledButton(

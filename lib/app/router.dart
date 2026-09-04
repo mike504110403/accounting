@@ -74,7 +74,7 @@ final routerProvider = Provider<GoRouter>((ref) {
               builder: (_, _) => const EntriesPage(),
               routes: [
                 GoRoute(path: 'new', builder: (_, state) => EntryFormPage(template: state.extra as Entry?)),
-                GoRoute(path: ':id', builder: (_, s) => EntryFormPage(entryId: s.pathParameters['id'], readOnly: s.uri.queryParameters['edit'] != '1')),
+                GoRoute(path: ':id', builder: (_, s) => EntryFormPage(entryId: s.pathParameters['id'], readOnly: true, startEdit: s.uri.queryParameters['edit'] == '1')),
               ],
             ),
           ]),
