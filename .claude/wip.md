@@ -1,6 +1,6 @@
 # WIP — accounting 記帳 app（/mega）
 
-更新：2026-09-04（波 2 已合併 dev 5464b01；三清完成；接續小任務中）
+更新：2026-09-04 傍晚（手測迭代收斂；iOS TestFlight 首發流程進行中）
 
 ## 任務背景與目標
 
@@ -36,9 +36,9 @@
 
 ## 待 Mike 裁示
 
-- 雲端 dev 關 signup：兩人帳號建好後在 dashboard 關（anon key 公開，任何人可註冊，RLS 擋資料）。建議：手測建完帳號就關。
-- Apple 登入：要 Services ID＋Key。建議：iOS 階段再設。
+- 雲端 dev＋prod 關 signup：帳號建好後在 dashboard 關（anon key 公開，任何人可註冊，RLS 擋資料）。建議：家人帳號建完就關。
 - 統計第一列 6 顆按鈕 390px 偏擠：建議看實機；不順眼一行改回兩列。
+- ~~Apple 登入~~ 已解：原生 id-token 流程不需 Services ID，prod/dev provider 已開。
 
 ## 手測回饋迭代（2026-09-03～04，全部已合入 feature/wave2 並過測試）
 
@@ -59,11 +59,23 @@
   （SQL 測試＋rls 白名單，雲端 dev 已 push、anon 401 驗過），預算頁／撥款 sheet／統計月摘要吃 server 值。
 - 驗證債見 ledger（趨勢逐桶仍前端算、settled_at UTC 邊界、複製上月金額前端加總）。
 
+## 09-04 下午～傍晚新增（全部落 dev、逐輪過全套測試）
+
+- 分類選擇改橫向無限循環滾輪（viewport 1/5、點擊聚焦動畫；`lib/app/category_wheel.dart`），表單／編輯／結帳共用。
+- 篩選 chips 自建 pill 取代 InputChip（截斷免疫）；全站金額欄 digitsOnly＋數字鍵盤。
+- 修正筆功能移除 → 「編輯＝沖銷重記」全面化：所有編輯走 原筆保留＋反向沖銷筆＋新筆 三筆軌跡（note 帶 #id前8碼 配對；`reversal.dart`）；列表被沖銷紅、沖銷藍、劃線；**沖銷/被沖銷不可編輯不可刪**（列表滑動整排拿掉＋明細鉛筆/刪除拿掉）。
+- 撥款流水固定 5 列高可捲、細項固定 3 列倒序可捲；列表點擊＝唯讀明細（disable、細項點擊向下展開於細項列正下方）；左滑刪除取代 X 按鈕。
+- 帳目列表家庭/個人分離：個人 tab 只看 private own 筆。
+- 鍵盤彈起表單頂對齊不擋欄位；SW controllerchange 自動 reload＋BUILD_STAMP（設定頁頁腳可對版本）。
+- e2e 固定測試帳號 e2e-tutorial@example.com；Docker supabase 棧瘦身統一。
+- **紀律**：release build 會弄壞同目錄跑著的 dev server → 每次 `tool/build_web.sh` 後必重啟 8787；ngrok 綁 8788（release 靜態）。
+- **iOS/TestFlight（進行中）**：bundle `com.mikelin.accounting`（Team DDMW7327JC）、SIWA capability＋entitlements、原生 Sign in with Apple（nonce＋signInWithIdToken；iOS 登入頁只放 Apple）、dist 憑證＋AppStore profile（fastlane cert/sigh）、`tool/build_ios.sh` 注入 prod。**Supabase prod 建好**：ref jcvichjhryczvlvkdsjj（東京）、26 migrations 全推、autoconfirm 開、Apple provider 開；憑證在 `~/mike/supabase/prod.env`、ASC 金鑰在 `~/mike/asc/`（Admin key 7FCJX2X2C7）。上架前雙審查（app-store-review＋OWASP）無 BLOCKER，M-1/m-5/m-10 已修（0904-1714）；M-2 帳號刪除、M-3 隱私政策、M-4 token 進 Keychain 記 ledger。ASC app record「accounting by mike」（id 6808578728）已建，ipa 已上傳，等 processing → 掛內部測試群組。
+
 ## 下一步
 
-1. /ship：052ecfa 已推 origin（2026-09-04）；0026 commit 待下批 push。
+1. /ship：052ecfa 已推 origin；之後整個下午的 commits（至沖銷鎖刪＋iOS 設定）未推，等 Mike 說「推」。
 2. ~~replica identity full migration~~ 已完成（0026 雲端已 push＋驗證、db review 過、前端拆補丁）。
-3. 待辦池（見 2026-09-04 盤點回報）：Apple provider 後台設定（要 Mike 的 Apple Developer 資料）、iOS 打包＋home indicator padding、刪帳本 RPC、prod 專案、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）。
+3. 待辦池：TestFlight build 掛測試群組＋Mike 實機驗、iOS home indicator padding（5 個 sheet）、帳號刪除＋刪帳本 RPC 合併做、隱私政策頁、token 進 Keychain、關 signup、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）、UI 現代化掃尾（隨 Mike 截圖迭代）。
 
 ## 環境備忘
 
