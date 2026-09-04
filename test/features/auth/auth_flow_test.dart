@@ -11,6 +11,7 @@ import 'package:accounting/features/auth/login_page.dart';
 import 'package:accounting/features/auth/onboarding_page.dart';
 import 'package:accounting/features/entries/entries_page.dart';
 import 'package:accounting/main.dart';
+import 'package:flutter/foundation.dart' show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -125,6 +126,22 @@ void main() {
 
       expect(tester.widget<Text>(find.byKey(const Key('login-error'))).data, 'Apple 登入尚未啟用');
       expect(find.byType(LoginPage), findsOneWidget);
+    });
+
+    testWidgets('iOS 只放 Apple 登入：email／密碼／註冊整段藏起來（Mike 裁示 2026-09-04）', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await pumpApp(tester, signedOutContainer());
+
+        expect(find.byKey(const Key('apple-signin-button')), findsOneWidget);
+        expect(find.byKey(const Key('login-email-field')), findsNothing);
+        expect(find.byKey(const Key('login-password-field')), findsNothing);
+        expect(find.byKey(const Key('login-button')), findsNothing);
+        expect(find.byKey(const Key('signup-button')), findsNothing);
+      } finally {
+        // 一定要在測試本體內歸零：framework 的 invariant 檢查跑在 tearDown 之前。
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 

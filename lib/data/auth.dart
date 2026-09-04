@@ -6,8 +6,13 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../app/theme_mode.dart' show sharedPrefsProvider;
@@ -67,9 +72,47 @@ class SupabaseAuthService implements AuthService {
   Future<void> signUp({required String email, required String password}) =>
       guard(() => _client.auth.signUp(email: email, password: password));
 
+  /// iOS/macOS 走原生 Sign in with Apple（TestFlight 版唯一登入方式），
+  /// 其餘平台照舊走 OAuth redirect。
+  /// nonce 防重放：原文交給 Supabase 驗、SHA-256 雜湊交給 Apple 簽進 id token。
   @override
-  Future<void> signInWithApple() =>
-      guard(() => _client.auth.signInWithOAuth(OAuthProvider.apple, redirectTo: redirectTo));
+  Future<void> signInWithApple() => guard(() async {
+        final native = !kIsWeb &&
+            (defaultTargetPlatform == TargetPlatform.iOS ||
+                defaultTargetPlatform == TargetPlatform.macOS);
+        if (!native) {
+          await _client.auth.signInWithOAuth(OAuthProvider.apple, redirectTo: redirectTo);
+          return;
+        }
+        final rawNonce = _rawNonce();
+        final AuthorizationCredentialAppleID credential;
+        try {
+          credential = await SignInWithApple.getAppleIDCredential(
+            scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+            nonce: sha256.convert(utf8.encode(rawNonce)).toString(),
+          );
+        } on SignInWithAppleAuthorizationException catch (e) {
+          if (e.code == AuthorizationErrorCode.canceled) {
+            throw const LedgerException('已取消登入');
+          }
+          rethrow;
+        }
+        final idToken = credential.identityToken;
+        if (idToken == null) {
+          throw const LedgerException('Apple 登入失敗：拿不到憑證，請再試一次');
+        }
+        await _client.auth.signInWithIdToken(
+          provider: OAuthProvider.apple,
+          idToken: idToken,
+          nonce: rawNonce,
+        );
+      });
+
+  static String _rawNonce() {
+    final rand = Random.secure();
+    return base64UrlEncode(List<int>.generate(32, (_) => rand.nextInt(256)))
+        .replaceAll('=', '');
+  }
 
   @override
   Future<void> signOut() => guard(() => _client.auth.signOut());

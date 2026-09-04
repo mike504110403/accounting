@@ -4,6 +4,7 @@
 /// 而且 SnackBar 會自己消失，看不到就等於沒訊息）。
 library;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -61,6 +62,10 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   bool get _filled => _email.text.trim().isNotEmpty && _password.text.isNotEmpty;
 
+  /// iOS（TestFlight 版）只接受 Apple 登入，email 流程整段藏起來（Mike 裁示 2026-09-04）。
+  /// 用 defaultTargetPlatform（而非 dart:io Platform）讓測試可以 override。
+  bool get _appleOnly => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
   Future<void> _signIn() async {
     if (!_filled) {
       setState(() => _error = '請輸入 Email 與密碼');
@@ -108,6 +113,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     ),
                   ),
                   const SizedBox(height: 40),
+                  if (!_appleOnly) ...[
                   TextField(
                     key: const Key('login-email-field'),
                     controller: _email,
@@ -125,6 +131,7 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                     onSubmitted: (_) => _signIn(),
                     onChanged: (_) => setState(() {}),
                   ),
+                  ],
                   if (_error != null)
                     Padding(
                       padding: const EdgeInsets.only(top: 12),
@@ -135,40 +142,55 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                       ),
                     ),
                   const SizedBox(height: 24),
-                  FilledButton(
-                    key: const Key('login-button'),
-                    onPressed: _busy ? null : _signIn,
-                    child: Text(_busy ? '處理中…' : '登入'),
-                  ),
-                  TextButton(
-                    key: const Key('signup-button'),
-                    onPressed: _busy ? null : _signUp,
-                    child: const Text('註冊新帳號'),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      const Expanded(child: Divider()),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Text('或',
-                            style: t.textTheme.bodySmall
-                                ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
-                      ),
-                      const Expanded(child: Divider()),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Center(
-                    child: IconButton.outlined(
+                  if (_appleOnly)
+                    // iOS 唯一動線：整幅黑底 Apple 按鈕（HIG 樣式）。
+                    FilledButton.icon(
                       key: const Key('apple-signin-button'),
-                      tooltip: '使用 Apple 登入',
+                      style: FilledButton.styleFrom(
+                        backgroundColor: Colors.black,
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size.fromHeight(48),
+                      ),
                       onPressed: _busy ? null : _apple,
-                      iconSize: 26,
-                      padding: const EdgeInsets.all(12),
                       icon: const Icon(Icons.apple),
+                      label: Text(_busy ? '處理中…' : '使用 Apple 帳號登入'),
+                    )
+                  else ...[
+                    FilledButton(
+                      key: const Key('login-button'),
+                      onPressed: _busy ? null : _signIn,
+                      child: Text(_busy ? '處理中…' : '登入'),
                     ),
-                  ),
+                    TextButton(
+                      key: const Key('signup-button'),
+                      onPressed: _busy ? null : _signUp,
+                      child: const Text('註冊新帳號'),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Expanded(child: Divider()),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Text('或',
+                              style: t.textTheme.bodySmall
+                                  ?.copyWith(color: t.colorScheme.onSurfaceVariant)),
+                        ),
+                        const Expanded(child: Divider()),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Center(
+                      child: IconButton.outlined(
+                        key: const Key('apple-signin-button'),
+                        tooltip: '使用 Apple 登入',
+                        onPressed: _busy ? null : _apple,
+                        iconSize: 26,
+                        padding: const EdgeInsets.all(12),
+                        icon: const Icon(Icons.apple),
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),
