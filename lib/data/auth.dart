@@ -88,7 +88,8 @@ class SupabaseAuthService implements AuthService {
         final AuthorizationCredentialAppleID credential;
         try {
           credential = await SignInWithApple.getAppleIDCredential(
-            scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+            // 只要 email：fullName 拿了也沒用到，資料最小化（審查 m-5）。
+            scopes: [AppleIDAuthorizationScopes.email],
             nonce: sha256.convert(utf8.encode(rawNonce)).toString(),
           );
         } on SignInWithAppleAuthorizationException catch (e) {
