@@ -273,14 +273,25 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     bool isReversed(Entry e) =>
         !e.isAdjustment && e.id.length >= 8 && reversedTags.contains(e.id.substring(0, 8));
 
-    Widget entryRow(Entry e) => Slidable(
+    // 沖銷與被沖銷是不可變軌跡：不可編輯也不可刪（Mike 裁示 2026-09-04），整排滑動動作拿掉。
+    Widget entryRow(Entry e) {
+      final immutable = e.isAdjustment || isReversed(e);
+      final tile = _EntryTile(
+        entry: e,
+        categories: categories,
+        members: members,
+        amount: _shown(e, me, ledger.defaultRatio),
+        reversed: isReversed(e),
+        onTap: () => context.push('/entries/${e.id}'),
+      );
+      if (immutable) return tile;
+      return Slidable(
           key: ValueKey('slide-${e.id}'),
           endActionPane: ActionPane(
             motion: const DrawerMotion(),
             extentRatio: 0.34,
             children: [
-              // 圓形 icon、無文字（Mike 裁示 2026-09-03）；沖銷與被沖銷紀錄不可編輯（只可刪）。
-              if (!e.isAdjustment && !isReversed(e))
+              // 圓形 icon、無文字（Mike 裁示 2026-09-03）。
               CircleSlideAction(
                 icon: Icons.edit_outlined,
                 background: Theme.of(context).colorScheme.secondaryContainer,
@@ -297,15 +308,9 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
               ),
             ],
           ),
-          child: _EntryTile(
-            entry: e,
-            categories: categories,
-            members: members,
-            amount: _shown(e, me, ledger.defaultRatio),
-            reversed: isReversed(e),
-            onTap: () => context.push('/entries/${e.id}'),
-          ),
+          child: tile,
         );
+    }
 
     return Scaffold(
       appBar: MonthAppBar(

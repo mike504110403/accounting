@@ -518,8 +518,13 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               tooltip: '編輯（沖銷重記）',
               onPressed: _saving ? null : _reverseAndRedo,
             ),
-          // 刪除入口移到唯讀明細（編輯模式已由沖銷重記取代）；結算中仍鎖。
-          if (_original != null && _readOnly && !_locked)
+          // 刪除入口移到唯讀明細（編輯模式已由沖銷重記取代）；結算中仍鎖；
+          // 沖銷與被沖銷是不可變軌跡，刪除也拿掉（Mike 裁示 2026-09-04）。
+          if (_original != null &&
+              _readOnly &&
+              !_locked &&
+              !_original!.isAdjustment &&
+              !hasReversal(ref.watch(entriesProvider), _original!))
             PopupMenuButton<String>(
               key: const Key('entry-menu'),
               onSelected: (v) {
