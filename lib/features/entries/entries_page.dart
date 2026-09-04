@@ -610,9 +610,12 @@ class _EntryTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
-    // 沖銷配對（Mike 裁示 2026-09-04）：被沖銷的原筆與沖銷筆用同組弱化色，正常筆不變。
-    final muted = reversed || entry.isAdjustment;
-    final inkColor = muted ? t.colorScheme.onSurfaceVariant : null;
+    // 沖銷配對（Mike 裁示 2026-09-04）：被沖銷＝偏紅、沖銷筆＝偏藍，正常筆不變。
+    final Color? inkColor = reversed
+        ? t.colorScheme.error
+        : entry.isAdjustment
+            ? (t.brightness == Brightness.dark ? Colors.lightBlue.shade300 : Colors.blue.shade700)
+            : null;
     final tags = <String>[
       if (reversed) '已沖銷',
       if (entry.isAdjustment) '沖銷',
@@ -659,7 +662,19 @@ class _EntryTile extends StatelessWidget {
                       child: Wrap(
                         spacing: 6,
                         runSpacing: 4,
-                        children: [for (final x in tags) _Tag(text: x, tone: t.colorScheme.onSurfaceVariant)],
+                        children: [
+                          for (final x in tags)
+                            _Tag(
+                              text: x,
+                              tone: x == '已沖銷'
+                                  ? t.colorScheme.error
+                                  : x == '沖銷'
+                                      ? (t.brightness == Brightness.dark
+                                          ? Colors.lightBlue.shade300
+                                          : Colors.blue.shade700)
+                                      : t.colorScheme.onSurfaceVariant,
+                            ),
+                        ],
                       ),
                     ),
                 ],
@@ -670,11 +685,9 @@ class _EntryTile extends StatelessWidget {
               entry.isExpense ? fmtAmount(amount) : '+${fmtAmount(amount)}',
               style: t.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
-                color: muted
-                    ? t.colorScheme.onSurfaceVariant
-                    : (entry.isExpense ? t.colorScheme.onSurface : incomeColor(context)),
+                color: inkColor ?? (entry.isExpense ? t.colorScheme.onSurface : incomeColor(context)),
                 decoration: reversed ? TextDecoration.lineThrough : null,
-                decorationColor: t.colorScheme.onSurfaceVariant,
+                decorationColor: inkColor,
                 fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
