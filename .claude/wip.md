@@ -1,6 +1,6 @@
 # WIP — accounting 記帳 app（/mega）
 
-更新：2026-09-04（波 2＋手測回饋迭代；migration 0025 已上雲端 dev；新手導覽 e2e 全綠）
+更新：2026-09-04（波 2 已合併 dev 5464b01；三清完成；接續小任務中）
 
 ## 任務背景與目標
 
@@ -21,11 +21,11 @@
 | 需求/波次                | 階段   | feature 分支          | 切自 dev | 依賴 | review 現況 |
 | ------------------------ | ------ | --------------------- | -------- | ---- | ----------- |
 | 波 1 畫面＋DB            | 已合併 | feature/wave1（已刪） | b4d157f  | 獨立 | 全過        |
-| 波 2 接 Supabase＋信封制 | 待手測 | feature/wave2         | 72b5952  | 波 1 | 全過        |
+| 波 2 接 Supabase＋信封制 | 已合併 | feature/wave2（已刪） | 72b5952  | 波 1 | 全過（Mike 裁示直接合） |
 
 ## 收斂時進行中的工人
 
-無（第三梯 w2-data 已完工合入；wt/wave2/* 工人分支與 worktree 待階段四三清）。
+無；wt/wave2/*／feature/wave2 分支與 worktree 已三清（squash 後 -d 不認、經零差異驗證用 update-ref 刪）。
 
 ## 決策
 
@@ -61,10 +61,9 @@
 
 ## 下一步
 
-1. **Mike 手測**（8788 release／ngrok；8787 dev hot-reload 也在跑）（app 連雲端 dev wxqbxsagfvtxnvaloklr，autoconfirm 已開免收信）：`tool/dev.sh 8787` 起 server，重點流程＝註冊兩帳號→邀請碼共組帳本→記帳（含資金來源／代墊）→撥款→結算→Realtime 雙裝置同步。
-2. 手測過 → feature/wave2 squash 成一顆 commit 合 dev → 合併後 dev 重驗（analyze＋test）→ 三清（wt/wave2/*、feature/wave2、worktree）。
-3. /ship：dev 領先 origin/dev（72b5952 spec 文件＋波 2），Mike 授權後 push。
-4. 後續小任務（另開）：四表 `replica identity full` migration（修 Realtime DELETE 整表重抓繞路）＋ db-reviewer。
+1. /ship：dev 領先 origin/dev 一顆（5464b01 波 2 squash），Mike 授權後 push。
+2. 進行中：replica identity full migration（0026，修 Realtime DELETE 整表重抓繞路）＋SQL 測試＋db-reviewer＋雲端 push。
+3. 待辦池（見 2026-09-04 盤點回報）：Apple provider 後台設定（要 Mike 的 Apple Developer 資料）、iOS 打包＋home indicator padding、刪帳本 RPC、prod 專案、螢幕閱讀器導覽卡步、janitor 品質清潔（settings_page 拆檔等）。
 
 ## 環境備忘
 
