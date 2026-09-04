@@ -372,13 +372,12 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                                 scrollDirection: Axis.horizontal,
                                 child: Row(
                                   children: [
-                                    InputChip(
+                                    _FilterPill(
                                       key: const Key('filter-category-chip'),
-                                      showCheckmark: false,
-                                      label: Text(_filterCategoryName(categories)),
-                                      selected: _filterCategoryId != null,
-                                      onPressed: () => _pickFilterCategory([...categories]..sort((a, b) => a.sort.compareTo(b.sort))),
-                                      onDeleted: _filterCategoryId == null
+                                      label: _filterCategoryName(categories),
+                                      active: _filterCategoryId != null,
+                                      onTap: () => _pickFilterCategory([...categories]..sort((a, b) => a.sort.compareTo(b.sort))),
+                                      onClear: _filterCategoryId == null
                                           ? null
                                           : () => setState(() {
                                                 _filterCategoryId = null;
@@ -386,13 +385,12 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                                               }),
                                     ),
                                     const SizedBox(width: 8),
-                                    InputChip(
+                                    _FilterPill(
                                       key: const Key('filter-range-chip'),
-                                      showCheckmark: false,
-                                      label: Text(_rangeLabel()),
-                                      selected: _range != null,
-                                      onPressed: _pickRange,
-                                      onDeleted: _range == null
+                                      label: _rangeLabel(),
+                                      active: _range != null,
+                                      onTap: _pickRange,
+                                      onClear: _range == null
                                           ? null
                                           : () => setState(() {
                                                 _range = null;
@@ -801,6 +799,61 @@ class _EmptyState extends StatelessWidget {
           const SizedBox(height: 4),
           Text('點右下角「新增」記第一筆', style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
         ],
+      ),
+    );
+  }
+}
+
+/// 篩選 pill：自組（Container＋padding＋Text），不用 Chip——
+/// Mike 裝置上 Chip 的內建標籤量寬會把 CJK 量窄導致硬截字（2026-09-04 實錄，
+/// 同頁自組的「細項 N」徽章正常），改用與徽章相同的機制就地免疫。
+class _FilterPill extends StatelessWidget {
+  const _FilterPill({
+    super.key,
+    required this.label,
+    required this.active,
+    required this.onTap,
+    this.onClear,
+  });
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    return Material(
+      color: active ? t.colorScheme.secondaryContainer : t.colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: active ? Colors.transparent : t.colorScheme.outlineVariant),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(label,
+                  softWrap: false,
+                  style: t.textTheme.labelLarge?.copyWith(
+                      color: active ? t.colorScheme.onSecondaryContainer : t.colorScheme.onSurface)),
+              if (onClear != null) ...[
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: onClear,
+                  child: Icon(Icons.close, size: 15,
+                      color: active ? t.colorScheme.onSecondaryContainer : t.colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
