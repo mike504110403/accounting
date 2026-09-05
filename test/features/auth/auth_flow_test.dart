@@ -7,6 +7,7 @@ import 'package:accounting/app/router.dart';
 import 'package:accounting/data/auth.dart';
 import 'package:accounting/data/current_ledger.dart';
 import 'package:accounting/domain/mock_data.dart';
+import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/auth/login_page.dart';
 import 'package:accounting/features/auth/onboarding_page.dart';
 import 'package:accounting/features/entries/entries_page.dart';
@@ -17,6 +18,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/fixtures.dart';
+
+/// 改名寫入炸掉的成員 notifier（驗「首登改名失敗不擋進 app」）。
+class _ThrowingMembersNotifier extends MembersNotifier {
+  @override
+  Future<void> update(Member m) => throw Exception('boom');
+}
 
 /// 模擬 `main.dart` 在開機載快照失敗時 override 進來的初值。
 class _PresetBootError extends BootErrorNotifier {
@@ -161,6 +168,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('onboarding-choose-create')));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '阿米');
       await tester.enterText(find.byKey(const Key('onboarding-name-field')), '小家庭');
       await tester.tap(find.byKey(const Key('onboarding-create-button')));
       await tester.pumpAndSettle();
@@ -176,6 +184,41 @@ void main() {
       expect(c.read(currentLedgerIdProvider), c.read(ledgerProvider).id);
       expect(c.read(entriesProvider), isEmpty, reason: '新帳本沒有帳目');
       expect(c.read(categoriesProvider), isNotEmpty, reason: 'create_ledger 會灌預設分類');
+      expect(c.read(membersProvider).firstWhere((m) => m.id == c.read(currentMemberIdProvider)).displayName, '阿米',
+          reason: '首登填的名稱要寫進自己的成員列，不留 RPC 的 email 前綴');
+    });
+
+    testWidgets('建立帳本：改名寫入失敗 → 仍進分享關與 app，SnackBar 提示到設定頁改', (tester) async {
+      final c = await pumpApp(
+        tester,
+        ProviderContainer(overrides: [
+          ledgerRepositoryProvider.overrideWithValue(NoLedgerRepository()),
+          membersStateProvider.overrideWith(_ThrowingMembersNotifier.new),
+        ]),
+      );
+      await tester.tap(find.byKey(const Key('onboarding-choose-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '阿米');
+      await tester.enterText(find.byKey(const Key('onboarding-name-field')), '小家庭');
+      await tester.tap(find.byKey(const Key('onboarding-create-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('onboarding-invite-code')), findsOneWidget, reason: '帳本已建，不擋');
+      expect(find.text('名稱儲存失敗，可到設定頁再改'), findsOneWidget);
+      expect(c.read(currentLedgerIdProvider), isNotNull);
+    });
+
+    testWidgets('建立帳本：沒填你的名稱 → 頁內錯誤、不建帳本、不離開首登頁', (tester) async {
+      final c = await pumpApp(tester, onboardingContainer());
+      await tester.tap(find.byKey(const Key('onboarding-choose-create')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '   ');
+      await tester.tap(find.byKey(const Key('onboarding-create-button')));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Text>(find.byKey(const Key('onboarding-error'))).data, '請輸入你的名稱');
+      expect(find.byType(OnboardingPage), findsOneWidget);
+      expect(c.read(currentLedgerIdProvider), isNull, reason: '名稱沒過驗證就不該打 create_ledger');
     });
 
     testWidgets('路 2：輸入 10 碼邀請碼加入 → 進同一本帳本', (tester) async {
@@ -183,6 +226,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('onboarding-choose-join')));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '阿米');
       await tester.enterText(find.byKey(const Key('onboarding-code-field')), 'a7k3qzm4xb');
       await tester.tap(find.byKey(const Key('onboarding-join-button')));
       await tester.pumpAndSettle();
@@ -190,6 +234,20 @@ void main() {
       expect(find.byType(EntriesPage), findsOneWidget);
       expect(c.read(currentLedgerIdProvider), kLedgerId);
       expect(c.read(ledgerProvider).name, '我們的家');
+      expect(c.read(membersProvider).firstWhere((m) => m.id == c.read(currentMemberIdProvider)).displayName, '阿米');
+    });
+
+    testWidgets('加入帳本：沒填你的名稱 → 頁內錯誤，邀請碼對也不加入', (tester) async {
+      final c = await pumpApp(tester, onboardingContainer());
+      await tester.tap(find.byKey(const Key('onboarding-choose-join')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-code-field')), 'a7k3qzm4xb');
+      await tester.tap(find.byKey(const Key('onboarding-join-button')));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Text>(find.byKey(const Key('onboarding-error'))).data, '請輸入你的名稱');
+      expect(find.byType(OnboardingPage), findsOneWidget);
+      expect(c.read(currentLedgerIdProvider), isNull);
     });
 
     testWidgets('邀請碼碼長不對 → 頁內錯誤，不離開首登頁', (tester) async {
@@ -197,6 +255,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('onboarding-choose-join')));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '阿米');
       await tester.enterText(find.byKey(const Key('onboarding-code-field')), 'ABC');
       await tester.tap(find.byKey(const Key('onboarding-join-button')));
       await tester.pumpAndSettle();
@@ -210,6 +269,7 @@ void main() {
 
       await tester.tap(find.byKey(const Key('onboarding-choose-join')));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('onboarding-my-name-field')), '阿米');
       await tester.enterText(find.byKey(const Key('onboarding-code-field')), 'ZZZZZZZZZZ');
       await tester.tap(find.byKey(const Key('onboarding-join-button')));
       await tester.pumpAndSettle();

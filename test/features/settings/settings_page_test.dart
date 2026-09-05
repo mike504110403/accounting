@@ -31,6 +31,64 @@ class _ThrowingMembersNotifier extends MembersNotifier {
   Future<void> update(Member m) => throw Exception('boom');
 }
 
+/// 模擬 `join_ledger`／`create_ledger` RPC 的預設名：拿不到 full_name 就退到 email 前綴，
+/// Apple 隱藏信箱給的是 `4yrcfzrc99` 這種代號。替身本來加入不改名，這裡刻意改成代號。
+///
+/// 替身只有一本帳本，`myLedgers()` 改回另一本假的，讓「加入／新增」在 sheet 眼裡是本來不在的帳本。
+class _RelayNameOnJoinRepository extends InMemoryLedgerRepository {
+  _RelayNameOnJoinRepository({super.seed});
+
+  int updateMemberCalls = 0;
+
+  @override
+  Future<List<Ledger>> myLedgers() async =>
+      [Ledger(id: 'ledger-other', name: '原本那本', inviteCode: 'CCCCCCCCCC', defaultRatio: const {kMeId: 100})];
+
+  @override
+  Future<void> updateMember(Member member) {
+    updateMemberCalls++;
+    return super.updateMember(member);
+  }
+
+  Future<void> _relayName(Ledger l) async {
+    final me = (await fetchMembers(l.id)).firstWhere((m) => m.id == kMeId);
+    await super.updateMember(Member(
+      id: me.id,
+      ledgerId: me.ledgerId,
+      userId: me.userId,
+      displayName: '4yrcfzrc99',
+      monthlyTopup: me.monthlyTopup,
+      openingBalancePersonal: me.openingBalancePersonal,
+      joinedAt: me.joinedAt,
+    ));
+  }
+
+  @override
+  Future<Ledger> joinLedger(String code) async {
+    final l = await super.joinLedger(code);
+    await _relayName(l);
+    return l;
+  }
+
+  @override
+  Future<Ledger> createLedger(String name) async {
+    final l = await super.createLedger(name);
+    await _relayName(l);
+    return l;
+  }
+}
+
+/// 加入「自己已在的那本」：`join_ledger` 不新建成員列直接回，替身照樣不改名。
+class _AlreadyMemberRepository extends InMemoryLedgerRepository {
+  int updateMemberCalls = 0;
+
+  @override
+  Future<void> updateMember(Member member) {
+    updateMemberCalls++;
+    return super.updateMember(member);
+  }
+}
+
 /// 分類列改左滑顯示編輯／刪除（2026-09-03）：先把該列往左拖開 action pane，再點對應圖示。
 Future<void> _swipeRowAction(WidgetTester tester, String rowText, IconData icon) async {
   final tile = find.ancestor(of: find.text(rowText), matching: find.byType(ListTile));
@@ -86,6 +144,8 @@ Future<void> _openBalanceSheet(WidgetTester tester, {String row = '我的每月�
 
 /// 點設定頁裡「分類管理」一行，進子頁。
 Future<void> _openCategoryPage(WidgetTester tester) async {
+  // 預設 800×600 測試面板下，「我的名稱」列（2026-09-05）把這列推到 y≈631 螢幕外；先捲到可見。
+  await tester.ensureVisible(find.text('分類管理'));
   await tester.tap(find.text('分類管理'));
   await tester.pumpAndSettle();
 }
@@ -270,6 +330,137 @@ void main() {
     await _openBalanceSheet(tester, row: '我的每月補入額');
     expect(find.byKey(const ValueKey('balance-shared-field')), findsOneWidget);
     expect(find.byType(TextField), findsNWidgets(2));
+  });
+
+  testWidgets('我的名稱列：顯示自己的 display_name，sheet 改名儲存後列與 membersProvider 都更新', (tester) async {
+    final container = await _pump(tester);
+    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName;
+    final row = find.byKey(const Key('my-name-row'));
+    expect(find.descendant(of: row, matching: find.text(before)), findsOneWidget);
+
+    await tester.tap(find.text('我的名稱'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byKey(const ValueKey('member-name-field'))).controller?.text, before);
+
+    await tester.enterText(find.byKey(const ValueKey('member-name-field')), '  阿米  ');
+    await tester.tap(find.byKey(const ValueKey('save-member-name-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('member-name-field')), findsNothing, reason: '成功後 sheet 收掉');
+    final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
+    expect(me.displayName, '阿米', reason: '前後空白要剪掉');
+    expect(find.descendant(of: row, matching: find.text('阿米')), findsOneWidget);
+    // 其他成員與自己的其他欄位不動。
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kWifeId).displayName, '老婆');
+  });
+
+  testWidgets('我的名稱：空白 → sheet 內錯誤行、不 pop、member 不變', (tester) async {
+    final container = await _pump(tester);
+    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName;
+    await tester.tap(find.text('我的名稱'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('member-name-field')), '   ');
+    await tester.tap(find.byKey(const ValueKey('save-member-name-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('請輸入你的名稱'), findsOneWidget);
+    expect(find.byKey(const ValueKey('member-name-field')), findsOneWidget);
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, before);
+  });
+
+  testWidgets('我的名稱：儲存失敗 → sheet 內顯示錯誤且維持開啟、member 不變', (tester) async {
+    final container = await _pump(
+      tester,
+      ProviderContainer(overrides: [membersStateProvider.overrideWith(_ThrowingMembersNotifier.new)]),
+    );
+    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName;
+    await tester.tap(find.text('我的名稱'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('member-name-field')), '阿米');
+    await tester.tap(find.byKey(const ValueKey('save-member-name-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('儲存失敗，請重試'), findsOneWidget);
+    expect(find.byKey(const ValueKey('member-name-field')), findsOneWidget);
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, before);
+  });
+
+  testWidgets('帳本切換 sheet：加入帳本會把目前的名稱帶過去，不留 RPC 的 email 前綴代號', (tester) async {
+    final container = ProviderContainer(overrides: [
+      ledgerRepositoryProvider.overrideWithValue(_RelayNameOnJoinRepository(
+        seed: snapshotWith(
+          ledger: Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB', defaultRatio: const {kMeId: 100}),
+          entries: const [],
+          settlements: const [],
+        ),
+      )),
+    ]);
+    await _pump(tester, container);
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, 'Mike');
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('join-code-field')), 'BBBBBBBBBB');
+    await tester.tap(find.byKey(const ValueKey('join-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(container.read(currentLedgerIdProvider), 'ledger-2');
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, 'Mike');
+  });
+
+  testWidgets('帳本切換 sheet：新增帳本也把目前的名稱帶過去', (tester) async {
+    final repo = _RelayNameOnJoinRepository();
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    await _pump(tester, container);
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('new-ledger-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('new-ledger-name-field')), '小家庭');
+    await tester.tap(find.byKey(const ValueKey('create-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(container.read(ledgerProvider).name, '小家庭');
+    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, 'Mike');
+    expect(repo.updateMemberCalls, 1, reason: '帶名寫入恰好一次');
+  });
+
+  testWidgets('帳本切換 sheet：貼自己已在那本的邀請碼 → 不帶名（不蓋掉那本設好的名字）', (tester) async {
+    final repo = _AlreadyMemberRepository();
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    await _pump(tester, container);
+    final code = container.read(ledgerProvider).inviteCode;
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('join-code-field')), code);
+    await tester.tap(find.byKey(const ValueKey('join-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('join-code-field')), findsNothing, reason: 'sheet 照樣收掉');
+    expect(repo.updateMemberCalls, 0, reason: '已是成員：不該再寫 display_name');
+  });
+
+  testWidgets('帳本切換 sheet：帶名失敗 → 仍切換並關 sheet，SnackBar 提示可到「我的名稱」改', (tester) async {
+    final repo = _RelayNameOnJoinRepository(
+      seed: snapshotWith(
+        ledger: Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB', defaultRatio: const {kMeId: 100}),
+        entries: const [],
+        settlements: const [],
+      ),
+    );
+    final container = ProviderContainer(overrides: [
+      ledgerRepositoryProvider.overrideWithValue(repo),
+      membersStateProvider.overrideWith(_ThrowingMembersNotifier.new),
+    ]);
+    await _pump(tester, container);
+    await tester.tap(find.text('帳本切換'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('join-code-field')), 'BBBBBBBBBB');
+    await tester.tap(find.byKey(const ValueKey('join-ledger-button')));
+    await tester.pumpAndSettle();
+
+    expect(container.read(currentLedgerIdProvider), 'ledger-2');
+    expect(find.byKey(const ValueKey('join-code-field')), findsNothing);
+    expect(find.text('名稱沒帶過去，可到「我的名稱」再改'), findsOneWidget);
   });
 
   testWidgets('帳本名稱編輯成功', (tester) async {

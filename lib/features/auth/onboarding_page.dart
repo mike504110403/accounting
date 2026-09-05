@@ -1,6 +1,9 @@
 /// 首登頁（Mike 裁示 2026-09-03 關卡制）：
-/// 關 0 二選一（建立新帳本／用邀請碼加入）→ 關 1 輸入 → 建立成功再一關
-/// 顯示邀請碼＋一鍵複製，才進 app。
+/// 關 0 二選一（建立新帳本／用邀請碼加入）→ 關 1 輸入（**你的名稱**＋帳本名稱／邀請碼）
+/// → 建立成功再一關顯示邀請碼＋一鍵複製，才進 app。
+///
+/// 名稱一律使用者自己填（Mike 2026-09-05）：RPC 的預設名是 email 前綴，Apple 隱藏信箱
+/// 給的是 `4yrcfzrc99` 這種代號，不能拿來當人名。
 ///
 /// 錯誤一律顯示在頁內紅字（不用 SnackBar）。
 library;
@@ -13,6 +16,7 @@ import 'package:go_router/go_router.dart';
 import '../../data/current_ledger.dart';
 import '../../data/ledger_repository.dart';
 import '../../domain/models.dart';
+import '../settings/member_name_sheet.dart' show kMemberNameMaxLength, saveMyDisplayName, validateMemberName;
 
 class OnboardingPage extends ConsumerStatefulWidget {
   const OnboardingPage({super.key});
@@ -24,6 +28,7 @@ class OnboardingPage extends ConsumerStatefulWidget {
 enum _Step { choose, create, join, share }
 
 class _OnboardingPageState extends ConsumerState<OnboardingPage> {
+  final _myName = TextEditingController();
   final _name = TextEditingController(text: '我們的家');
   final _code = TextEditingController();
   String? _error;
@@ -66,12 +71,31 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
 
   @override
   void dispose() {
+    _myName.dispose();
     _name.dispose();
     _code.dispose();
     super.dispose();
   }
 
+  /// 建立／加入成功、快照載好之後把自己改名。
+  ///
+  /// 失敗不擋進 app：帳本已經建好（或已加入），停在本頁重按會再建一本。
+  /// 名稱隨時可在設定頁改，這裡只用 SnackBar 提示（MaterialApp 層的 messenger，跨頁還在）。
+  Future<void> _applyMyName() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await saveMyDisplayName(ref, _myName.text);
+    } catch (_) {
+      messenger.showSnackBar(const SnackBar(content: Text('名稱儲存失敗，可到設定頁再改')));
+    }
+  }
+
   Future<void> _create() async {
+    final nameError = validateMemberName(_myName.text);
+    if (nameError != null) {
+      setState(() => _error = nameError);
+      return;
+    }
     final name = _name.text.trim();
     if (name.isEmpty) {
       setState(() => _error = '請輸入帳本名稱');
@@ -85,6 +109,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     try {
       final ledger = await ref.read(ledgerRepositoryProvider).createLedger(name);
       await ref.read(currentLedgerIdProvider.notifier).select(ledger.id);
+      if (!mounted) return;
+      await _applyMyName();
       if (!mounted) return;
       setState(() {
         _busy = false;
@@ -101,6 +127,11 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
   }
 
   Future<void> _join() async {
+    final nameError = validateMemberName(_myName.text);
+    if (nameError != null) {
+      setState(() => _error = nameError);
+      return;
+    }
     final code = _code.text.trim().toUpperCase();
     if (code.length != kInviteCodeLength) {
       setState(() => _error = '請輸入 $kInviteCodeLength 碼邀請碼');
@@ -114,6 +145,8 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     try {
       final ledger = await ref.read(ledgerRepositoryProvider).joinLedger(code);
       await ref.read(currentLedgerIdProvider.notifier).select(ledger.id);
+      if (!mounted) return;
+      await _applyMyName();
       if (mounted) context.go('/entries');
     } catch (e) {
       if (!mounted) return;
@@ -191,6 +224,21 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
     );
   }
 
+  /// 建立／加入兩關共用的「你的名稱」欄（放最上面、autofocus）。
+  List<Widget> _myNameFields(ThemeData t) => [
+        Text('你的名稱', style: t.textTheme.labelLarge),
+        const SizedBox(height: 12),
+        TextField(
+          key: const Key('onboarding-my-name-field'),
+          controller: _myName,
+          autofocus: true,
+          maxLength: kMemberNameMaxLength,
+          textInputAction: TextInputAction.next,
+          decoration: const InputDecoration(isDense: true, hintText: '對方會看到的名字', counterText: ''),
+        ),
+        const SizedBox(height: 20),
+      ];
+
   List<Widget> _stepBody(ThemeData t) {
     switch (_step) {
       case _Step.choose:
@@ -219,12 +267,12 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         ];
       case _Step.create:
         return [
+          ..._myNameFields(t),
           Text('帳本名稱', style: t.textTheme.labelLarge),
           const SizedBox(height: 12),
           TextField(
             key: const Key('onboarding-name-field'),
             controller: _name,
-            autofocus: true,
             decoration: const InputDecoration(isDense: true),
             onSubmitted: (_) => _create(),
           ),
@@ -237,12 +285,12 @@ class _OnboardingPageState extends ConsumerState<OnboardingPage> {
         ];
       case _Step.join:
         return [
+          ..._myNameFields(t),
           Text('邀請碼', style: t.textTheme.labelLarge),
           const SizedBox(height: 12),
           TextField(
             key: const Key('onboarding-code-field'),
             controller: _code,
-            autofocus: true,
             maxLength: kInviteCodeLength,
             // 先濾掉空白／標點再套長度上限：聊天軟體複製常夾頭尾空白，
             // 不濾的話空白吃掉一個名額，10 碼代碼只剩 9 碼有效（2026-09-04 實測回報）。

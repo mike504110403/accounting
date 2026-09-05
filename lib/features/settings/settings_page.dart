@@ -14,6 +14,7 @@ import '../../data/ledger_repository.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import 'closes_page.dart' show lastClosedMonth;
+import 'member_name_sheet.dart' show MemberNameSheet, saveMyDisplayName;
 
 /// 設定：帳本、外觀、成員、餘額設定、清帳與分類管理入口（波 1 工人實作，替換本檔內容）。
 /// 緊湊單頁：每個項目一行，點進去才開 bottom sheet 編輯（spec v1.1 UI 互動原則：表單一律 bottom sheet）。
@@ -302,16 +303,38 @@ class _LedgerSwitchSheetState extends ConsumerState<_LedgerSwitchSheet> {
   }
 
   /// 三條路共用的收尾：選定帳本 → 重載快照 → 關掉 sheet。
-  Future<void> _run(Future<String> Function() action) async {
+  ///
+  /// `carryName`（加入／新增）：新帳本裡的成員列是 RPC 用 email 前綴建的（Apple 隱藏信箱＝代號），
+  /// 把目前帳本裡自己的名稱帶過去，不必再填一次；之後隨時可在「我的名稱」改。
+  ///
+  /// 只帶到**本來不是成員**的帳本：貼到自己已在的那本邀請碼時 `join_ledger` 直接回（不新建成員列），
+  /// 這時帶名會蓋掉在那本設好的名字。「已是成員」以 sheet 開啟時抓的 `_ledgers` 判定。
+  /// 帶名失敗不擋切換（帳本已切好、名稱可事後改），pop 後補一句 SnackBar 提示。
+  Future<void> _run(Future<String> Function() action, {bool carryName = false}) async {
     if (_busy) return;
+    final myName = _findMember(ref.read(membersProvider), ref.read(currentMemberIdProvider))?.displayName;
+    final messenger = ScaffoldMessenger.of(context);
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       final ledgerId = await action();
+      final alreadyMember = _ledgers?.any((l) => l.id == ledgerId) ?? false;
       await ref.read(currentLedgerIdProvider.notifier).select(ledgerId);
-      if (mounted) Navigator.of(context).pop();
+      var nameFailed = false;
+      if (carryName && !alreadyMember && myName != null && myName.isNotEmpty) {
+        try {
+          await saveMyDisplayName(ref, myName);
+        } catch (_) {
+          nameFailed = true;
+        }
+      }
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      if (nameFailed) {
+        messenger.showSnackBar(const SnackBar(content: Text('名稱沒帶過去，可到「我的名稱」再改')));
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -327,7 +350,7 @@ class _LedgerSwitchSheetState extends ConsumerState<_LedgerSwitchSheet> {
       setState(() => _error = '請輸入 $kInviteCodeLength 碼邀請碼');
       return;
     }
-    await _run(() async => (await ref.read(ledgerRepositoryProvider).joinLedger(code)).id);
+    await _run(() async => (await ref.read(ledgerRepositoryProvider).joinLedger(code)).id, carryName: true);
   }
 
   Future<void> _create() async {
@@ -336,7 +359,7 @@ class _LedgerSwitchSheetState extends ConsumerState<_LedgerSwitchSheet> {
       setState(() => _error = '請輸入帳本名稱');
       return;
     }
-    await _run(() async => (await ref.read(ledgerRepositoryProvider).createLedger(name)).id);
+    await _run(() async => (await ref.read(ledgerRepositoryProvider).createLedger(name)).id, carryName: true);
   }
 
   @override
@@ -492,6 +515,12 @@ class _MembersCard extends ConsumerWidget {
     return Card(
       child: Column(
         children: [
+          _SettingsRow(
+            key: const Key('my-name-row'),
+            label: '我的名稱',
+            value: me?.displayName ?? '—',
+            onTap: () => _openSheet(context, (_) => const MemberNameSheet()),
+          ),
           _SettingsRow(
             label: '成員',
             value: namesSummary.isEmpty ? '尚無成員' : namesSummary,
