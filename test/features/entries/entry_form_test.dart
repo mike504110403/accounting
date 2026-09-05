@@ -1,9 +1,10 @@
-import 'package:accounting/domain/balance_math.dart';
+import 'package:accounting/app/category_wheel.dart';
 import 'package:accounting/app/router.dart';
-import 'package:accounting/features/entries/entry_form_page.dart';
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
-import 'package:accounting/app/category_wheel.dart';
+import 'package:accounting/features/entries/entry_form_page.dart';
+import 'package:accounting/features/entries/reversal.dart';
 import 'package:accounting/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -11,178 +12,35 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../../support/fixtures.dart';
 
-/// 只有一筆已結帳的支出。
-List<Entry> settledOnlyEntries() => [
-      Entry(
-        id: 'e-locked',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1000,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '已結帳的買菜',
-        payerId: kMeId,
-        splitMethod: SplitMethod.equal,
-        settledState: SettledState.settled,
-        splits: const [
-          EntrySplit(entryId: 'e-locked', memberId: kMeId, share: 500),
-          EntrySplit(entryId: 'e-locked', memberId: kWifeId, share: 500),
-        ],
-      ),
-    ];
+DateTime get _thisMonth => monthOf(DateTime.now());
 
-/// 只有一筆可刪的支出。
-List<Entry> oneOpenEntry() => [
-      Entry(
-        id: 'e-open',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 300,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '可刪的買菜',
-      ),
-    ];
+/// 一筆本月支出。[payerId] null ＝共同錢包付。
+Entry expense({
+  required String id,
+  required String note,
+  int amount = 300,
+  String categoryId = 'c-food',
+  String? payerId,
+  DateTime? on,
+  bool isAdjustment = false,
+  List<LineItem> lineItems = const [],
+}) =>
+    Entry(
+      id: id,
+      ledgerId: kLedgerId,
+      kind: EntryKind.expense,
+      amount: amount,
+      categoryId: categoryId,
+      occurredOn: on ?? DateTime(_thisMonth.year, _thisMonth.month, 10),
+      createdBy: kMeId,
+      note: note,
+      payerId: payerId,
+      isAdjustment: isAdjustment,
+      lineItems: lineItems,
+    );
 
-/// 一筆已結帳、用「金額」分攤且份額帶小數的支出：
-/// 手填欄位只能顯示整數（284），沒有防禦層就會把 283.5 覆寫掉或被合計檢查擋存。
-List<Entry> settledAmountSplitEntries() => [
-      Entry(
-        id: 'e-amt',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 567,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '已結帳的金額分攤',
-        payerId: kMeId,
-        splitMethod: SplitMethod.amount,
-        settledState: SettledState.settled,
-        splits: const [
-          EntrySplit(entryId: 'e-amt', memberId: kMeId, share: 283.5),
-          EntrySplit(entryId: 'e-amt', memberId: kWifeId, share: 283.5),
-        ],
-      ),
-    ];
-
-/// 一筆已結帳、帶一列細項的支出（細項在 settled 下仍可改，ADR-0002）。
-List<Entry> settledWithLineItems() => [
-      Entry(
-        id: 'e-settled-li',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1000,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '已結帳帶細項',
-        payerId: kMeId,
-        splitMethod: SplitMethod.equal,
-        settledState: SettledState.settled,
-        splits: const [
-          EntrySplit(entryId: 'e-settled-li', memberId: kMeId, share: 500),
-          EntrySplit(entryId: 'e-settled-li', memberId: kWifeId, share: 500),
-        ],
-        lineItems: const [LineItem(id: 'li-old', entryId: 'e-settled-li', name: '打錯的細項', amount: 1000, sort: 0)],
-      ),
-    ];
-
-/// 一筆 70/30 比例分攤的支出，用來驗編輯時反推百分比。
-List<Entry> ratioEntry() => [
-      Entry(
-        id: 'e-ratio',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1000,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '比例筆',
-        payerId: kMeId,
-        splitMethod: SplitMethod.ratio,
-        splits: const [
-          EntrySplit(entryId: 'e-ratio', memberId: kMeId, share: 700),
-          EntrySplit(entryId: 'e-ratio', memberId: kWifeId, share: 300),
-        ],
-      ),
-    ];
-
-/// 一筆結算中的支出（settling 期間金額同樣鎖定）。
-List<Entry> settlingEntries() => [
-      Entry(
-        id: 'e-settling',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 800,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '結算中的買菜',
-        payerId: kMeId,
-        splitMethod: SplitMethod.equal,
-        settledState: SettledState.settling,
-        splits: const [
-          EntrySplit(entryId: 'e-settling', memberId: kMeId, share: 400),
-          EntrySplit(entryId: 'e-settling', memberId: kWifeId, share: 400),
-        ],
-      ),
-    ];
-
-/// 本月食品有撥款（3000）、交通有撥款（1000）；住房、餐飲本月無撥款——資金來源預設測試用固定 fixture。
-List<BudgetAllocation> foodAndTransportAllocated() {
-  final now = DateTime.now();
-  final m = DateTime(now.year, now.month, 1);
-  return [
-    BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 3000, occurredOn: m, createdBy: kMeId),
-    BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-transport', amount: 1000, occurredOn: m, createdBy: kMeId),
-  ];
-}
-
-/// 一筆已存在的共同錢包食品支出，供編輯載入測試用。
-List<Entry> budgetFundedEntry() => [
-      Entry(
-        id: 'e-budget',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 500,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '預算買菜',
-        splitMethod: SplitMethod.common,
-      ),
-    ];
-
-/// 一筆既有的代墊食品支出，供「編輯代墊筆→切回共同錢包」測試用。
-List<Entry> advancedFoodEntry() => [
-      Entry(
-        id: 'e-advanced-food',
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 500,
-        categoryId: 'c-food',
-        occurredOn: DateTime.now(),
-        createdBy: kMeId,
-        note: '代墊買菜',
-        payerId: kMeId,
-        splitMethod: SplitMethod.equal,
-        splits: const [
-          EntrySplit(entryId: 'e-advanced-food', memberId: kMeId, share: 250),
-          EntrySplit(entryId: 'e-advanced-food', memberId: kWifeId, share: 250),
-        ],
-      ),
-    ];
+/// 只有一筆 Mike 先付的支出。
+List<Entry> oneEntryPaidByMe() => [expense(id: 'e-mine-0001', note: '可改的買菜', payerId: kMeId)];
 
 /// 把資料層換成指定內容的記憶體 repository（Notifier 的初值與寫入都吃它）。
 ProviderContainer containerFor(LedgerRepository repo) =>
@@ -199,11 +57,10 @@ Future<ProviderContainer> pumpApp(WidgetTester tester, [ProviderContainer? conta
   return c;
 }
 
-
-// ── 步驟精靈導航（2026-09-03：表單改一次一步）─────────────────────────────
+// ── 步驟精靈導航 ──────────────────────────────────────────────────────
 // 各互動 key 落在哪一步；helper 先導航到該步再操作，測試本文不用自己管步驟。
+// v1.5：第三關從「進階」縮成只有「誰先付」，scope-／split-／ratio-／manual- 整組消失。
 const _stepOfKeyPrefix = <String, int>{
-  // 四關版（2026-09-03）：0 類型分類金額、1 日期備註細項、2 進階、3 確認。
   'category-wheel': 0,
   'amount-field': 0,
   'date-button': 1,
@@ -211,14 +68,7 @@ const _stepOfKeyPrefix = <String, int>{
   'lineitem-': 1,
   'li-name-': 1,
   'li-amount-': 1,
-  'scope-': 2,
   'payer-': 2,
-  'split-': 2,
-  'ratio-field-': 2,
-  'manual-field-': 2,
-  'ratio-': 2,
-  'manual-': 2,
-  'adjustment-switch': 2,
   'save-button': 3,
 };
 
@@ -236,8 +86,7 @@ int? currentFormStep(WidgetTester tester) {
   return null; // 不在表單頁
 }
 
-// 編輯 hub（2026-09-03）：編輯既有帳目＝單頁明細，各欄位點列開彈窗；步驟導航只屬於新增精靈。
-// 編輯 hub 走「key → 欄位列」：同一關的欄位在 hub 是不同列。
+// 編輯 hub：編輯既有帳目＝單頁明細，各欄位點列開彈窗；步驟導航只屬於新增精靈。
 const _editRowOfKeyPrefix = <String, String>{
   'category-': 'edit-row-category',
   'amount-field': 'edit-row-amount',
@@ -246,12 +95,7 @@ const _editRowOfKeyPrefix = <String, String>{
   'lineitem-': 'edit-row-lines',
   'li-name-': 'edit-row-lines',
   'li-amount-': 'edit-row-lines',
-  'scope-': 'edit-row-advanced',
-  'payer-': 'edit-row-advanced',
-  'split-': 'edit-row-advanced',
-  'ratio-': 'edit-row-advanced',
-  'manual-': 'edit-row-advanced',
-  'adjustment-switch': 'edit-row-advanced',
+  'payer-': 'edit-row-payer',
 };
 
 String? _editRowFor(String key) {
@@ -280,7 +124,6 @@ Future<void> _openEditRow(WidgetTester tester, String row) async {
 
 Future<void> goToStep(WidgetTester tester, int target) async {
   if (_inEditHub(tester)) {
-    // 編輯 hub 沒有步驟：只支援「回 hub」（關彈窗）；欄位導航走 _prepareFor 的 key 對映。
     await _closeFieldSheet(tester);
     return;
   }
@@ -315,7 +158,7 @@ Future<void> _prepareFor(WidgetTester tester, String key) async {
   await goToStep(tester, step);
 }
 
-/// 分類改橫向循環選擇器（2026-09-04）：由目前選中往目標拖整數格（單格寬＝可視寬/5）。
+/// 分類橫向循環選擇器：由目前選中往目標拖整數格（單格寬＝可視寬/5）。
 Future<void> selectCategory(WidgetTester tester, String id) async {
   await _prepareFor(tester, 'category-wheel');
   final wheelF = find.byKey(const Key('category-wheel'));
@@ -332,17 +175,6 @@ Future<void> selectCategory(WidgetTester tester, String id) async {
 }
 
 Future<void> tapKey(WidgetTester tester, String key) async {
-  if (key == 'advanced-tile') {
-    // 舊版是展開摺疊區；步驟版＝走到進階關／編輯 hub 開進階彈窗。
-    if (_inEditHub(tester)) {
-      if (!tester.any(find.byKey(const Key('scope-shared')))) {
-        await _openEditRow(tester, 'edit-row-advanced');
-      }
-    } else {
-      await goToStep(tester, 2);
-    }
-    return;
-  }
   if (currentFormStep(tester) != null || _inEditHub(tester)) await _prepareFor(tester, key);
   final f = find.byKey(Key(key));
   await tester.ensureVisible(f);
@@ -365,8 +197,16 @@ Future<void> openNewForm(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// 切成「收入」（限定在第 0 關子樹內找，避免撞到底層帳目頁月摘要的「收入」標籤）。
+Future<void> switchToIncome(WidgetTester tester) async {
+  await goToStep(tester, 0);
+  await tester.tap(find.descendant(
+      of: find.byKey(const ValueKey('form-step-0')), matching: find.text('收入')));
+  await tester.pumpAndSettle();
+}
+
 /// 透過 `_pickDate` 打開的 [showDatePicker] 選日期：直接呼叫 [CalendarDatePicker.onDateChanged]
-/// 這個公開回呼（等同使用者在日曆上點了那天），再按「OK」確認，不用在月曆格線裡逐格點擊翻月。
+/// 這個公開回呼（等同使用者在日曆上點了那天），再按「OK」確認。
 /// 本專案沒有配 `flutter_localizations`，Material 預設英文文案，確認鈕文字是 'OK'。
 Future<void> pickDate(WidgetTester tester, DateTime date) async {
   await tapKey(tester, 'date-button');
@@ -377,214 +217,149 @@ Future<void> pickDate(WidgetTester tester, DateTime date) async {
   await tester.pumpAndSettle();
 }
 
+bool chipSelected(WidgetTester tester, String key) =>
+    tester.widget<ChoiceChip>(find.byKey(Key(key))).selected;
+
 void main() {
+  // ── 誰先付（v1.5／ADR-0009 第 8 條）──────────────────────────────────
 
-  testWidgets('新增支出：均分 567 → 283.5／283.5，entriesProvider 多一筆', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '567');
-    await selectCategory(tester, 'c-food');
-    await fillKey(tester, 'note-field', '測試買菜');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'payer-$kMeId');
-    await tapKey(tester, 'split-equal');
-    await tapKey(tester, 'save-button');
-
-    final entries = c.read(entriesProvider);
-    expect(entries.length, before + 1);
-    final e = entries.last;
-    expect(e.amount, 567);
-    expect(e.note, '測試買菜');
-    expect(e.categoryId, 'c-food');
-    expect(e.kind, EntryKind.expense);
-    expect(e.payerId, kMeId);
-    expect(e.splitMethod, SplitMethod.equal);
-    expect(e.splits.length, 2);
-    expect(e.splits.map((s) => s.share).toList(), [283.5, 283.5]);
-  });
-
-  testWidgets('細項可加，差額只提示不擋存', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-
+  // 變異證明：把 initState 的 `_payerId = ref.read(currentMemberIdProvider)` 改成 null，
+  // 這條會紅（chip 選中態變成「共同錢包」，存出來的 payerId 也會是 null）。
+  testWidgets('新增支出預設「我先付」：chip 選中態是我，直接存 → payerId 是我', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
     await openNewForm(tester);
     await fillKey(tester, 'amount-field', '500');
     await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'lineitem-add');
-    await fillKey(tester, 'li-name-0', '雞蛋');
-    await fillKey(tester, 'li-amount-0', '89');
-    expect(find.textContaining('合計'), findsOneWidget);
-    await tapKey(tester, 'save-button');
+    await goToStep(tester, 2);
 
-    final entries = c.read(entriesProvider);
-    expect(entries.length, before + 1);
-    expect(entries.last.lineItems.single.name, '雞蛋');
-    expect(entries.last.lineItems.single.amount, 89);
+    expect(chipSelected(tester, 'payer-$kMeId'), isTrue, reason: '預設「我」（記帳者）');
+    expect(chipSelected(tester, 'payer-$kWifeId'), isFalse);
+    expect(chipSelected(tester, 'payer-common'), isFalse);
+
+    await tapKey(tester, 'save-button');
+    expect(c.read(entriesProvider).single.payerId, kMeId);
   });
 
-  testWidgets('比例逐筆可調：改成 70/30 存檔 → splits 396.9／170.1', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '567');
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'payer-$kMeId');
-    await tapKey(tester, 'split-ratio');
-
-    // 預設帶入帳本 default_ratio 50/50
-    expect(tester.widget<TextField>(find.byKey(const Key('ratio-$kMeId'))).controller!.text, '50');
-    expect(tester.widget<TextField>(find.byKey(const Key('ratio-$kWifeId'))).controller!.text, '50');
-
-    await fillKey(tester, 'ratio-$kMeId', '70');
-    await fillKey(tester, 'ratio-$kWifeId', '30');
-    await tapKey(tester, 'save-button');
-
-    final entries = c.read(entriesProvider);
-    expect(entries.length, before + 1);
-    final e = entries.last;
-    expect(e.splitMethod, SplitMethod.ratio);
-    expect(e.splits.map((s) => s.share).toList(), [396.9, 170.1]);
-  });
-
-  testWidgets('比例合計不是 100 → 擋存並提示', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-
+  testWidgets('切「共同錢包」送出 → payerId 是 null', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
     await openNewForm(tester);
     await fillKey(tester, 'amount-field', '500');
     await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'payer-$kMeId');
-    await tapKey(tester, 'split-ratio');
-    await fillKey(tester, 'ratio-$kMeId', '70');
-    await fillKey(tester, 'ratio-$kWifeId', '20');
+    await tapKey(tester, 'payer-common');
+    expect(chipSelected(tester, 'payer-common'), isTrue);
+    expect(chipSelected(tester, 'payer-$kMeId'), isFalse);
+
     await tapKey(tester, 'save-button');
-
-    expect(find.textContaining('比例合計需為 100%'), findsOneWidget);
-    expect(c.read(entriesProvider).length, before);
+    final e = c.read(entriesProvider).single;
+    expect(e.payerId, isNull, reason: 'null ＝共同錢包付，扣共同餘額');
+    expect(e.fromCommonWallet, isTrue);
   });
 
-  testWidgets('編輯比例筆＝沖銷重記：重記表單預填 70/30', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(entries: ratioEntry())));
-    await tester.tap(find.text('比例筆'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('confirm-reverse')));
-    await tester.pumpAndSettle();
-
-    // 已在重記精靈：進進階看比例欄預填
-    await tapKey(tester, 'advanced-tile');
-    expect(tester.widget<TextField>(find.byKey(Key('ratio-$kMeId'))).controller!.text, '70');
-    expect(tester.widget<TextField>(find.byKey(Key('ratio-$kWifeId'))).controller!.text, '30');
-  });
-
-  testWidgets('390×844：新增表單不展開進階時一頁看完、不爆版', (tester) async {
-    await pumpApp(tester);
+  testWidgets('切對方送出 → payerId 是對方', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
     await openNewForm(tester);
-    // 金額 0 擋下一步：先確認停用，填了才走關。
-    expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
-    await fillKey(tester, 'amount-field', '100');
+    await fillKey(tester, 'amount-field', '500');
+    await selectCategory(tester, 'c-food');
+    await tapKey(tester, 'payer-$kWifeId');
+    expect(chipSelected(tester, 'payer-$kWifeId'), isTrue);
 
-    // 步驟精靈：逐關走完，每一關都在視窗內、無 overflow；最後一關儲存鈕可見。
-    for (var i = 0; i <= 2; i++) {
-      expect(currentFormStep(tester), i);
-      expect(tester.takeException(), isNull);
-      await tester.tap(find.byKey(const Key('form-next-button')));
-      await tester.pumpAndSettle();
+    await tapKey(tester, 'save-button');
+    expect(c.read(entriesProvider).single.payerId, kWifeId);
+  });
+
+  // 變異證明：把 `_save` 的 `_kind == EntryKind.income ? null : _payerId` 改成直接送 `_payerId`，
+  // 這條會紅——收入會帶著預設的「我」出去，撞 DB check `entries_income_no_payer`。
+  testWidgets('收入：整關跳過不問誰先付，送出的 payerId 是 null', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await switchToIncome(tester);
+    await fillKey(tester, 'amount-field', '20000');
+
+    // 收入只有三關：0 → 1 → 直接到確認關，中間不停在空的「誰先付」。
+    expect(currentFormStep(tester), 0);
+    expect(find.text('1/3'), findsOneWidget, reason: '進度要顯示三關，不是四關');
+    await tester.tap(find.byKey(const Key('form-next-button')));
+    await tester.pumpAndSettle();
+    expect(currentFormStep(tester), 1);
+    await tester.tap(find.byKey(const Key('form-next-button')));
+    await tester.pumpAndSettle();
+    expect(currentFormStep(tester), 3, reason: '第 2 關（誰先付）整關跳過');
+    expect(find.text('3/3'), findsOneWidget);
+
+    // 返回也要跳回第 1 關，不能倒退進那個不存在的關。
+    await tester.tap(find.byKey(const Key('form-back-button')));
+    await tester.pumpAndSettle();
+    expect(currentFormStep(tester), 1);
+    await tester.tap(find.byKey(const Key('form-next-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('payer-common')), findsNothing);
+    expect(find.byKey(Key('payer-$kMeId')), findsNothing);
+    expect(find.byKey(Key('payer-$kWifeId')), findsNothing);
+    expect(find.byKey(const ValueKey('form-step-2')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('save-button')));
+    await tester.pumpAndSettle();
+    final e = c.read(entriesProvider).single;
+    expect(e.kind, EntryKind.income);
+    expect(e.payerId, isNull);
+  });
+
+  testWidgets('支出維持四關：誰先付那一關走得到', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '500');
+    expect(find.text('1/4'), findsOneWidget);
+    await goToStep(tester, 2);
+    expect(find.byKey(const ValueKey('form-step-2')), findsOneWidget);
+    expect(find.text('3/4'), findsOneWidget);
+  });
+
+  testWidgets('確認頁：支出列出「誰先付」，收入整列不出現', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '500');
+    await tapKey(tester, 'payer-$kWifeId');
+    await goToStep(tester, 3);
+    expect(find.byKey(const Key('edit-row-payer')), findsOneWidget);
+    expect(find.text('老婆'), findsWidgets);
+
+    await switchToIncome(tester);
+    await goToStep(tester, 3);
+    expect(find.byKey(const Key('edit-row-payer')), findsNothing);
+    expect(find.text('誰先付'), findsNothing, reason: '收入連標題都不該出現');
+  });
+
+  testWidgets('表單裡沒有範圍與分攤方式的任何入口', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '500');
+    await goToStep(tester, 2);
+
+    for (final k in const [
+      'scope-shared',
+      'scope-private',
+      'split-equal',
+      'split-ratio',
+      'split-amount',
+      'split-common',
+    ]) {
+      expect(find.byKey(Key(k)), findsNothing, reason: k);
     }
-    expect(currentFormStep(tester), 3);
-    expect(tester.getBottomRight(find.byKey(const Key('save-button'))).dy, lessThanOrEqualTo(844));
-    expect(tester.takeException(), isNull);
+    final step = find.byKey(const ValueKey('form-step-2'));
+    expect(step, findsOneWidget, reason: '子樹要真的存在，下面的 findsNothing 才有鑑別力');
+    expect(find.descendant(of: step, matching: find.text('私人')), findsNothing);
+    expect(find.descendant(of: step, matching: find.text('均分')), findsNothing);
+    expect(find.descendant(of: step, matching: find.text('比例')), findsNothing);
   });
 
-  testWidgets('金額分攤合計不等於主筆 → 擋存並提示', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
+  // ── 沖銷重記 ────────────────────────────────────────────────────────
 
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '500');
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'payer-$kMeId');
-    await tapKey(tester, 'split-amount');
-    await fillKey(tester, 'manual-$kMeId', '300');
-    await fillKey(tester, 'manual-$kWifeId', '100');
-    await tapKey(tester, 'save-button');
-
-    expect(find.textContaining('分攤金額合計'), findsOneWidget);
-    expect(c.read(entriesProvider).length, before);
-  });
-
-  testWidgets('已結帳：明細顯示鎖定說明，仍可沖銷重記（鉛筆在）', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
-    await tester.tap(find.text('已結帳的買菜'));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('已結帳：金額與分攤鎖定'), findsOneWidget);
-    expect(find.byKey(const Key('enter-edit')), findsOneWidget);
-    expect(find.byKey(const Key('entry-menu')), findsNothing, reason: '已結帳不可刪，走沖銷');
-  });
-
-  testWidgets('結算中：編輯被擋（不產生反向筆）', (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(entries: settlingEntries())));
-    await tester.tap(find.text('結算中的買菜'));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('結算中，簽核完成或作廢後才能改金額'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('confirm-reverse')), findsNothing, reason: '結算中不開沖銷對話框');
-    expect(find.textContaining('結算中不可編輯'), findsOneWidget);
-    expect(c.read(entriesProvider).where((e) => e.isAdjustment), isEmpty);
-  });
-
-  testWidgets('點列表＝唯讀明細：欄位不可點、細項向下展開；鉛筆＝沖銷重記', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(entries: settledWithLineItems())));
-    await tester.tap(find.text('已結帳帶細項'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('明細'), findsOneWidget);
-    expect(find.byKey(const Key('save-button')), findsNothing);
-    await tester.tap(find.byKey(const Key('edit-row-amount')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('field-done')), findsNothing, reason: '唯讀不開編輯彈窗');
-
-    await tester.tap(find.byKey(const Key('edit-row-lines')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('detail-lineitems')), findsOneWidget);
-    expect(find.text('打錯的細項'), findsOneWidget);
-
-    // 鉛筆＝沖銷重記：跳確認框；取消則留在明細。
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('confirm-reverse')), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(find.text('明細'), findsOneWidget);
-  });
-
-  testWidgets('沖銷確認對話框文案：v1.4「分攤一併回退」，不再是「分攤與預算一併回退」', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
-    await tester.tap(find.text('已結帳的買菜'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-
-    expect(
-      find.text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（分攤一併回退），接著用原資訊重新記一筆。'),
-      findsOneWidget,
-    );
-    expect(find.textContaining('分攤與預算一併回退'), findsNothing);
-  });
-
-  testWidgets('沖銷重記：settled 筆走鉛筆一鍵反向＋預填；已沖銷再編被擋', (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
-    await tester.tap(find.text('已結帳的買菜'));
+  // 變異證明：把 `buildReversal` 的 `payerId: original.payerId` 改成 `me` 或 null，
+  // 這條會紅——補入剩餘就會補到錯的人頭上。
+  testWidgets('沖銷：反向筆金額取負、誰先付照抄、標記 isAdjustment，並帶原資訊進新增', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: oneEntryPaidByMe())));
+    await tester.tap(find.text('可改的買菜'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('enter-edit')));
     await tester.pumpAndSettle();
@@ -592,27 +367,62 @@ void main() {
     await tester.pumpAndSettle();
 
     final rev = c.read(entriesProvider).firstWhere((e) => e.isAdjustment);
-    expect(rev.amount, -1000);
-    expect(rev.payerId, kMeId);
-    expect(rev.splits.map((s) => s.share).toSet(), {-500.0});
+    expect(rev.amount, -300);
+    expect(rev.payerId, kMeId, reason: '誰先付照抄原筆');
+    expect(rev.isAdjustment, isTrue);
+    expect(rev.occurredOn, oneEntryPaidByMe().single.occurredOn);
 
-    expect(find.byKey(const ValueKey('form-step-0')), findsOneWidget, reason: '沖銷後帶去重新記一筆');
-    expect(tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text, '1000');
-
-    Navigator.of(tester.element(find.byKey(const ValueKey('form-step-0')))).pop();
-    await tester.pumpAndSettle();
-    expect(find.text('沖銷'), findsWidgets);
-    expect(find.text('已沖銷'), findsOneWidget, reason: '原筆要標已沖銷並弱化');
-
-    await tester.tap(find.text('已結帳的買菜').first);
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('enter-edit')), findsNothing,
-        reason: '被沖銷的筆不可再編輯，鉛筆按鈕拿掉（Mike 裁示 2026-09-04）');
+    // 接著帶原資訊進「新增」精靈重記。
+    expect(find.byKey(const ValueKey('form-step-0')), findsOneWidget);
+    expect(tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text, '300');
+    await goToStep(tester, 2);
+    expect(chipSelected(tester, 'payer-$kMeId'), isTrue, reason: '重記預填原本的付款人');
   });
 
-  testWidgets('編輯開放筆＝沖銷重記：原筆＋反向筆＋新筆三筆軌跡', (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(entries: oneOpenEntry())));
-    await tester.tap(find.text('可刪的買菜'));
+  testWidgets('沖銷共同錢包筆：反向筆 payerId 維持 null，重記預填「共同錢包」', (tester) async {
+    final c = await pumpApp(tester,
+        containerFor(repoWith(entries: [expense(id: 'e-wallet-01', note: '共同錢包付的水電')])));
+    await tester.tap(find.text('共同錢包付的水電'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('enter-edit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-reverse')));
+    await tester.pumpAndSettle();
+
+    expect(c.read(entriesProvider).firstWhere((e) => e.isAdjustment).payerId, isNull);
+    await goToStep(tester, 2);
+    expect(chipSelected(tester, 'payer-common'), isTrue);
+  });
+
+  testWidgets('沖銷後：原筆不可再編輯，沖銷筆本身也沒有編輯入口', (tester) async {
+    final orig = expense(id: 'e-orig-0001', note: '被沖銷的外送', amount: 1000, payerId: kMeId);
+    final rev = expense(
+      id: 'e-rev-00001',
+      note: '沖銷 #${reversalTag(orig)}：被沖銷的外送',
+      amount: -1000,
+      payerId: kMeId,
+      isAdjustment: true,
+    );
+    final c = await pumpApp(tester, containerFor(repoWith(entries: [orig, rev])));
+
+    c.read(routerProvider).push('/entries/${orig.id}');
+    await tester.pumpAndSettle();
+    expect(find.text('明細'), findsOneWidget);
+    expect(find.byKey(const Key('enter-edit')), findsNothing, reason: '已沖銷的原筆不可再編輯');
+    expect(find.byKey(const Key('entry-menu')), findsNothing, reason: '已沖銷的原筆不可刪');
+
+    Navigator.of(tester.element(find.text('明細'))).pop();
+    await tester.pumpAndSettle();
+
+    c.read(routerProvider).push('/entries/${rev.id}');
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('enter-edit')), findsNothing, reason: '沖銷紀錄本身不可編輯');
+    expect(find.byKey(const Key('entry-menu')), findsNothing, reason: '沖銷紀錄本身不可刪');
+  });
+
+  testWidgets('編輯一筆＝原筆＋反向筆＋新筆三筆軌跡', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: oneEntryPaidByMe())));
+    await tester.tap(find.text('可改的買菜'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('enter-edit')));
     await tester.pumpAndSettle();
@@ -626,258 +436,24 @@ void main() {
     expect(all.length, 3, reason: '原筆＋反向筆＋新筆');
     expect(all.where((e) => e.isAdjustment).single.amount, -300);
     expect(all.where((e) => e.note == '改過的備註').single.amount, 300);
-    expect(all.any((e) => e.note == '可刪的買菜'), isTrue, reason: '原筆保留');
+    expect(all.any((e) => e.note == '可改的買菜'), isTrue, reason: '原筆保留');
   });
 
-  // v1.4（docs/adr/0008 第 7 條）拿掉資金來源後，這兩條沖銷重記測試從原「資金來源」
-  // group 搬來、拿掉裡面的資金來源斷言：各自保留的是原本就夾帶的其他斷言——
-  // 「付款預填原代墊人」與「settled 筆一定代墊（摘要顯示付款人）」，跟資金來源拿不拿掉無關。
-  testWidgets('重記代墊筆：付款預填成員', (tester) async {
-    final container = containerFor(repoWith(entries: advancedFoodEntry()));
-    await pumpApp(tester, container);
-    await tester.tap(find.text('代墊買菜'));
+  testWidgets('沖銷確認對話框文案', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: oneEntryPaidByMe())));
+    await tester.tap(find.text('可改的買菜'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('enter-edit')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('confirm-reverse')));
+    expect(find.byKey(const Key('confirm-reverse')), findsOneWidget);
+    expect(find.textContaining('沖銷重記'), findsOneWidget);
+
+    await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
-
-    await tapKey(tester, 'advanced-tile');
-    expect(tester.widget<ChoiceChip>(find.byKey(Key('payer-$kMeId'))).selected, isTrue, reason: '付款預填原代墊人');
+    expect(find.text('明細'), findsOneWidget);
   });
 
-  testWidgets('已結帳（settled）：一定是代墊，明細進階列摘要顯示付款人', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(entries: settledOnlyEntries())));
-    await tester.tap(find.text('已結帳的買菜'));
-    await tester.pumpAndSettle();
-
-    // settled → readOnly 明細 hub：進階列 onTap 是 null（欄位不可點，既有行為，見
-    // 「點列表＝唯讀明細：欄位不可點」測試），打不開也不需要打開進階 sheet；
-    // 用列本身一直顯示的收起摘要文字驗證「settled 一定代墊」：比對完整字串
-    // （settledOnlyEntries：共同＋payerId=kMeId＋均分），避免鬆散比對誤判。
-    final row = find.byKey(const Key('edit-row-advanced'));
-    expect(find.descendant(of: row, matching: find.text('共同・Mike付・均分')), findsOneWidget,
-        reason: 'settled 筆一定是代墊：摘要含付款人，不是「共同・共同錢包」');
-  });
-
-  testWidgets('刪除：確認後 entriesProvider 少一筆', (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(entries: oneOpenEntry())));
-    await tester.tap(find.text('可刪的買菜'));
-    await tester.pumpAndSettle();
-
-    await tapKey(tester, 'entry-menu');
-    await tapKey(tester, 'delete-entry');
-    await tapKey(tester, 'confirm-delete');
-
-    expect(c.read(entriesProvider), isEmpty);
-  });
-
-  testWidgets('儲存失敗：顯示錯誤，state 不留半筆（寫入成功才改 state）', (tester) async {
-    final c = await pumpApp(tester, containerFor(FailingRepository(failUpsertEntry: true)));
-    final before = c.read(entriesProvider).length;
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '120');
-    await selectCategory(tester, 'c-food');
-    await goToStep(tester, 3);
-    await tester.tap(find.byKey(const Key('save-button')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    expect(find.textContaining('boom'), findsOneWidget);
-    expect(c.read(entriesProvider).length, before,
-        reason: '寫入失敗時 state 不能留下那筆——樂觀更新沒回滾就是這裡會紅');
-    // 失敗後儲存鈕要恢復可按，不能卡在「儲存中…」。
-    expect(tester.widget<FilledButton>(find.byKey(const Key('save-button'))).onPressed, isNotNull);
-  });
-
-  testWidgets('刪除失敗：顯示錯誤且帳目還在', (tester) async {
-    final c = await pumpApp(tester, containerFor(FailingRepository(seed: snapshotWith(entries: oneOpenEntry()), failRemoveEntry: true)));
-    await tester.tap(find.text('可刪的買菜'));
-    await tester.pumpAndSettle();
-    await tapKey(tester, 'entry-menu');
-    await tapKey(tester, 'delete-entry');
-    await tester.tap(find.byKey(const Key('confirm-delete')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.textContaining('boom'), findsOneWidget);
-    expect(c.read(entriesProvider).length, 1);
-  });
-
-  testWidgets('金額欄只收數字：1-2／--5／-5 全擋（修正筆已改為沖銷，無負數輸入）', (tester) async {
-    await pumpApp(tester);
-    await openNewForm(tester);
-
-    String amountText() => tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text;
-
-    // digitsOnly 濾掉非數字字元（不是整段拒絕）：貼上帶符號的字串會留下純數字。
-    await fillKey(tester, 'amount-field', '1-2');
-    expect(amountText(), '12');
-    await fillKey(tester, 'amount-field', '--5');
-    expect(amountText(), '5');
-    await fillKey(tester, 'amount-field', '-5');
-    expect(amountText(), '5');
-
-    await fillKey(tester, 'amount-field', '120');
-    expect(amountText(), '120');
-  });
-
-  testWidgets('金額只有負號 → 視同 0，下一步鎖住存不了', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '-');
-
-    // 負號被 digitsOnly 吃掉＝空值：第 0 關「下一步」鎖住。
-    expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
-    expect(c.read(entriesProvider).length, before);
-  });
-
-  testWidgets('成員多於帳本預設比例時：每人都有比例欄，存檔比例正確', (tester) async {
-    final kid = Member(id: 'm-kid', ledgerId: kLedgerId, userId: 'u3', displayName: '小孩', joinedAt: DateTime(1970));
-    final c = await pumpApp(
-      tester,
-      ProviderContainer(overrides: [
-        membersProvider.overrideWithValue([
-          Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: DateTime(1970)),
-          Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: DateTime(1970)),
-          kid,
-        ]),
-      ]),
-    );
-
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '900');
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-    await tapKey(tester, 'payer-$kMeId');
-    await tapKey(tester, 'split-ratio');
-
-    // 帳本 default_ratio 沒有小孩 → 延遲建立的 controller 帶 0，不會是 null
-    expect(tester.widget<TextField>(find.byKey(const Key('ratio-m-kid'))).controller!.text, '0');
-
-    await fillKey(tester, 'ratio-$kMeId', '40');
-    await fillKey(tester, 'ratio-$kWifeId', '40');
-    await fillKey(tester, 'ratio-m-kid', '20');
-    await tapKey(tester, 'save-button');
-
-    final e = c.read(entriesProvider).last;
-    expect(e.splits.map((s) => s.share).toList(), [360.0, 360.0, 180.0]);
-  });
-
-  testWidgets('點擊目標 ≥44：選項 chip 與細項按鈕的命中區', (tester) async {
-    await pumpApp(tester);
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '100');
-    await tapKey(tester, 'advanced-tile');
-    for (final k in const ['scope-shared', 'payer-common', 'split-equal', 'split-common']) {
-      expect(tester.getSize(find.byKey(Key(k))).height, greaterThanOrEqualTo(44), reason: k);
-    }
-
-    await tapKey(tester, 'lineitem-add');
-    expect(tester.getSize(find.byKey(const Key('lineitem-add'))).height, greaterThanOrEqualTo(44));
-    // 細項刪除改左滑（2026-09-04）：拖開 action pane 後量命中區。
-    await tester.drag(find.byKey(const ValueKey('li-row-0')), const Offset(-200, 0));
-    await tester.pumpAndSettle();
-    final size = tester.getSize(find.byKey(const Key('li-del-0')));
-    expect(size.height, greaterThanOrEqualTo(44));
-    expect(size.width, greaterThanOrEqualTo(44));
-  });
-
-  testWidgets('細項：空白列未填名稱時「＋」停用；儲存時空白列捨棄', (tester) async {
-    final c = await pumpApp(tester);
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '100');
-
-    await tapKey(tester, 'lineitem-add');
-    expect(tester.widget<IconButton>(find.byKey(const Key('lineitem-add'))).onPressed, isNull,
-        reason: '有空白列不能再加');
-
-    await fillKey(tester, 'li-name-0', '蛋');
-    expect(tester.widget<IconButton>(find.byKey(const Key('lineitem-add'))).onPressed, isNotNull);
-
-    await tapKey(tester, 'lineitem-add'); // 第二列留白，儲存時應被捨棄
-    await fillKey(tester, 'li-amount-1', '999'); // 只有金額沒名稱，一樣捨棄
-    await tapKey(tester, 'save-button');
-
-    final e = c.read(entriesProvider).firstWhere((x) => x.amount == 100);
-    expect(e.lineItems.length, 1);
-    expect(e.lineItems.single.name, '蛋');
-  });
-
-  testWidgets('分類選擇器：點側邊 icon 聚焦即選中', (tester) async {
-    await pumpApp(tester);
-    await openNewForm(tester);
-    final wheelF = find.byKey(const Key('category-wheel'));
-    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-food');
-
-    // 「餐飲」在側邊：點它要動畫聚焦過去並成為選中。
-    await tester.tap(find.descendant(of: wheelF, matching: find.text('餐飲')));
-    await tester.pumpAndSettle();
-    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-dining');
-  });
-
-  testWidgets('分類滾輪預設選第一個分類：不動分類直接存 → categoryId=食品', (tester) async {
-    final c = await pumpApp(tester);
-    final before = c.read(entriesProvider).length;
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '120');
-    await tapKey(tester, 'save-button');
-    expect(c.read(entriesProvider).length, before + 1);
-    // 滾輪語義：永遠有選中值，預設第一個分類（食品）。
-    expect(c.read(entriesProvider).any((x) => x.amount == 120 && x.categoryId == 'c-food'), isTrue);
-  });
-
-  // v1.4（ADR-0008）：資金來源 UI／狀態機整組拿掉，所有支出一律走 Entry 建構的餘額支出預設值。
-  testWidgets(
-      'v1.4：共同錢包＋共同＋支出＋已選分類（該分類本月有預算）→ 沒有資金列，照樣存得起來',
-      (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(allocations: foodAndTransportAllocated())));
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '500');
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile');
-
-    // v1.4：資金來源那一列連同 enum 一起消失，這裡只驗「展開進階後照樣存得起來」；
-    // 「找不到資金來源 chip」的斷言由下一條（文案層）守。
-    await tapKey(tester, 'save-button');
-    final saved = c.read(entriesProvider).last;
-    expect(saved.amount, 500);
-    expect(saved.categoryId, 'c-food');
-  });
-
-  testWidgets('v1.4：編輯載入一筆舊資料形狀 → 表單正常開啟、重存正常',
-      (tester) async {
-    final c = await pumpApp(tester, containerFor(repoWith(entries: budgetFundedEntry())));
-    await tester.tap(find.text('預算買菜'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('enter-edit')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('confirm-reverse')));
-    await tester.pumpAndSettle();
-
-    // 沖銷重記帶原資訊進「新增」精靈，表單正常開啟；直接存檔。
-    await tapKey(tester, 'save-button');
-
-    expect(c.read(entriesProvider).last.amount, 500);
-  });
-
-  testWidgets('v1.4：展開進階列後找不到「預算」／「餘額」字樣（原資金來源 chip label 已拿掉）', (tester) async {
-    await pumpApp(tester, containerFor(repoWith(allocations: foodAndTransportAllocated())));
-    await openNewForm(tester);
-    await fillKey(tester, 'amount-field', '500');
-    await selectCategory(tester, 'c-food');
-    await tapKey(tester, 'advanced-tile'); // 展開進階列（step 2）：資金來源 chip 原本就長在這裡。
-
-    // 只在 step 2（進階列）範圍內找：全頁 find.text 會誤中底部導覽「預算」分頁
-    // （lib/app/shell.dart 的 NavigationDestination label；StatefulShellRoute 下
-    // AppShell 與表單同時掛在樹上，不是 offstage，實測驗證過會誤中）。
-    final advancedStep = find.byKey(const ValueKey('form-step-2'));
-    expect(advancedStep, findsOneWidget, reason: '子樹要真的存在，下面兩條 findsNothing 才有鑑別力，不是恆真');
-    expect(find.descendant(of: advancedStep, matching: find.text('預算')), findsNothing);
-    expect(find.descendant(of: advancedStep, matching: find.text('餘額')), findsNothing);
-  });
-
-  // ── 鎖月（v1.4／ADR-0008）────────────────────────────────────────────
+  // ── 鎖月 ────────────────────────────────────────────────────────────
 
   testWidgets('日期選到已清帳月份：日期列下錯誤行、「下一步」鎖住；換回未清月就解開', (tester) async {
     final cur = monthOf(DateTime.now());
@@ -892,7 +468,6 @@ void main() {
     expect(find.text('該月已清帳'), findsOneWidget);
     expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
 
-    // 換回本月（未清）：錯誤行消失、下一步解開。
     await pickDate(tester, DateTime(cur.year, cur.month, 5));
     expect(find.byKey(const Key('date-closed-error')), findsNothing);
     expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNotNull);
@@ -901,36 +476,21 @@ void main() {
   testWidgets('編輯 hub 把日期改到已清帳月份：儲存鈕旁出現「該月已清帳」，不是靜默變灰', (tester) async {
     final cur = monthOf(DateTime.now());
     final prev = prevMonth(cur);
-    final open = Entry(
-      id: 'e-open',
-      ledgerId: kLedgerId,
-      kind: EntryKind.expense,
-      scope: EntryScope.shared,
-      amount: 300,
-      categoryId: 'c-food',
-      occurredOn: DateTime(cur.year, cur.month, 10),
-      createdBy: kMeId,
-      note: '本月的筆',
-    );
     // 編輯 hub＝既有帳目且非唯讀（`readOnly: false`）：路由不走這條，直接組件起來測。
     final c = containerFor(repoWith(
-      entries: [open],
-      settlements: const [],
+      entries: [expense(id: 'e-open-0001', note: '本月的筆', payerId: kMeId)],
       closes: [closeFixture(month: prev)],
     ));
     addTearDown(c.dispose);
     await tester.pumpWidget(UncontrolledProviderScope(
       container: c,
-      child: const MaterialApp(home: EntryFormPage(entryId: 'e-open')),
+      child: const MaterialApp(home: EntryFormPage(entryId: 'e-open-0001')),
     ));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('edit-mode')), findsOneWidget);
-
-    // 一開始日期在本月（未清）：沒有錯誤行、儲存鈕可按。
     expect(find.byKey(const Key('date-closed-error')), findsNothing);
     expect(tester.widget<FilledButton>(find.byKey(const Key('save-button'))).onPressed, isNotNull);
 
-    // 從 hub 的「日期」列開日曆，選到已清帳的上個月。
     await tester.tap(find.byKey(const Key('date-button')));
     await tester.pumpAndSettle();
     tester
@@ -948,28 +508,261 @@ void main() {
   testWidgets('已清帳月份的帳目明細：編輯（沖銷重記）與刪除入口都不出現', (tester) async {
     final cur = monthOf(DateTime.now());
     final prev = prevMonth(cur);
-    final locked = Entry(
-      id: 'e-locked',
-      ledgerId: kLedgerId,
-      kind: EntryKind.expense,
-      scope: EntryScope.shared,
-      amount: 300,
-      categoryId: 'c-food',
-      occurredOn: DateTime(prev.year, prev.month, 10),
-      createdBy: kMeId,
-      note: '上月鎖住',
+    final c = await pumpApp(
+      tester,
+      containerFor(repoWith(
+        entries: [
+          expense(
+              id: 'e-locked-01',
+              note: '上月鎖住',
+              payerId: kMeId,
+              on: DateTime(prev.year, prev.month, 10)),
+        ],
+        closes: [closeFixture(month: prev)],
+      )),
     );
-    final c = await pumpApp(tester, containerFor(repoWith(
-      entries: [locked],
-      settlements: const [],
-      closes: [closeFixture(month: prev)],
-    )));
 
-    c.read(routerProvider).push('/entries/e-locked');
+    c.read(routerProvider).push('/entries/e-locked-01');
     await tester.pumpAndSettle();
 
     expect(find.text('明細'), findsOneWidget);
     expect(find.byKey(const Key('enter-edit')), findsNothing);
     expect(find.byKey(const Key('entry-menu')), findsNothing);
+  });
+
+  // ── 明細、刪除與失敗路徑 ────────────────────────────────────────────
+
+  testWidgets('點列表＝唯讀明細：欄位不可點、細項向下展開', (tester) async {
+    await pumpApp(
+      tester,
+      containerFor(repoWith(entries: [
+        expense(
+          id: 'e-li-00001',
+          note: '帶細項的買菜',
+          amount: 1000,
+          payerId: kMeId,
+          lineItems: const [LineItem(id: 'li-old', entryId: 'e-li-00001', name: '打錯的細項', amount: 1000)],
+        ),
+      ])),
+    );
+    await tester.tap(find.text('帶細項的買菜'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('明細'), findsOneWidget);
+    expect(find.byKey(const Key('save-button')), findsNothing);
+    await tester.tap(find.byKey(const Key('edit-row-amount')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('field-done')), findsNothing, reason: '唯讀不開編輯彈窗');
+
+    await tester.tap(find.byKey(const Key('edit-row-lines')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('detail-lineitems')), findsOneWidget);
+    expect(find.text('打錯的細項'), findsOneWidget);
+  });
+
+  testWidgets('刪除：確認後 entriesProvider 少一筆', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: oneEntryPaidByMe())));
+    await tester.tap(find.text('可改的買菜'));
+    await tester.pumpAndSettle();
+
+    await tapKey(tester, 'entry-menu');
+    await tapKey(tester, 'delete-entry');
+    await tapKey(tester, 'confirm-delete');
+
+    expect(c.read(entriesProvider), isEmpty);
+  });
+
+  testWidgets('刪除失敗：顯示錯誤且帳目還在', (tester) async {
+    final c = await pumpApp(
+      tester,
+      containerFor(FailingRepository(
+          seed: snapshotWith(entries: oneEntryPaidByMe()), failRemoveEntry: true)),
+    );
+    await tester.tap(find.text('可改的買菜'));
+    await tester.pumpAndSettle();
+    await tapKey(tester, 'entry-menu');
+    await tapKey(tester, 'delete-entry');
+    await tester.tap(find.byKey(const Key('confirm-delete')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.textContaining('boom'), findsOneWidget);
+    expect(c.read(entriesProvider).length, 1);
+  });
+
+  testWidgets('儲存失敗：顯示錯誤，state 不留半筆（寫入成功才改 state）', (tester) async {
+    final c = await pumpApp(tester, containerFor(FailingRepository(failUpsertEntry: true)));
+    final before = c.read(entriesProvider).length;
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '120');
+    await selectCategory(tester, 'c-food');
+    await goToStep(tester, 3);
+    await tester.tap(find.byKey(const Key('save-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.textContaining('boom'), findsOneWidget);
+    expect(c.read(entriesProvider).length, before,
+        reason: '寫入失敗時 state 不能留下那筆——樂觀更新沒回滾就是這裡會紅');
+    expect(tester.widget<FilledButton>(find.byKey(const Key('save-button'))).onPressed, isNotNull);
+  });
+
+  testWidgets('沖銷失敗：不留反向筆，並顯示錯誤', (tester) async {
+    final c = await pumpApp(
+      tester,
+      containerFor(FailingRepository(
+          seed: snapshotWith(entries: oneEntryPaidByMe()), failUpsertEntry: true)),
+    );
+    await tester.tap(find.text('可改的買菜'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('enter-edit')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-reverse')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.textContaining('boom'), findsOneWidget);
+    expect(c.read(entriesProvider).where((e) => e.isAdjustment), isEmpty);
+    expect(find.byKey(const ValueKey('form-step-0')), findsNothing, reason: '失敗不該帶去重記');
+  });
+
+  // ── 既有表單行為（金額、細項、分類、版面）────────────────────────────
+
+  testWidgets('細項可加，差額只提示不擋存', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '500');
+    await selectCategory(tester, 'c-food');
+    await tapKey(tester, 'lineitem-add');
+    await fillKey(tester, 'li-name-0', '雞蛋');
+    await fillKey(tester, 'li-amount-0', '89');
+    expect(find.textContaining('合計'), findsOneWidget);
+    await tapKey(tester, 'save-button');
+
+    final e = c.read(entriesProvider).single;
+    expect(e.lineItems.single.name, '雞蛋');
+    expect(e.lineItems.single.amount, 89);
+  });
+
+  testWidgets('細項：空白列未填名稱時「＋」停用；儲存時空白列捨棄', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '100');
+
+    await tapKey(tester, 'lineitem-add');
+    expect(tester.widget<IconButton>(find.byKey(const Key('lineitem-add'))).onPressed, isNull,
+        reason: '有空白列不能再加');
+
+    await fillKey(tester, 'li-name-0', '蛋');
+    expect(tester.widget<IconButton>(find.byKey(const Key('lineitem-add'))).onPressed, isNotNull);
+
+    await tapKey(tester, 'lineitem-add'); // 第二列留白，儲存時應被捨棄
+    await fillKey(tester, 'li-amount-1', '999'); // 只有金額沒名稱，一樣捨棄
+    await tapKey(tester, 'save-button');
+
+    final e = c.read(entriesProvider).single;
+    expect(e.lineItems.length, 1);
+    expect(e.lineItems.single.name, '蛋');
+  });
+
+  testWidgets('金額欄只收數字：1-2／--5／-5 全擋（沖銷是唯一的負數來源）', (tester) async {
+    await pumpApp(tester);
+    await openNewForm(tester);
+
+    String amountText() =>
+        tester.widget<TextField>(find.byKey(const Key('amount-field'))).controller!.text;
+
+    await fillKey(tester, 'amount-field', '1-2');
+    expect(amountText(), '12');
+    await fillKey(tester, 'amount-field', '--5');
+    expect(amountText(), '5');
+    await fillKey(tester, 'amount-field', '-5');
+    expect(amountText(), '5');
+
+    await fillKey(tester, 'amount-field', '120');
+    expect(amountText(), '120');
+  });
+
+  testWidgets('金額只有負號 → 視同 0，下一步鎖住存不了', (tester) async {
+    final c = await pumpApp(tester);
+    final before = c.read(entriesProvider).length;
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '-');
+
+    expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
+    expect(c.read(entriesProvider).length, before);
+  });
+
+  testWidgets('分類滾輪預設選第一個分類：不動分類直接存 → categoryId=食品', (tester) async {
+    final c = await pumpApp(tester, containerFor(repoWith(entries: const [])));
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '120');
+    await tapKey(tester, 'save-button');
+    expect(c.read(entriesProvider).single.categoryId, 'c-food');
+  });
+
+  testWidgets('分類選擇器：點側邊 icon 聚焦即選中', (tester) async {
+    await pumpApp(tester);
+    await openNewForm(tester);
+    final wheelF = find.byKey(const Key('category-wheel'));
+    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-food');
+
+    await tester.tap(find.descendant(of: wheelF, matching: find.text('餐飲')));
+    await tester.pumpAndSettle();
+    expect(tester.widget<CategoryWheel>(wheelF).selectedId, 'c-dining');
+  });
+
+  testWidgets('點擊目標 ≥44：誰先付 chip 與細項按鈕的命中區', (tester) async {
+    await pumpApp(tester);
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '100');
+    await goToStep(tester, 2);
+    for (final k in ['payer-common', 'payer-$kMeId', 'payer-$kWifeId']) {
+      expect(tester.getSize(find.byKey(Key(k))).height, greaterThanOrEqualTo(44), reason: k);
+    }
+
+    await tapKey(tester, 'lineitem-add');
+    expect(tester.getSize(find.byKey(const Key('lineitem-add'))).height, greaterThanOrEqualTo(44));
+    await tester.drag(find.byKey(const ValueKey('li-row-0')), const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    final size = tester.getSize(find.byKey(const Key('li-del-0')));
+    expect(size.height, greaterThanOrEqualTo(44));
+    expect(size.width, greaterThanOrEqualTo(44));
+  });
+
+  testWidgets('390×844：新增表單逐關都在視窗內、不爆版', (tester) async {
+    await pumpApp(tester);
+    await openNewForm(tester);
+    expect(tester.widget<FilledButton>(find.byKey(const Key('form-next-button'))).onPressed, isNull);
+    await fillKey(tester, 'amount-field', '100');
+
+    for (var i = 0; i <= 2; i++) {
+      expect(currentFormStep(tester), i);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const Key('form-next-button')));
+      await tester.pumpAndSettle();
+    }
+    expect(currentFormStep(tester), 3);
+    expect(tester.getBottomRight(find.byKey(const Key('save-button'))).dy, lessThanOrEqualTo(844));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('390×667：新增表單逐關都不爆版', (tester) async {
+    tester.view.physicalSize = const Size(390, 667);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    await tester.pumpWidget(UncontrolledProviderScope(container: c, child: const AccountingApp()));
+    await tester.pumpAndSettle();
+
+    await openNewForm(tester);
+    await fillKey(tester, 'amount-field', '100');
+    for (var i = 0; i <= 2; i++) {
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.byKey(const Key('form-next-button')));
+      await tester.pumpAndSettle();
+    }
+    expect(currentFormStep(tester), 3);
+    expect(tester.takeException(), isNull);
   });
 }

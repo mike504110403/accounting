@@ -1,7 +1,10 @@
-/// 沖銷（Mike 裁示 2026-09-04，取代「修正筆」）：對已結帳的帳目產生一模一樣的
-/// 反向紀錄——金額、分攤份額全取負，付款來源／日期照抄——
-/// 讓拆帳、共同／個人餘額沿原路整筆回退；使用者再用複製的原資訊
+/// 沖銷（Mike 裁示 2026-09-04，取代「修正筆」；v1.5／ADR-0009 沿用）：
+/// 對一筆帳目產生一模一樣的反向紀錄——金額取負，**付款人（誰先付）與日期照抄**——
+/// 讓補入剩餘、共同餘額、分類預算沿原路整筆回退；使用者再用複製的原資訊
 /// 手動重新記一筆正確的。負數合法性沿用 DB 的 is_adjustment 通道（entries_amount_sign）。
+///
+/// v1.5 起每筆只記「誰先付」：反向筆只需要照抄 `payerId`
+/// （非 null＝該成員先付、null＝共同錢包），三個數就會自己回退。
 library;
 
 import '../../domain/models.dart';
@@ -16,27 +19,21 @@ bool hasReversal(Iterable<Entry> all, Entry original) {
   return all.any((e) => e.isAdjustment && e.note.contains(tag));
 }
 
-/// 組一筆反向紀錄。呼叫端限 settled 筆（未鎖的直接編輯即可）。
+/// 組一筆反向紀錄。
 Entry buildReversal(Entry original, {required String me}) {
   return Entry(
     id: '', // 新筆，id 交給 DB
     ledgerId: original.ledgerId,
     kind: original.kind,
-    scope: original.scope,
     amount: -original.amount,
     categoryId: original.categoryId,
     occurredOn: original.occurredOn, // 同日反向：與原筆同一個月摘要桶互抵
     createdBy: me,
     note: '沖銷 #${reversalTag(original)}：${original.note}'.trim(),
-    // 私人筆的 payer 恆等於 createdBy（DB check）；共同筆照抄原付款來源。
-    payerId: original.scope == EntryScope.private ? me : original.payerId,
-    splitMethod: original.splitMethod,
+    // 誰先付照抄原筆：原筆扣誰的補入剩餘，反向筆就補回誰的；
+    // null（共同錢包）照樣照抄，共同餘額才會沿原路加回去。
+    payerId: original.payerId,
     isAdjustment: true,
-    // v1.4 起沒有資金來源狀態機：反向筆一律走 Entry 建構的餘額支出預設值（ADR-0008）。
-    splits: [
-      for (final s in original.splits)
-        EntrySplit(entryId: '', memberId: s.memberId, share: -s.share),
-    ],
-    // 細項是備註性質，不做反向（金額守恆在主筆與分攤）。
+    // 細項是備註性質，不做反向（金額守恆在主筆）。
   );
 }

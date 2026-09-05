@@ -7,6 +7,7 @@
 library;
 
 import 'package:accounting/data/errors.dart';
+import 'package:accounting/domain/month_summary.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -19,7 +20,7 @@ Future<void> expectMessage(PostgrestException e, String expected) async {
 
 void main() {
   group('check constraint', () {
-    test('v1.4：同分類同月第二筆預算（unique 23505）→ 說「本月已設定」', () async {
+    test('同分類同月第二筆預算（unique 23505）→ 說「本月已設定」', () async {
       await expectMessage(
         const PostgrestException(
           message: 'duplicate key value violates unique constraint '
@@ -30,18 +31,7 @@ void main() {
       );
     });
 
-    test('v1.4：每月補入額超出範圍（23514）→ 說清楚上下界', () async {
-      await expectMessage(
-        const PostgrestException(
-          message: 'new row for relation "members" violates check constraint '
-              '"members_monthly_topup_range"',
-          code: '23514',
-        ),
-        '每月補入額必須介於 0 與 1 億之間',
-      );
-    });
-
-    test('v1.4：預算金額 ≤ 0（23514）→ 說「必須大於 0」', () async {
+    test('預算金額 ≤ 0（23514）→ 說「必須大於 0」', () async {
       await expectMessage(
         const PostgrestException(
           message: 'new row for relation "budget_allocation" violates check constraint '
@@ -49,6 +39,28 @@ void main() {
           code: '23514',
         ),
         '預算金額必須大於 0',
+      );
+    });
+
+    test('v1.5：補入金額 ≤ 0（23514）→ 說「補入金額必須大於 0」', () async {
+      await expectMessage(
+        const PostgrestException(
+          message: 'new row for relation "personal_topups" violates check constraint '
+              '"personal_topups_amount_positive"',
+          code: '23514',
+        ),
+        '補入金額必須大於 0',
+      );
+    });
+
+    test('v1.5：收入帶付款人（23514）→ 說「收入不需要付款人」', () async {
+      await expectMessage(
+        const PostgrestException(
+          message: 'new row for relation "entries" violates check constraint '
+              '"entries_income_no_payer"',
+          code: '23514',
+        ),
+        '收入不需要付款人',
       );
     });
 
@@ -63,24 +75,29 @@ void main() {
     });
   });
 
-  group('v1.4 鎖月 trigger 與清帳 RPC', () {
+  group('鎖月 trigger 與清帳 RPC', () {
     test('month closed: YYYY-MM → 「該月已清帳」（訊息帶的是被擋那筆的月份）', () async {
-      await expectMessage(const PostgrestException(message: 'month closed: 2026-08'), '該月已清帳');
+      await expectMessage(const PostgrestException(message: 'month closed: 2026-07'), '該月已清帳');
     });
 
-    test('清帳可清條件的六種訊息各自對應一句中文（db-contract 逐條）', () async {
-      await expectMessage(const PostgrestException(message: 'close_month: month must be first day'),
-          '清帳月份格式錯誤，請重新整理後再試');
+    test('補入被鎖月擋下來也是同一句（帳目、細項、預算、補入共用同一條 trigger 訊息）', () async {
       await expectMessage(
-          const PostgrestException(message: 'close_month: month not ended'), '本月尚未結束');
-      await expectMessage(
-          const PostgrestException(message: 'close_month: already closed'), '該月已清帳');
-      await expectMessage(
-          const PostgrestException(message: 'close_month: nothing to close'), '沒有可清的月份');
-      await expectMessage(
-          const PostgrestException(message: 'close_month: unsettled entries in month'), '有拆帳尚未簽完');
-      await expectMessage(
-          const PostgrestException(message: 'close_month: must close 2026-07 first'), '請先清 2026／07');
+        const PostgrestException(message: 'month closed: 2026-07 (personal_topups)'),
+        '該月已清帳',
+      );
+    });
+
+    test('清帳可清條件的五種訊息各自對應一句中文（v1.5 沒有「拆帳未簽完」那條）', () async {
+      const cases = {
+        'close_month: month must be first day': '清帳月份格式錯誤，請重新整理後再試',
+        'close_month: month not ended': '本月尚未結束',
+        'close_month: already closed': '該月已清帳',
+        'close_month: nothing to close': '沒有可清的月份',
+        'close_month: must close 2026-06 first': '請先清 2026／06',
+      };
+      for (final e in cases.entries) {
+        await expectMessage(PostgrestException(message: e.key), e.value);
+      }
     });
 
     test('month_close_preview 的非成員 42501 走既有的「不是成員」', () async {
@@ -91,63 +108,48 @@ void main() {
     });
   });
 
-  group('settled 鎖定 trigger', () {
-    test('金額鎖住 → 導向修正筆', () async {
-      await expectMessage(
-        const PostgrestException(message: 'entry settled: amount locked, use an adjustment entry'),
-        '這筆已結帳，金額鎖住，請改用修正筆',
-      );
-    });
-
-    test('刪除被擋', () async {
-      await expectMessage(
-        const PostgrestException(message: 'entry settled: delete blocked, use an adjustment entry'),
-        '已結帳的帳目不能刪除，請改用修正筆',
-      );
-    });
-
-    test('子表被鎖（upsert_entry 帶子表）', () async {
-      await expectMessage(
-        const PostgrestException(message: 'entry settled: child tables locked'),
-        '這筆已結帳，只能改分類與備註',
-      );
-    });
-  });
-
   group('RPC raise 與權限', () {
     test('錯的邀請碼', () async {
       await expectMessage(
-        const PostgrestException(message: 'join_ledger: invalid invite code'),
+        const PostgrestException(message: 'invalid invite code', code: 'P0001'),
         '邀請碼不正確',
       );
     });
 
-    test('已有 pending 結算', () async {
+    test('v1.5：補入寫到別人那列 → RLS 42501', () async {
       await expectMessage(
-        const PostgrestException(message: 'a pending settlement already exists'),
-        '已經有一筆結算正在等待簽核',
-      );
-    });
-
-    test('不是需簽者', () async {
-      await expectMessage(
-        const PostgrestException(message: 'not a required signer'),
-        '你不是這筆結算的簽核人',
+        const PostgrestException(
+          message: 'new row violates row-level security policy for table "personal_topups"',
+          code: '42501',
+        ),
+        '沒有權限執行這個操作',
       );
     });
 
     test('欄位級授權擋下（42501）', () async {
       await expectMessage(
-        const PostgrestException(message: 'permission denied for table entries', code: '42501'),
+        const PostgrestException(message: 'permission denied for column x', code: '42501'),
         '沒有權限執行這個操作',
       );
     });
 
     test('認不得的訊息 → 通用文案，不把英文原文丟給使用者', () async {
       await expectMessage(
-        const PostgrestException(message: 'some brand new postgres error nobody mapped yet'),
+        const PostgrestException(message: 'some brand new raise from a future migration'),
         '操作失敗，請稍後再試',
       );
+    });
+
+    test('v1.5 已廢止的結算訊息不再有專屬中文（落到通用文案）', () async {
+      for (final gone in [
+        'a pending settlement already exists',
+        'no settleable entries',
+        'not a required signer',
+        'entry settled: amount locked, use an adjustment entry',
+        'close_month: unsettled entries in month',
+      ]) {
+        await expectMessage(PostgrestException(message: gone), '操作失敗，請稍後再試');
+      }
     });
   });
 
@@ -217,6 +219,23 @@ void main() {
             .having((e) => e.message, 'message', '伺服器回應格式錯誤，請稍後再試')),
       );
     });
+  });
+
+  test('RPC 回傳缺鍵 → parseRow 包成「格式不正確」，不會被誤報成「連線失敗」', () async {
+    // `monthSummary` 走 parseRow 就是為了這件事：缺 members 的 TypeError 若掉進
+    // guard 最外層，使用者會看到「連線失敗，請檢查網路」並一直重試一個跟網路無關的問題。
+    await expectLater(
+      guard<MonthSummary>(() async => parseRow('month_summary', const {
+            'shared_balance': 1,
+            'budget_total': 0,
+            'spent_total': 0,
+            'overspend_total': 0,
+            'categories': <Object?>[],
+            'shared_paid': 0,
+          }, MonthSummary.fromJson)),
+      throwsA(isA<LedgerException>()
+          .having((e) => e.message, 'message', '伺服器回傳的「month_summary」資料格式不正確，請稍後再試')),
+    );
   });
 
   test('非 Supabase 的例外（網路斷線等）→ 通用連線錯誤', () async {

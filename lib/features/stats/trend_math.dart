@@ -1,10 +1,9 @@
-/// 趨勢圖分桶純函式：把視角資料切成日／週／月／年桶，每桶算出花費、超支、餘額
-/// （家庭＝共同餘額、個人＝個人餘額，v1.4）。
+/// 趨勢圖分桶純函式：把資料切成日／週／月／年桶，每桶算出花費、共同餘額、每人補入
+/// （v1.5／ADR-0009：無視角、無超支線——預算與超支是預算頁的事，統計不再畫）。
 library;
 
 import '../../domain/balance_math.dart';
 import '../../domain/models.dart';
-import 'view_math.dart';
 
 /// 一個時間桶（[start]、[end] 皆含端點）。
 class Bucket {
@@ -13,8 +12,8 @@ class Bucket {
     required this.start,
     required this.end,
     required this.spend,
-    required this.over,
-    required this.balance,
+    required this.sharedBalance,
+    required this.topupByMember,
   });
 
   /// x 軸標籤：日＝日數字、週＝M/d、月＝M月、年＝yyyy。
@@ -22,50 +21,89 @@ class Bucket {
   final DateTime start;
   final DateTime end;
 
-  /// 桶內支出合計（視角金額），不分付款人與資金來源。
+  /// 桶內全部支出合計，不分誰付（spec「統計」節「花費」）。
   final int spend;
 
-  /// 桶末日的超支（家庭＝當月超支合計；個人視角沒有預算，恆 0）。
-  final int over;
+  /// 桶末日（含）的共同餘額（`balance_math.sharedBalance`）。
+  final int sharedBalance;
 
-  /// 桶末日的餘額（家庭＝共同餘額、個人＝個人餘額，v1.4）。
+  /// 桶內每位成員的補入合計，key 是 memberId。
   ///
-  /// `null`＝這個點不畫（線斷開）：已清帳月份的個人餘額只在「月」快照上有意義
-  /// （`MonthClose.details` 是整月一筆事實），日／週／年顆粒度落在已清帳月的桶
-  /// 沒有對應的快照可用，硬塞同一個月快照值會變成連續好幾點同一個數字、誤導
-  /// 使用者，所以呼叫端在這種情況下回傳 null（spec v1.4「個人餘額的月份語意」）。
-  /// 家庭線（共同餘額）不受影響，恆非 null。
-  final int? balance;
+  /// **只在月／年顆粒度計算**，日／週顆粒度恆空 map（spec：「每人補入…只在月／年
+  /// 顆粒度畫」）。月顆粒度若桶剛好落在一個已清帳月（`closes` 裡有那一列），改讀
+  /// `MonthClose.details.members[*].topup` 快照，不吃即時 `topups`（清帳後補入
+  /// 已回到設定狀態，但快照是清帳當下的事實，不會因為後續資料而變動）；年顆粒度
+  /// 把該年 12 個月各自的值（已清月讀快照、未清月讀即時）加總。
+  final Map<String, int> topupByMember;
 }
 
-/// [bucketize] 的輸入。
-///
-/// 餘額與超支不吃原始資料而吃兩個「算到某日」的函式（v1.3）：這兩條線的算式住在
-/// `balance_math`，家庭與個人視角餵的參數也不同（共同餘額 vs 個人餘額）。
-/// 由呼叫端把視角決定好包成函式，分桶這裡就只管切時間、不管帳務規則。
+/// [bucketize] 的輸入：全期間資料（不要先過濾月份，餘額與補入都要往前累計／對照月份）。
 class TrendInput {
   const TrendInput({
-    required this.items,
-    required this.categories,
-    required this.balanceAt,
-    required this.overspendAt,
-    required this.categoryOverspendAt,
+    required this.entries,
+    required this.topups,
+    required this.closes,
   });
 
-  /// 視角套用後的**全期間**資料（不要先過濾月份，花費以外的線要往前累計）。
-  final List<ViewEntry> items;
+  /// 全部帳目（收入＋支出）：`spend` 只收支出，`sharedBalance` 兩者都要看。
+  final List<Entry> entries;
+  final List<PersonalTopup> topups;
+  final List<MonthClose> closes;
+}
 
-  /// 帳本分類；只有 `kind == expense` 的有花費線。
-  final List<Category> categories;
+// ── 日期工具（v1.5：balance_math 只有月層級；日／週層級唯一定義處，`pie_card.dart`
+// 的週期間選擇也 import 這裡，不要各自重寫一份——之前兩邊各放一份重複過）───────
 
-  /// 桶末日（含）的餘額（家庭＝共同餘額、個人＝個人餘額，v1.4）；`null` 見 [Bucket.balance]。
-  final int? Function(DateTime until) balanceAt;
+DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
-  /// 桶末日（含）的超支合計。
-  final int Function(DateTime until) overspendAt;
+/// 該日所屬週的週一（週一起算，spec「週一起」）。
+DateTime startOfWeek(DateTime d) => DateTime(d.year, d.month, d.day - (d.weekday - 1));
 
-  /// 桶末日（含）單一分類的超支（依分類版用）。
-  final int Function(String categoryId, DateTime until) categoryOverspendAt;
+DateTime endOfWeek(DateTime weekStart) =>
+    DateTime(weekStart.year, weekStart.month, weekStart.day + 6);
+
+DateTime lastDayOfMonth(DateTime m) => DateTime(m.year, m.month + 1, 0);
+
+int _daysInMonth(DateTime m) => lastDayOfMonth(m).day;
+
+/// [d] 是否落在 [start]、[end] 之間（皆含端點，只比日期）。
+bool inRange(DateTime d, DateTime start, DateTime end) {
+  final x = dateOnly(d);
+  return !x.isBefore(dateOnly(start)) && !x.isAfter(dateOnly(end));
+}
+
+/// [monthStart] 所在月每位成員的補入合計：該月有清帳列（`sameMonth`）就讀快照，
+/// 否則即時加總 [topups]。
+Map<String, int> _topupByMemberForMonth(
+  Iterable<PersonalTopup> topups,
+  Iterable<MonthClose> closes,
+  DateTime monthStart,
+) {
+  for (final c in closes) {
+    if (sameMonth(c.month, monthStart)) {
+      return {for (final m in c.details.members) m.memberId: m.topup};
+    }
+  }
+  final out = <String, int>{};
+  for (final t in topups) {
+    if (!sameMonth(t.occurredOn, monthStart)) continue;
+    out[t.memberId] = (out[t.memberId] ?? 0) + t.amount;
+  }
+  return out;
+}
+
+/// [year] 12 個月的 [_topupByMemberForMonth] 加總（年顆粒度用）。
+Map<String, int> _topupByMemberForYear(
+  Iterable<PersonalTopup> topups,
+  Iterable<MonthClose> closes,
+  int year,
+) {
+  final out = <String, int>{};
+  for (var month = 1; month <= 12; month++) {
+    final m = _topupByMemberForMonth(topups, closes, DateTime(year, month, 1));
+    m.forEach((k, v) => out[k] = (out[k] ?? 0) + v);
+  }
+  return out;
 }
 
 /// 依顆粒度分桶。範圍固定：
@@ -77,59 +115,26 @@ List<Bucket> bucketize(TrendInput input, Granularity granularity, DateTime ancho
   final out = <Bucket>[];
   for (final r in ranges) {
     var spend = 0;
-    for (final i in input.items) {
-      if (!i.entry.isExpense) continue;
-      if (!inRange(i.entry.occurredOn, r.start, r.end)) continue;
-      spend += i.amount;
+    for (final e in input.entries) {
+      if (!e.isExpense) continue;
+      if (!inRange(e.occurredOn, r.start, r.end)) continue;
+      spend += e.amount;
     }
+
+    final Map<String, int> topupByMember = switch (granularity) {
+      Granularity.month => _topupByMemberForMonth(input.topups, input.closes, r.start),
+      Granularity.year => _topupByMemberForYear(input.topups, input.closes, r.start.year),
+      Granularity.day || Granularity.week => const {},
+    };
 
     out.add(Bucket(
       label: r.label,
       start: r.start,
       end: r.end,
       spend: spend,
-      over: input.overspendAt(r.end),
-      balance: input.balanceAt(r.end),
+      sharedBalance: sharedBalance(entries: input.entries, until: r.end),
+      topupByMember: topupByMember,
     ));
-  }
-  return out;
-}
-
-/// 每個支出分類各一組桶（趨勢圖「依分類」用），key 是 categoryId。
-///
-/// 桶的範圍與 [bucketize] 完全一致，花費與超支都收斂到單一分類。
-/// **`balance` 一律 `null`**：分類沒有「餘額」這回事（餘額是帳本層級的期初＋收支累計），
-/// UI 不得讀它；用 `null` 而不是 `0`，跟「這個帳本真的算出餘額是 0」區分開。
-Map<String, List<Bucket>> bucketizeByCategory(
-  TrendInput input,
-  Granularity granularity,
-  DateTime anchorMonth,
-) {
-  final ranges = _ranges(granularity, monthOf(anchorMonth));
-  final out = <String, List<Bucket>>{};
-
-  for (final c in input.categories) {
-    if (c.kind != EntryKind.expense) continue;
-
-    final list = <Bucket>[];
-    for (final r in ranges) {
-      var spend = 0;
-      for (final i in input.items) {
-        if (!i.entry.isExpense) continue;
-        if (i.entry.categoryId != c.id) continue;
-        if (!inRange(i.entry.occurredOn, r.start, r.end)) continue;
-        spend += i.amount;
-      }
-      list.add(Bucket(
-        label: r.label,
-        start: r.start,
-        end: r.end,
-        spend: spend,
-        over: input.categoryOverspendAt(c.id, r.end),
-        balance: null, // 分類無餘額概念，見上方說明
-      ));
-    }
-    out[c.id] = list;
   }
   return out;
 }
@@ -140,7 +145,7 @@ List<_Range> _ranges(Granularity g, DateTime m) {
   final out = <_Range>[];
   switch (g) {
     case Granularity.day:
-      final n = daysInMonth(m);
+      final n = _daysInMonth(m);
       for (var d = 1; d <= n; d++) {
         final day = DateTime(m.year, m.month, d);
         out.add((start: day, end: day, label: '$d'));

@@ -25,7 +25,7 @@ LedgerSnapshot snapshotWith({
   List<Entry>? entries,
   List<BudgetAllocation>? allocations,
   List<ListItem>? listItems,
-  List<Settlement>? settlements,
+  List<PersonalTopup>? topups,
   List<MonthClose>? closes,
   String? currentMemberId,
 }) =>
@@ -36,7 +36,7 @@ LedgerSnapshot snapshotWith({
       entries: entries,
       allocations: allocations,
       listItems: listItems,
-      settlements: settlements,
+      topups: topups,
       closes: closes,
       currentMemberId: currentMemberId,
     );
@@ -49,7 +49,7 @@ InMemoryLedgerRepository repoWith({
   List<Entry>? entries,
   List<BudgetAllocation>? allocations,
   List<ListItem>? listItems,
-  List<Settlement>? settlements,
+  List<PersonalTopup>? topups,
   List<MonthClose>? closes,
   String? currentMemberId,
 }) =>
@@ -61,20 +61,21 @@ InMemoryLedgerRepository repoWith({
         entries: entries,
         allocations: allocations,
         listItems: listItems,
-        settlements: settlements,
+        topups: topups,
         closes: closes,
         currentMemberId: currentMemberId,
       ),
     );
 
-/// 一筆清帳紀錄（v1.4）。`details` 是清帳當下的事實快照，測試要什麼數字就給什麼數字。
+/// 一筆清帳紀錄（v1.5）。`details` 是清帳當下的事實快照，測試要什麼數字就給什麼數字。
 MonthClose closeFixture({
   required DateTime month,
   String? id,
   String closedBy = kMeId,
   DateTime? closedAt,
   List<MonthCloseMemberLine> members = const [],
-  int sharedDelta = 0,
+  int sharedPaid = 0,
+  String? incomeEntryId,
 }) =>
     MonthClose(
       id: id ?? 'mc-${month.year}-${month.month.toString().padLeft(2, '0')}',
@@ -82,23 +83,42 @@ MonthClose closeFixture({
       month: month,
       closedBy: closedBy,
       closedAt: closedAt ?? DateTime(month.year, month.month + 1, 3, 9),
-      details: MonthCloseDetails(month: month, members: members, sharedDelta: sharedDelta),
+      incomeEntryId: incomeEntryId,
+      details: MonthCloseDetails(month: month, members: members, sharedPaid: sharedPaid),
     );
 
-/// 清帳明細裡的一位成員：`ending` 一律＝`topup + net`（DB 那側也是這樣算的，
+/// 清帳明細裡的一位成員：`ending` 一律＝`topup − paid`（DB 那側也是這樣算的，
 /// 測試自己編一個對不上的 ending 只會測到不存在的世界）。
 MonthCloseMemberLine closeLine({
   required String memberId,
   required String displayName,
   int topup = 0,
-  int net = 0,
+  int paid = 0,
 }) =>
     MonthCloseMemberLine(
       memberId: memberId,
       displayName: displayName,
       topup: topup,
-      net: net,
-      ending: topup + net,
+      paid: paid,
+      ending: topup - paid,
+    );
+
+/// 一筆個人補入（v1.5）。
+PersonalTopup topupFixture({
+  required String memberId,
+  required int amount,
+  required DateTime occurredOn,
+  String? id,
+  String note = '',
+}) =>
+    PersonalTopup(
+      id: id ?? 'pt-$memberId-${occurredOn.year}${occurredOn.month}${occurredOn.day}-$amount',
+      ledgerId: kLedgerId,
+      memberId: memberId,
+      amount: amount,
+      occurredOn: occurredOn,
+      createdBy: memberId,
+      note: note,
     );
 
 /// 讓指定的寫入操作一律失敗，其餘照常——用來驗「失敗路徑不留半套狀態」。
@@ -120,8 +140,8 @@ class FailingRepository extends InMemoryLedgerRepository {
     this.failAddAllocation = false,
     this.failUpdateLedger = false,
     this.failUpdateMember = false,
-    this.failInitiateSettlement = false,
-    this.failApproveSettlement = false,
+    this.failAddTopup = false,
+    this.failRemoveTopup = false,
     this.failMyLedgers = false,
     this.failJoinLedger = false,
     this.failCreateLedger = false,
@@ -147,8 +167,8 @@ class FailingRepository extends InMemoryLedgerRepository {
   final bool failAddAllocation;
   final bool failUpdateLedger;
   final bool failUpdateMember;
-  final bool failInitiateSettlement;
-  final bool failApproveSettlement;
+  final bool failAddTopup;
+  final bool failRemoveTopup;
   final bool failMyLedgers;
   final bool failJoinLedger;
   final bool failCreateLedger;
@@ -162,10 +182,8 @@ class FailingRepository extends InMemoryLedgerRepository {
   static Never _boom() => throw const LedgerException('boom');
 
   @override
-  Future<Entry> upsertEntry(Entry entry, {bool writeSplits = true, bool writeLineItems = true}) =>
-      failUpsertEntry
-          ? _boom()
-          : super.upsertEntry(entry, writeSplits: writeSplits, writeLineItems: writeLineItems);
+  Future<Entry> upsertEntry(Entry entry, {bool writeLineItems = true}) =>
+      failUpsertEntry ? _boom() : super.upsertEntry(entry, writeLineItems: writeLineItems);
 
   @override
   Future<void> removeEntry(String id) => failRemoveEntry ? _boom() : super.removeEntry(id);
@@ -209,12 +227,11 @@ class FailingRepository extends InMemoryLedgerRepository {
   Future<void> updateMember(Member m) => failUpdateMember ? _boom() : super.updateMember(m);
 
   @override
-  Future<Settlement> initiateSettlement(String ledgerId) =>
-      failInitiateSettlement ? _boom() : super.initiateSettlement(ledgerId);
+  Future<PersonalTopup> addTopup(PersonalTopup t) =>
+      failAddTopup ? _boom() : super.addTopup(t);
 
   @override
-  Future<Settlement> approveSettlement(String id) =>
-      failApproveSettlement ? _boom() : super.approveSettlement(id);
+  Future<void> removeTopup(String id) => failRemoveTopup ? _boom() : super.removeTopup(id);
 
   @override
   Future<List<Ledger>> myLedgers() => failMyLedgers ? _boom() : super.myLedgers();
@@ -230,8 +247,8 @@ class FailingRepository extends InMemoryLedgerRepository {
       failMonthClosePreview ? _boom() : super.monthClosePreview(ledgerId, month);
 
   @override
-  Future<MonthClose> closeMonth(String ledgerId, DateTime month) =>
-      failCloseMonth ? _boom() : super.closeMonth(ledgerId, month);
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month, {bool recordIncome = true}) =>
+      failCloseMonth ? _boom() : super.closeMonth(ledgerId, month, recordIncome: recordIncome);
 }
 
 /// 「這個帳號還沒有任何帳本」的 repository：首登流程用。

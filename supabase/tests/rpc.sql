@@ -1,4 +1,4 @@
--- 建帳本 / 加入帳本 RPC 測試。
+-- 建帳本 / 加入帳本 RPC 測試（v1.5：不再寫 default_ratio）。
 \set MIKE '11111111-1111-1111-1111-111111111111'
 \set WIFE '22222222-2222-2222-2222-222222222222'
 
@@ -18,7 +18,11 @@ begin
   select * into v_m from public.members m where m.ledger_id = v_l.id;
   assert v_m.user_id = '11111111-1111-1111-1111-111111111111'::uuid, '建帳本的人沒被加成成員';
   assert v_m.display_name = 'Mike', format('display_name 應取 raw_user_meta_data.full_name，實際 %s', v_m.display_name);
-  assert (v_l.default_ratio ->> v_m.id::text)::int = 100, 'default_ratio 應為單一成員 100';
+  -- v1.5：ledgers 只剩 id／name／invite_code／created_at（default_ratio、opening_balance_shared 已 drop）。
+  assert not exists (select 1 from information_schema.columns
+                     where table_schema = 'public' and table_name = 'ledgers'
+                       and column_name in ('default_ratio', 'opening_balance_shared')),
+    'ledgers 不該再有 default_ratio／opening_balance_shared（ADR-0009）';
   assert (select count(*) from public.categories c where c.ledger_id = v_l.id) = 9, '預設分類應有 9 個';
   assert (select count(*) from public.categories c where c.ledger_id = v_l.id and c.kind = 'income') = 2, '預設收入分類應有 2 個';
   -- 建立者看得到新帳本（RLS）。
@@ -61,9 +65,10 @@ begin
 
   v_l := public.join_ledger(v_code);
   assert (select count(*) from public.members m where m.ledger_id = v_l.id) = 2, '加入後應有兩位成員';
-  -- 新成員加入後 default_ratio 重算為均分。
-  assert (select sum(value::int) from jsonb_each_text(v_l.default_ratio)) = 100, 'default_ratio 合計應為 100';
-  assert (select count(*) from jsonb_each_text(v_l.default_ratio)) = 2, 'default_ratio 應涵蓋兩位成員';
+  -- v1.5 沒有分攤比例，join_ledger 只負責把人加進來。
+  assert (select count(*) from public.members m
+           where m.ledger_id = v_l.id and m.user_id = '22222222-2222-2222-2222-222222222222') = 1,
+    '加入者應該有一列 member';
 
   -- 已是成員 → 直接回，不重複插入。
   v_l := public.join_ledger(v_code);

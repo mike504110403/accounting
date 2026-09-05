@@ -7,9 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/category_wheel.dart';
 import '../../app/format.dart';
+import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
-import '../entries/split_math.dart';
 import 'checkout.dart';
 
 Future<void> showCheckoutSheet({required BuildContext context, required List<ListItem> items}) {
@@ -25,6 +25,7 @@ Future<void> showCheckoutSheet({required BuildContext context, required List<Lis
 /// - 單項：只有一個「金額」欄（預填 estimated），entry.amount 就是該欄。
 /// - 多項：每項一個「金額」欄（預填 estimated），下方「總計」是唯讀、自動加總、即時更新（Mike 手測裁示，不可手改）。
 /// - 任一金額欄為空／非數字／≤0 時確認鈕 disabled，並在該欄顯示錯誤提示。
+/// - 只選「誰先付」（v1.5／ADR-0009）：預設記帳者，共同錢包手動切；沒有範圍／分攤。
 /// 分類預設第一項的分類可改；日期預設今天（date-only）。
 class CheckoutSheet extends ConsumerStatefulWidget {
   const CheckoutSheet({super.key, required this.items});
@@ -41,37 +42,14 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
   bool _submitting = false;
   String? _error;
 
-  // 結帳方式（Mike 裁示 2026-09-04：與支出表單同一組選項與規則）。
-  String? _payerId; // null＝共同錢包
-  SplitMethod _method = SplitMethod.common;
-  final _ratioCtrls = <String, TextEditingController>{};
-  final _manualCtrls = <String, TextEditingController>{};
-
-  TextEditingController _ratioOf(String memberId) => _ratioCtrls.putIfAbsent(
-        memberId,
-        () => TextEditingController(text: '${ref.read(ledgerProvider).defaultRatio[memberId] ?? 0}'),
-      );
-  TextEditingController _manualOf(String memberId) =>
-      _manualCtrls.putIfAbsent(memberId, () => TextEditingController());
-
-  Map<String, int> get _ratioValues =>
-      {for (final e in _ratioCtrls.entries) e.key: int.tryParse(e.value.text.trim()) ?? 0};
-  Map<String, int> get _manualValues =>
-      {for (final e in _manualCtrls.entries) e.key: int.tryParse(e.value.text.trim()) ?? 0};
-  int get _ratioTotal => _ratioValues.values.fold(0, (a, b) => a + b);
-
-  /// 分攤驗證（擋確認鈕）：比例合計 100、金額分攤合計＝總計。
-  String? get _splitError {
-    if (_payerId == null) return null;
-    if (_method == SplitMethod.ratio && _ratioTotal != 100) return '比例合計需為 100（目前 $_ratioTotal）';
-    final t = _total;
-    if (_method == SplitMethod.amount && t != null && manualTotal(_manualValues) != t) {
-      return '分攤合計 ${fmtAmount(manualTotal(_manualValues))} ≠ 總計 ${fmtAmount(t)}';
-    }
-    return null;
-  }
+  // 誰先付（ADR-0009：只記付款人，沒有範圍／分攤）；預設記帳者（新增支出預設「我先付」）。
+  late String? _payerId; // null＝共同錢包
 
   bool get _isMulti => widget.items.length > 1;
+
+  /// 結帳日期落在已清帳月份（含更早月份）：不能送出（spec v1.5 鎖月）。
+  /// 真正的守衛在 DB trigger，這裡是先擋一步、把原因講出來。
+  bool get _dateClosed => isMonthClosed(ref.watch(monthClosesProvider), _date);
 
   @override
   void initState() {
@@ -82,6 +60,7 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
       _actualCtrls[item.id] = TextEditingController(text: text)..addListener(_onActualChanged);
     }
     _categoryId = widget.items.first.categoryId;
+    _payerId = ref.read(currentMemberIdProvider);
     final now = DateTime.now();
     _date = DateTime(now.year, now.month, now.day); // date-only：occurred_on 是 date-only 欄位
   }
@@ -110,18 +89,12 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     return sum;
   }
 
-  bool get _canSubmit => _categoryId != null && _total != null && _splitError == null;
+  bool get _canSubmit => _categoryId != null && _total != null && !_dateClosed;
 
   @override
   void dispose() {
     for (final c in _actualCtrls.values) {
       c.removeListener(_onActualChanged);
-      c.dispose();
-    }
-    for (final c in _ratioCtrls.values) {
-      c.dispose();
-    }
-    for (final c in _manualCtrls.values) {
       c.dispose();
     }
     super.dispose();
@@ -143,7 +116,9 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
 
   Future<void> _confirm() async {
     final total = _total;
-    if (_categoryId == null || total == null) return;
+    // 用 ref.read（不是 _dateClosed 那個 ref.watch getter）：回呼裡不該 watch，
+    // 這裡只是送出前再核一次守衛，畫面上的即時反應交給 build() 的 ref.watch。
+    if (_categoryId == null || total == null || isMonthClosed(ref.read(monthClosesProvider), _date)) return;
     setState(() {
       _submitting = true;
       _error = null;
@@ -160,10 +135,6 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
         ledgerId: ref.read(ledgerProvider).id,
         me: ref.read(currentMemberIdProvider),
         payerId: _payerId,
-        splitMethod: _payerId == null ? SplitMethod.common : _method,
-        members: ref.read(membersProvider),
-        ratio: _ratioValues,
-        manual: _manualValues,
       );
 
       // 先建 entry（拿 DB 給的 id）再更新項目；第二步失敗就補償刪掉剛建的 entry、
@@ -201,11 +172,10 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
     }
   }
 
-  /// 結帳方式區（與支出表單同規則）：付款（共同錢包／成員代墊）、分攤。
+  /// 誰先付（ADR-0009）：共同錢包或某位成員；沒有分攤。
   List<Widget> _paymentSection(BuildContext context) {
     final t = Theme.of(context);
     final members = ref.watch(membersProvider);
-    final splitError = _splitError;
     Widget chip(String label, bool selected, VoidCallback onTap, {Key? key}) => Padding(
           padding: const EdgeInsets.only(right: 6),
           child: ChoiceChip(
@@ -231,73 +201,12 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
       row('付款', [
         chip('共同錢包', _payerId == null, key: const Key('checkout-payer-common'), () => setState(() {
               _payerId = null;
-              _method = SplitMethod.common;
             })),
         for (final m in members)
           chip(m.displayName, _payerId == m.id, key: Key('checkout-payer-${m.id}'), () => setState(() {
                 _payerId = m.id;
-                if (_method == SplitMethod.common) _method = SplitMethod.equal;
               })),
       ]),
-      if (_payerId != null) ...[
-        row('分攤', [
-          for (final e in const {
-            SplitMethod.equal: ('checkout-split-equal', '均分'),
-            SplitMethod.ratio: ('checkout-split-ratio', '比例'),
-            SplitMethod.amount: ('checkout-split-amount', '金額'),
-          }.entries)
-            chip(e.value.$2, _method == e.key, key: Key(e.value.$1), () => setState(() => _method = e.key)),
-        ]),
-        if (_method == SplitMethod.ratio)
-          Padding(
-            padding: const EdgeInsets.only(left: 56, top: 2),
-            child: Row(
-              children: [
-                for (final m in members) ...[
-                  Expanded(
-                    child: TextField(
-                      key: Key('checkout-ratio-${m.id}'),
-                      controller: _ratioOf(m.id),
-                      keyboardType: TextInputType.number,
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      decoration: InputDecoration(isDense: true, labelText: '${m.displayName} %'),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-              ],
-            ),
-          ),
-        if (_method == SplitMethod.amount)
-          Padding(
-            padding: const EdgeInsets.only(left: 56, top: 2),
-            child: Row(
-              children: [
-                for (final m in members) ...[
-                  Expanded(
-                    child: TextField(
-                      key: Key('checkout-manual-${m.id}'),
-                      controller: _manualOf(m.id),
-                      keyboardType: TextInputType.number,
-                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                      decoration: InputDecoration(isDense: true, labelText: m.displayName),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                ],
-              ],
-            ),
-          ),
-        if (splitError != null)
-          Padding(
-            padding: const EdgeInsets.only(left: 56, top: 4),
-            child: Text(splitError,
-                key: const Key('checkout-split-error'),
-                style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.error)),
-          ),
-      ],
     ];
   }
 
@@ -366,6 +275,15 @@ class _CheckoutSheetState extends ConsumerState<CheckoutSheet> {
               }),
             ),
             _dateFieldRow('日期', fmtDate(_date), _pickDate, key: const Key('checkout-date-row')),
+            if (_dateClosed)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '該月已清帳',
+                  key: const Key('checkout-date-closed-error'),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.error),
+                ),
+              ),
             const SizedBox(height: 4),
             ..._paymentSection(context),
             if (_error != null)

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// 金額一律等寬數字：切月／切視角時位數變動不會讓整欄左右跳動。
+/// 金額一律等寬數字：切月時位數變動不會讓整欄左右跳動。
 const kTabularFigures = <FontFeature>[FontFeature.tabularFigures()];
 
 /// 統計頁共用的區塊卡片。

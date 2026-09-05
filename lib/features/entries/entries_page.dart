@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 import '../../app/category_icon.dart';
 import '../../app/format.dart';
 import '../../app/month_app_bar.dart';
+import '../../data/month_summary_provider.dart';
 import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
@@ -13,9 +14,9 @@ import '../../app/circle_slide_action.dart';
 import '../../app/tutorial.dart';
 import 'entry_colors.dart';
 import 'search_page.dart';
-import 'settlement_math.dart';
 
-/// 帳目頁：月份／視角切換、結算卡片、月摘要、依日分組列表。
+/// 帳目頁（v1.5／ADR-0009）：月份切換、月摘要、依日分組列表。
+/// 沒有家庭／個人視角，也沒有結算卡片與簽核——每筆只記「誰先付」。
 class EntriesPage extends ConsumerStatefulWidget {
   const EntriesPage({super.key});
 
@@ -37,7 +38,6 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
       if (mounted) ref.read(tutorialProvider.notifier).maybeStart();
     });
   }
-  ViewMode _view = ViewMode.family;
 
   // 篩選與分頁（Mike 裁示 2026-09-03）：分類、日期區間；一次 20 筆、滑到底再放 20 筆。
   static const _pageSize = 20;
@@ -127,17 +127,17 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     );
   }
 
-  /// 結算 RPC 進行中：按鈕停用，避免重複送出（一帳本同時只允許一個 pending 結算）。
-  bool _busy = false;
-
   void _setMonth(DateTime m) => setState(() => _month = monthOf(m));
+
+  /// 月摘要的 family key：一律該月最後一天（`monthSummaryProvider` 的約定）。
+  DateTime get _until => DateTime(_month.year, _month.month + 1, 0);
 
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  /// 左滑刪除：確認框＋repository 守衛（結算中／已結帳的筆 repository 會擋，訊息 toast 出來）。
+  /// 左滑刪除：確認框＋repository 守衛（鎖月的筆 DB trigger 會擋，訊息 toast 出來）。
   Future<void> _deleteEntry(Entry e) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -160,67 +160,17 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
     }
   }
 
-  /// 帳目列表的視角徹底分開（Mike 裁示 2026-09-04）：家庭＝只看共同、個人＝只看自己的私人。
-  /// 份額與個人餘額的視角換算屬於統計頁（view_math），列表不再混入共同筆——
-  /// 單人帳本時兩個分頁才不會長得一樣。
-  bool _visible(Entry e, String me) {
-    if (_view == ViewMode.family) return e.scope == EntryScope.shared;
-    return e.scope == EntryScope.private && e.createdBy == me;
-  }
-
-  /// 本視角下這筆算多少：家庭看全額，個人看自己的份額。
-  int _shown(Entry e, String me, Map<String, int> ratio) =>
-      _view == ViewMode.family ? e.amount : myPortion(e, me, ratio);
-
-  /// 同意簽核：`approve_settlement` RPC 在同一交易裡插 approval、到齊由 trigger 落 settled，
-  /// 所以前端不需要任何補償——波 1 那段 mock 補償已整段刪除。
-  Future<void> _approve(Settlement s) async {
-    setState(() => _busy = true);
-    try {
-      final next = await ref.read(settlementsProvider.notifier).approve(s.id);
-      _toast(next.status == SettlementStatus.settled ? '已完成結算' : '已送出同意');
-    } on LedgerException catch (e) {
-      _toast(e.message);
-    } catch (e, st) {
-      debugPrint('簽核失敗: $e\n$st');
-      _toast('簽核失敗，請稍後再試');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// 發起結算：涵蓋條件、淨額取整（最大餘數法）、守恆檢查全在 `initiate_settlement` 裡。
-  Future<void> _startSettlement(String ledgerId) async {
-    setState(() => _busy = true);
-    try {
-      final s = await ref.read(settlementsProvider.notifier).initiate(ledgerId);
-      _toast(s.status == SettlementStatus.settled ? '已完成結算' : '已發起結算，等待簽核');
-    } on LedgerException catch (e) {
-      _toast(e.message);
-    } catch (e, st) {
-      debugPrint('發起結算失敗: $e\n$st');
-      _toast('發起結算失敗，請稍後再試');
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    final me = ref.watch(currentMemberIdProvider);
-    final ledger = ref.watch(ledgerProvider);
     final members = ref.watch(membersProvider);
     final categories = ref.watch(categoriesProvider);
     final all = ref.watch(entriesProvider);
-    final settlements = ref.watch(settlementsProvider);
     final closes = ref.watch(monthClosesProvider);
 
+    // v1.5 沒有視角：同帳本的帳目全部可見，只依月份／區間、分類篩。
     final filtered = [
       for (final e in all)
-        if (_visible(e, me) &&
-            _inPeriod(e) &&
-            (_filterCategoryId == null || e.categoryId == _filterCategoryId))
-          e,
+        if (_inPeriod(e) && (_filterCategoryId == null || e.categoryId == _filterCategoryId)) e,
     ]..sort(switch (_sort) {
         _EntrySort.created => _cmpCreatedDesc,
         _EntrySort.amountDesc => (a, b) {
@@ -233,28 +183,24 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
           },
       });
 
-    // 摘要吃整個篩選結果（不受分頁影響）。
+    // 摘要吃整個篩選結果（不受分頁影響）；v1.5 起一律全額，沒有份額換算。
     var income = 0, expense = 0;
     for (final e in filtered) {
-      final v = _shown(e, me, ledger.defaultRatio);
       if (e.isExpense) {
-        expense += v;
+        expense += e.amount;
       } else {
-        income += v;
+        income += e.amount;
       }
     }
 
+    // 共同餘額＝Σ共同收入 − Σ共同錢包支出，桶末水位（spec v1.5「三個數」）。
+    // 正式值由 DB 的 `month_summary` 算（monthSummaryProvider）；server 還沒回應時
+    // 先吃前端同一條公式的 fallback，避免摘要列閃一格空白。
+    final sharedBalanceValue = ref.watch(monthSummaryProvider(_until)).value?.sharedBalance ??
+        sharedBalance(entries: all, until: _until);
+
     final paged = filtered.take(_visibleCount).toList();
     final hasMore = filtered.length > _visibleCount;
-
-    final pending = [
-      for (final s in settlements)
-        if (s.status == SettlementStatus.pending) s,
-    ];
-    final settleable = [
-      for (final e in all)
-        if (isSettleable(e)) e,
-    ];
 
     // 依日分組只在預設排序有意義；金額排序時攤平不分組。
     final grouped = _sort == _EntrySort.created;
@@ -282,7 +228,6 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
         entry: e,
         categories: categories,
         members: members,
-        amount: _shown(e, me, ledger.defaultRatio),
         reversed: isReversed(e),
         onTap: () => context.push('/entries/${e.id}'),
       );
@@ -318,9 +263,6 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
       appBar: MonthAppBar(
         month: _month,
         onMonthChanged: _setMonth,
-        view: _view,
-        toggleKey: tutorialKey('view-toggle'),
-        onViewChanged: (v) => setState(() => _view = v),
         leading: IconButton(
           icon: const Icon(Icons.search),
           tooltip: '搜尋',
@@ -364,21 +306,8 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                     key: tutorialKey('entry-list'),
                     padding: const EdgeInsets.only(bottom: 96),
                     children: [
-                      if (pending.isNotEmpty)
-                        _SettlementBar.pending(
-                          settlement: pending.first,
-                          members: members,
-                          me: me,
-                          onApprove: _busy ? null : () => _approve(pending.first),
-                        )
-                      else if (settleable.isNotEmpty)
-                        _SettlementBar.start(
-                          nets: computeNets(settleable, members),
-                          me: me,
-                          count: settleable.length,
-                          onStart: _busy ? null : () => _startSettlement(ledger.id),
-                        ),
-                      _MonthSummary(income: income, expense: expense),
+                      _MonthSummary(
+                          income: income, expense: expense, sharedBalance: sharedBalanceValue),
                       // 篩選與排序列（Mike 裁示 2026-09-03）。
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
@@ -456,7 +385,7 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
                             subtotal: groups[d]!.fold<int>(
                               0,
                               // 損益慣例：收入正、支出負，與列上金額的 +/− 一致。
-                              (a, e) => a + (e.isExpense ? -_shown(e, me, ledger.defaultRatio) : _shown(e, me, ledger.defaultRatio)),
+                              (a, e) => a + (e.isExpense ? -e.amount : e.amount),
                             ),
                           ),
                           Card(
@@ -515,10 +444,18 @@ class _EntriesPageState extends ConsumerState<EntriesPage> {
       };
 }
 
+/// 月摘要：收入／支出吃當前篩選結果，共同餘額是桶末水位（`month_summary` RPC）。
 class _MonthSummary extends StatelessWidget {
-  const _MonthSummary({required this.income, required this.expense});
+  const _MonthSummary({
+    required this.income,
+    required this.expense,
+    required this.sharedBalance,
+  });
   final int income;
   final int expense;
+
+  /// Σ共同收入 − Σ共同錢包支出（spec v1.5「三個數」）。
+  final int sharedBalance;
 
   @override
   Widget build(BuildContext context) {
@@ -538,13 +475,15 @@ class _MonthSummary extends StatelessWidget {
           ),
         );
     return Card(
+      key: const Key('month-summary'),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
         child: Row(
           children: [
             cell('收入', income, incomeColor(context)),
             cell('支出', expense, t.colorScheme.onSurface),
-            cell('損益', income - expense, income - expense < 0 ? t.colorScheme.error : incomeColor(context)),
+            cell('共同餘額', sharedBalance,
+                sharedBalance < 0 ? t.colorScheme.error : t.colorScheme.onSurface),
           ],
         ),
       ),
@@ -580,14 +519,12 @@ class _EntryTile extends StatelessWidget {
     required this.entry,
     required this.categories,
     required this.members,
-    required this.amount,
     required this.onTap,
     this.reversed = false,
   });
   final Entry entry;
   final List<Category> categories;
   final List<Member> members;
-  final int amount;
   final VoidCallback onTap;
 
   /// 這筆已被沖銷（有對應反向紀錄）：與沖銷筆同組弱化配色＋刪除線。
@@ -607,7 +544,10 @@ class _EntryTile extends StatelessWidget {
     return 'more_horiz';
   }
 
-  String _memberName(String id) {
+  /// 付款人 chip 的文字：成員 `displayName`，`payerId == null` ＝共同錢包（spec v1.5「帳目」）。
+  String _payerLabel() {
+    final id = entry.payerId;
+    if (id == null) return '共同';
     for (final m in members) {
       if (m.id == id) return m.displayName;
     }
@@ -626,10 +566,6 @@ class _EntryTile extends StatelessWidget {
     final tags = <String>[
       if (reversed) '已沖銷',
       if (entry.isAdjustment) '沖銷',
-      if (entry.scope == EntryScope.private) '私人',
-      if (entry.payerId != null && entry.splitMethod != SplitMethod.common) '代墊 ${_memberName(entry.payerId!)}',
-      if (entry.settledState == SettledState.settling) '結算中',
-      if (entry.settledState == SettledState.settled) '已結帳',
       if (entry.lineItems.isNotEmpty) '細項 ${entry.lineItems.length}',
     ];
     final title = entry.note.isEmpty ? _categoryName() : entry.note;
@@ -663,13 +599,21 @@ class _EntryTile extends StatelessWidget {
                       ),
                     ],
                   ),
-                  if (tags.isNotEmpty)
+                  // 收入且無標籤時整塊不畫：不留一條空 Wrap 撐出多餘的 4px。
+                  if (entry.isExpense || tags.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
                       child: Wrap(
                         spacing: 6,
                         runSpacing: 4,
                         children: [
+                          // 誰先付（spec v1.5）：支出才有，收入一律共同收入、不顯示。
+                          if (entry.isExpense)
+                            _Tag(
+                              key: Key('payer-chip-${entry.id}'),
+                              text: _payerLabel(),
+                              tone: t.colorScheme.primary,
+                            ),
                           for (final x in tags)
                             _Tag(
                               text: x,
@@ -689,7 +633,7 @@ class _EntryTile extends StatelessWidget {
             ),
             const SizedBox(width: 8),
             Text(
-              entry.isExpense ? fmtAmount(amount) : '+${fmtAmount(amount)}',
+              entry.isExpense ? fmtAmount(entry.amount) : '+${fmtAmount(entry.amount)}',
               style: t.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
                 color: inkColor ?? (entry.isExpense ? t.colorScheme.onSurface : incomeColor(context)),
@@ -706,7 +650,7 @@ class _EntryTile extends StatelessWidget {
 }
 
 class _Tag extends StatelessWidget {
-  const _Tag({required this.text, required this.tone});
+  const _Tag({super.key, required this.text, required this.tone});
   final String text;
   final Color tone;
 
@@ -719,115 +663,6 @@ class _Tag extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(text, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: tone)),
-    );
-  }
-}
-
-/// 結算摘要小卡：一行摘要＋右側小按鈕，副標放筆數與簽核進度（整張高度 ≤ 72）。
-class _SettlementBar extends StatelessWidget {
-  const _SettlementBar({
-    required this.icon,
-    required this.summary,
-    required this.detail,
-    this.actionLabel,
-    this.onAction,
-  });
-
-  /// 待簽核／結算中。
-  factory _SettlementBar.pending({
-    required Settlement settlement,
-    required List<Member> members,
-    required String me,
-    required VoidCallback? onApprove,
-  }) {
-    String name(String id) {
-      for (final m in members) {
-        if (m.id == id) return m.displayName;
-      }
-      return '成員';
-    }
-
-    final myNet = settlement.nets[me] ?? 0;
-    final signers = settlement.requiredSigners;
-    final needMe = signers.contains(me) && !settlement.approvedBy.contains(me);
-    final signed = signers.where(settlement.approvedBy.contains).length;
-    return _SettlementBar(
-      icon: Icons.how_to_reg_outlined,
-      summary: '${needMe ? '待你簽核' : '結算待簽核'} ${_netText(myNet)}',
-      detail: '${name(settlement.initiatedBy)} 發起・${settlement.entryIds.length} 筆・簽核 $signed/${signers.length}',
-      actionLabel: needMe ? '同意' : null,
-      onAction: needMe ? onApprove : null,
-    );
-  }
-
-  /// 可發起結算／已平衡。
-  factory _SettlementBar.start({
-    required Map<String, int> nets,
-    required String me,
-    required int count,
-    required VoidCallback? onStart,
-  }) {
-    final balanced = nets.values.every((v) => v == 0);
-    final myNet = nets[me] ?? 0;
-    return _SettlementBar(
-      icon: balanced ? Icons.check_circle_outline : Icons.swap_horiz,
-      summary: balanced ? '目前已平衡' : '代墊淨額 ${myNet >= 0 ? '+' : '-'}${fmtAmount(myNet.abs())}',
-      detail: balanced ? '$count 筆代墊已互相抵銷' : '$count 筆待結算',
-      actionLabel: balanced ? null : '發起',
-      onAction: balanced ? null : onStart,
-    );
-  }
-
-  static String _netText(int net) => net >= 0 ? '應收 ${fmtAmount(net)}' : '應付 ${fmtAmount(-net)}';
-
-  final IconData icon;
-  final String summary;
-  final String detail;
-  final String? actionLabel;
-  final VoidCallback? onAction;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    return Card(
-      key: const Key('settlement-card'),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 6, 8, 6),
-        child: Row(
-          children: [
-            Icon(icon, size: 20, color: t.colorScheme.primary),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(summary,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-                  Text(detail,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
-                ],
-              ),
-            ),
-            if (actionLabel != null) ...[
-              const SizedBox(width: 8),
-              FilledButton.tonal(
-                onPressed: onAction,
-                style: FilledButton.styleFrom(
-                  minimumSize: const Size(64, 44),
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-                child: Text(actionLabel!),
-              ),
-            ],
-          ],
-        ),
-      ),
     );
   }
 }

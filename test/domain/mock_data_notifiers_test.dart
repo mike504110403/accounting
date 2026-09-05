@@ -4,27 +4,104 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('LedgerNotifier.update 覆寫 ledger 狀態', () async {
+  test('LedgerNotifier.update 覆寫 ledger 狀態（v1.5 只有名稱改得動）', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final before = container.read(ledgerProvider);
     await container.read(ledgerStateProvider.notifier).update(
-          Ledger(id: before.id, name: '改名', inviteCode: before.inviteCode, defaultRatio: before.defaultRatio, openingBalanceShared: 1),
+          Ledger(id: before.id, name: '改名', inviteCode: before.inviteCode),
         );
     expect(container.read(ledgerProvider).name, '改名');
-    expect(container.read(ledgerProvider).openingBalanceShared, 1);
+    expect(container.read(ledgerProvider).inviteCode, before.inviteCode);
   });
 
   test('MembersNotifier.update 只替換對應 id', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
-    await container.read(membersStateProvider.notifier).update(
-          Member(id: me.id, ledgerId: me.ledgerId, userId: me.userId, displayName: me.displayName, monthlyTopup: 777, joinedAt: me.joinedAt),
-        );
+    await container
+        .read(membersStateProvider.notifier)
+        .update(me.copyWith(displayName: '麥克'));
     final after = container.read(membersProvider);
-    expect(after.firstWhere((m) => m.id == kMeId).monthlyTopup, 777);
-    expect(after.firstWhere((m) => m.id == kWifeId).monthlyTopup, 10000); // 別人的值不變
+    expect(after.firstWhere((m) => m.id == kMeId).displayName, '麥克');
+    expect(after.firstWhere((m) => m.id == kWifeId).displayName, '老婆'); // 別人的值不變
+  });
+
+  group('TopupsNotifier（v1.5 個人補入）', () {
+    // flutter_riverpod 3.4.2：同一個 tree 連續兩次 pumpWidget 會重用 container，
+    // 所以每個案例各自 new 一個 ProviderContainer（這裡是 container 級測試）。
+    ProviderContainer makeContainer() {
+      final c = ProviderContainer();
+      addTearDown(c.dispose);
+      return c;
+    }
+
+    PersonalTopup draft({String memberId = kMeId, int amount = 3000, DateTime? on}) {
+      final now = DateTime.now();
+      return PersonalTopup(
+        id: '',
+        ledgerId: kLedgerId,
+        memberId: memberId,
+        amount: amount,
+        occurredOn: on ?? DateTime(now.year, now.month, now.day),
+        createdBy: memberId,
+        note: '加班補入',
+      );
+    }
+
+    test('build() 從快照取初值：種子的四筆補入都在', () {
+      final c = makeContainer();
+      expect(c.read(topupsProvider), hasLength(4));
+    });
+
+    test('add 成功後 state 立刻多一筆（不等 Realtime 事件），回傳帶 DB id', () async {
+      final c = makeContainer();
+      final before = c.read(topupsProvider).length;
+
+      final saved = await c.read(topupsProvider.notifier).add(draft());
+
+      expect(saved.id, isNotEmpty);
+      expect(c.read(topupsProvider).length, before + 1);
+      expect(c.read(topupsProvider).any((t) => t.id == saved.id), isTrue);
+    });
+
+    test('remove 成功後 state 立刻少一筆', () async {
+      final c = makeContainer();
+      final saved = await c.read(topupsProvider.notifier).add(draft());
+      final before = c.read(topupsProvider).length;
+
+      await c.read(topupsProvider.notifier).remove(saved.id);
+
+      expect(c.read(topupsProvider).length, before - 1);
+      expect(c.read(topupsProvider).any((t) => t.id == saved.id), isFalse);
+    });
+
+    test('add 失敗（補別人的）→ state 完全沒動', () async {
+      final c = makeContainer();
+      final before = c.read(topupsProvider);
+
+      await expectLater(
+        c.read(topupsProvider.notifier).add(draft(memberId: kWifeId)),
+        throwsA(isA<LedgerException>()),
+      );
+      expect(c.read(topupsProvider), before, reason: '寫入失敗不做樂觀更新');
+    });
+
+    test('refresh 重抓整表（另一台裝置寫進來的補入會出現）', () async {
+      final repo = InMemoryLedgerRepository();
+      final c = ProviderContainer(
+        overrides: [ledgerRepositoryProvider.overrideWithValue(repo)],
+      );
+      addTearDown(c.dispose);
+      final before = c.read(topupsProvider).length;
+
+      await repo.addTopup(draft(amount: 777));
+      expect(c.read(topupsProvider).length, before, reason: '還沒 refresh，本機不該自己知道');
+
+      await c.read(topupsProvider.notifier).refresh();
+      expect(c.read(topupsProvider).length, before + 1);
+      expect(c.read(topupsProvider).any((t) => t.amount == 777), isTrue);
+    });
   });
 
   test('CategoriesNotifier.add/update/remove', () async {
@@ -77,7 +154,7 @@ void main() {
     }
   });
 
-  test('AllocationsNotifier.add（v1.4：只有 add，設定後不可改不可刪）', () async {
+  test('AllocationsNotifier.add（只有 add，設定後不可改不可刪）', () async {
     final container = ProviderContainer();
     addTearDown(container.dispose);
     final notifier = container.read(allocationsProvider.notifier);

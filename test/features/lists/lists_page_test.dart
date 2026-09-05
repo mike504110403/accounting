@@ -1,3 +1,4 @@
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/features/lists/lists_page.dart';
@@ -88,6 +89,13 @@ Future<void> _walkAddSheet(WidgetTester tester, {required String name, String? s
 }
 
 void main() {
+  // 註：這條經 `AccountingApp` 根路由進清單頁，需要 `app/router.dart` 整條鏈都編過——
+  // production 依賴鏈是 `lists_page.dart`／`add_item_sheets.dart` → `app/tutorial.dart`
+  // → `app/router.dart` → entries／settings／stats／budget（本波其他 4 個工人尚未對齊
+  // v1.5，common brief 已知狀態）。要在本檔單獨跑（`flutter test test/features/lists`），
+  // 得先把 `lib/app/router.dart` 本地暫換成只掛 `/lists` 的 stub（驗完 `git checkout --`
+  // 還原，不落地到 commit）；其他 4 波併回 `feature/rules-v15` 後，合併點會用真正的
+  // router 重跑一次這條測試。
   testWidgets('AccountingApp 根啟動點底部 Tab 進清單頁看到超市分組與酸奶', (tester) async {
     await tester.pumpWidget(const ProviderScope(child: AccountingApp()));
     await tester.pumpAndSettle();
@@ -113,9 +121,7 @@ void main() {
     final newEntry = entries.firstWhere((e) => e.note == '超市' && e.lineItems.length == 1 && e.lineItems.single.name == '酸奶');
     expect(newEntry.amount, 120);
     expect(newEntry.kind, EntryKind.expense);
-    expect(newEntry.scope, EntryScope.shared);
-    expect(newEntry.splitMethod, SplitMethod.common);
-    expect(newEntry.payerId, isNull, reason: 'v1.4：共同錢包路徑，付款人為空');
+    expect(newEntry.payerId, kMeId, reason: 'v1.5：不點任何 chip 直接確認，預設付款人＝記帳者（我）（變異證明：預設付款人改 null）');
 
     final item = container.read(listItemsProvider).firstWhere((i) => i.id == 'l-2');
     expect(item.isDone, isTrue);
@@ -249,26 +255,71 @@ void main() {
     expect(find.text('可頌'), findsOneWidget);
   });
 
-  testWidgets('結帳方式：切成員代墊＋均分 → entry 帶 payer/splits，資金列消失', (tester) async {
+  testWidgets('多項結帳：切「共同錢包」→ entry.payerId == null', (tester) async {
     final container = await _pumpListsPage(tester);
 
-    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.longPress(find.widgetWithText(ListTile, '酸奶'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('checkout-payer-common')), findsOneWidget);
+    await tester.tap(find.widgetWithText(ListTile, '麵包'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '完成'));
+    await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('checkout-payer-$kMeId')));
+    expect(find.byKey(const Key('checkout-payer-common')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('checkout-payer-common')));
     await tester.pumpAndSettle();
-    // v1.4：結帳 sheet 沒有資金來源那一列，切成代墊之後只剩分攤方式。
-    expect(find.byKey(const Key('checkout-split-equal')), findsOneWidget);
 
     await tester.tap(find.widgetWithText(FilledButton, '確認'));
     await tester.pumpAndSettle();
 
     final entry = container.read(entriesProvider).firstWhere(
-        (e) => e.lineItems.length == 1 && e.lineItems.single.name == '酸奶');
-    expect(entry.payerId, kMeId);
-    expect(entry.splitMethod, SplitMethod.equal);
-    expect(entry.splits.map((s) => s.share).reduce((a, b) => a + b), entry.amount);
+        (e) => e.lineItems.map((l) => l.name).toSet().containsAll({'酸奶', '麵包'}));
+    expect(entry.payerId, isNull);
+  });
+
+  testWidgets('多項結帳：切對方（老婆）→ entry.payerId == 對方 id', (tester) async {
+    final container = await _pumpListsPage(tester);
+
+    await tester.longPress(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '麵包'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '完成'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(Key('checkout-payer-$kWifeId')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, '確認'));
+    await tester.pumpAndSettle();
+
+    final entry = container.read(entriesProvider).firstWhere(
+        (e) => e.lineItems.map((l) => l.name).toSet().containsAll({'酸奶', '麵包'}));
+    expect(entry.payerId, kWifeId);
+  });
+
+  testWidgets('已清月：結帳日期在已清月 → 「該月已清帳」不送出，確認鈕 disabled（變異證明：已清月守衛拿掉）', (tester) async {
+    final now = DateTime.now();
+    final closedMonth = DateTime(now.year, now.month, 1);
+    final repo = repoWith(closes: [closeFixture(month: closedMonth)]);
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    final entriesBefore = container.read(entriesProvider).length;
+    await _pumpWithContainer(tester, container);
+
+    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsOneWidget);
+    expect(find.text('該月已清帳'), findsOneWidget);
+    final confirmButton = tester.widget<FilledButton>(find.widgetWithText(FilledButton, '確認'));
+    expect(confirmButton.onPressed, isNull);
+
+    await tester.tap(find.widgetWithText(FilledButton, '確認'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(container.read(entriesProvider).length, entriesBefore);
+    final item = container.read(listItemsProvider).firstWhere((i) => i.id == 'l-2');
+    expect(item.isDone, isFalse);
   });
 
   testWidgets('滑動刪除確認後從清單移除', (tester) async {
@@ -540,5 +591,80 @@ void main() {
     await tester.pumpAndSettle();
     Navigator.of(tester.element(find.text('確認結帳'))).pop(); // 關掉結帳 sheet
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('390×667（較矮手機）不爆版：結帳 sheet 含「該月已清帳」錯誤行、多項總計都要過', (tester) async {
+    final now = DateTime.now();
+    final closedMonth = DateTime(now.year, now.month, 1);
+    final repo = repoWith(closes: [closeFixture(month: closedMonth)]);
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    tester.view.physicalSize = const Size(390, 667);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await _pumpWithContainer(tester, container);
+    expect(tester.takeException(), isNull);
+
+    // 單項結帳 sheet：已清月錯誤行跟其餘欄位一起擠在較矮的畫面裡也不爆版。
+    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsOneWidget);
+
+    Navigator.of(tester.element(find.text('確認結帳'))).pop();
+    await tester.pumpAndSettle();
+
+    // 多項結帳 sheet：唯讀總計那排＋已清月錯誤行同時顯示也不爆版。
+    await tester.longPress(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '麵包'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, '完成'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsOneWidget);
+  });
+
+  testWidgets('結帳 sheet：預設今天可送出；改到已清的上月 → 錯誤行出現、確認鈕轉 disabled；改回本月 → 恢復', (tester) async {
+    final cur = monthOf(DateTime.now());
+    final prev = prevMonth(cur);
+    final repo = repoWith(closes: [closeFixture(month: prev)]);
+    final container = ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
+    addTearDown(container.dispose);
+    await _pumpWithContainer(tester, container);
+
+    await tester.tap(find.widgetWithText(ListTile, '酸奶'));
+    await tester.pumpAndSettle();
+
+    // 預設今天（未清）：沒有錯誤行、確認鈕可按。
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsNothing);
+    expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '確認')).onPressed, isNotNull);
+
+    // 改到已清的上月。
+    await tester.tap(find.byKey(const Key('checkout-date-row')));
+    await tester.pumpAndSettle();
+    tester
+        .widget<CalendarDatePicker>(find.byType(CalendarDatePicker))
+        .onDateChanged(DateTime(prev.year, prev.month, 15));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsOneWidget);
+    expect(find.text('該月已清帳'), findsOneWidget);
+    expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '確認')).onPressed, isNull);
+
+    // 改回本月：恢復。
+    await tester.tap(find.byKey(const Key('checkout-date-row')));
+    await tester.pumpAndSettle();
+    tester
+        .widget<CalendarDatePicker>(find.byType(CalendarDatePicker))
+        .onDateChanged(DateTime(cur.year, cur.month, 5));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('checkout-date-closed-error')), findsNothing);
+    expect(tester.widget<FilledButton>(find.widgetWithText(FilledButton, '確認')).onPressed, isNotNull);
   });
 }

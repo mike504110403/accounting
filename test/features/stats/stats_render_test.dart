@@ -1,5 +1,3 @@
-import 'package:accounting/domain/models.dart';
-import 'package:accounting/features/stats/pie_card.dart';
 import 'package:accounting/features/stats/stats_colors.dart';
 import 'package:accounting/features/stats/trend_card.dart';
 import 'package:flutter/material.dart';
@@ -37,34 +35,6 @@ void main() {
     });
   });
 
-  group('axisNumberLabel', () {
-    test('≥ 1 萬收成「萬」，≥ 10 萬不留小數，其餘整數', () {
-      expect(axisNumberLabel(0), '0');
-      expect(axisNumberLabel(850), '850');
-      expect(axisNumberLabel(9999), '9999');
-      expect(axisNumberLabel(12000), '1.2萬');
-      expect(axisNumberLabel(154033), '15萬');
-      expect(axisNumberLabel(-8888), '-8888');
-      expect(axisNumberLabel(-12000), '-1.2萬');
-    });
-  });
-
-  group('TrendLine', () {
-    test('legend 順序固定，餘額預設收起、其餘預設展開', () {
-      expect(TrendLine.values, [TrendLine.spend, TrendLine.over, TrendLine.balance]);
-      expect(TrendLine.spend.initiallyVisible, isTrue);
-      expect(TrendLine.over.initiallyVisible, isTrue);
-      expect(TrendLine.balance.initiallyVisible, isFalse);
-    });
-
-    test('balance 標籤依視角變（v1.4，ADR-0008）：家庭「共同餘額」、個人「個人餘額」', () {
-      expect(TrendLine.values.map((l) => l.labelFor(ViewMode.family)).toList(),
-          ['花費', '超支', '共同餘額']);
-      expect(TrendLine.values.map((l) => l.labelFor(ViewMode.personal)).toList(),
-          ['花費', '超支', '個人餘額']);
-    });
-  });
-
   group('sliceColorAt', () {
     final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF2F6F6D));
 
@@ -81,20 +51,31 @@ void main() {
     });
   });
 
-  group('weekRangeLabel', () {
-    test('完整週顯示區間；裁切成一天時不畫破折號', () {
-      expect(
-        weekRangeLabel((start: DateTime(2026, 3, 2), end: DateTime(2026, 3, 8))),
-        '3/2–3/8',
-      );
-      expect(
-        weekRangeLabel((start: DateTime(2026, 3, 1), end: DateTime(2026, 3, 1))),
-        '3/1',
-      );
-      expect(
-        weekRangeLabel((start: DateTime(2026, 3, 30), end: DateTime(2026, 3, 31))),
-        '3/30–3/31',
-      );
+  group('memberColor', () {
+    test('N 位成員兩兩不同色，且都不等於共同錢包的中性灰', () {
+      final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF2F6F6D));
+      // 6 位涵蓋比常見兩人多的情境，人數不限也該撐得住。
+      final colors = [for (var i = 0; i < 6; i++) memberColor(scheme, i)];
+      final commonWallet = sliceColorAt(scheme, -1); // 圓餅「共同錢包」片用的顏色
+      for (var a = 0; a < colors.length; a++) {
+        expect(colors[a], isNot(commonWallet),
+            reason: '第 $a 位成員不該跟共同錢包（中性灰）同色');
+        for (var b = a + 1; b < colors.length; b++) {
+          expect(colors[a], isNot(colors[b]), reason: '第 $a 與第 $b 位成員撞色');
+        }
+      }
+    });
+  });
+
+  group('axisNumberLabel', () {
+    test('≥ 1 萬收成「萬」，≥ 10 萬不留小數，其餘整數', () {
+      expect(axisNumberLabel(0), '0');
+      expect(axisNumberLabel(850), '850');
+      expect(axisNumberLabel(9999), '9999');
+      expect(axisNumberLabel(12000), '1.2萬');
+      expect(axisNumberLabel(154033), '15萬');
+      expect(axisNumberLabel(-8888), '-8888');
+      expect(axisNumberLabel(-12000), '-1.2萬');
     });
   });
 }

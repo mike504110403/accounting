@@ -1,4 +1,5 @@
-/// Realtime：訂閱五張進 publication 的表，事件到達就重抓該表。
+/// Realtime：訂閱五張進 publication 的表（v1.5：`personal_topups` 取代 `settlements`），
+/// 事件到達就重抓該表。
 ///
 /// 只送「哪張表變了」，不吃 payload——payload 仍吃 RLS 也仍可能漏（批次寫入合併事件），
 /// 重抓整表才是唯一能保證與 DB 一致的做法。
@@ -11,11 +12,11 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../domain/mock_data.dart';
 import 'current_ledger.dart';
 
-enum LedgerTable { entries, settlements, listItems, budgetAllocation, monthCloses }
+enum LedgerTable { entries, personalTopups, listItems, budgetAllocation, monthCloses }
 
 const _tableNames = {
   LedgerTable.entries: 'entries',
-  LedgerTable.settlements: 'settlements',
+  LedgerTable.personalTopups: 'personal_topups',
   LedgerTable.listItems: 'list_items',
   LedgerTable.budgetAllocation: 'budget_allocation',
   LedgerTable.monthCloses: 'month_closes',
@@ -76,19 +77,16 @@ final realtimeSourceProvider = Provider<RealtimeSource>((ref) => const NoopRealt
 
 /// 收到事件後重抓對應的表。
 ///
-/// 結算事件連帶重抓 entries：多簽落地時 `settled_state` 是 trigger 改的，
-/// 只重抓 settlements 的話對方那邊金額不會變成鎖住。
-///
-/// 清帳事件同理連帶重抓 entries：清完之後那個月（與更早的月份）整段鎖住，
-/// 只重抓 closes 的話對方那台的列表還以為那些帳目可以改。
+/// 清帳事件連帶重抓 entries：清完之後那個月（與更早的月份）整段鎖住，而且
+/// 「一鍵記共同收入」會在同一段交易裡多記一筆收入——只重抓 closes 的話，
+/// 對方那台的列表會少一筆收入，還以為那些帳目可以改。
 Future<void> applyRealtimeChange(Ref ref, LedgerTable table) async {
   try {
     switch (table) {
       case LedgerTable.entries:
         await ref.read(entriesProvider.notifier).refresh();
-      case LedgerTable.settlements:
-        await ref.read(settlementsProvider.notifier).refresh();
-        await ref.read(entriesProvider.notifier).refresh();
+      case LedgerTable.personalTopups:
+        await ref.read(topupsProvider.notifier).refresh();
       case LedgerTable.listItems:
         await ref.read(listItemsProvider.notifier).refresh();
       case LedgerTable.budgetAllocation:

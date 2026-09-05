@@ -16,8 +16,8 @@ final monthSummaryProvider = FutureProvider.family<MonthSummary, DateTime>((ref,
   ref.watch(membersStateProvider);
   ref.watch(entriesProvider);
   ref.watch(allocationsProvider);
-  ref.watch(settlementsProvider);
-  // 清帳會把整段月份移出個人餘額公式，數字跟著變 → 清完必須重打 RPC。
+  ref.watch(topupsProvider);
+  // 清帳會把整段月份移出補入剩餘公式、還可能多記一筆共同收入 → 清完必須重打 RPC。
   ref.watch(monthClosesProvider);
   final ledgerId = ref.watch(ledgerProvider).id;
   return ref.watch(ledgerRepositoryProvider).monthSummary(ledgerId, until);

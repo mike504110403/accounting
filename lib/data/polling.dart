@@ -42,7 +42,7 @@ Future<void> _refreshAll(Ref ref) => Future.wait([
       ref.read(entriesProvider.notifier).refresh(),
       ref.read(allocationsProvider.notifier).refresh(),
       ref.read(listItemsProvider.notifier).refresh(),
-      ref.read(settlementsProvider.notifier).refresh(),
+      ref.read(topupsProvider.notifier).refresh(),
       ref.read(monthClosesProvider.notifier).refresh(),
     ]);
 

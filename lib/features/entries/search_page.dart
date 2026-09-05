@@ -30,13 +30,13 @@ class SearchHit {
 }
 
 /// 純函式：依關鍵字比對細項名、備註、清單標題（大小寫不分、包含即命中）。
-/// 私人資料只出現在建立者自己的結果裡。
+///
+/// v1.5（ADR-0009）沒有私人範圍：同帳本的帳目全部可見，兩個人記的都搜得到。
 List<SearchHit> searchHits({
   required String query,
   required List<Entry> entries,
   required List<ListItem> listItems,
   required List<Category> categories,
-  required String me,
 }) {
   final q = query.trim().toLowerCase();
   if (q.isEmpty) return const [];
@@ -56,7 +56,6 @@ List<SearchHit> searchHits({
 
   final hits = <SearchHit>[];
   for (final e in entries) {
-    if (e.scope == EntryScope.private && e.createdBy != me) continue;
     final tail = e.note.isEmpty ? catName(e.categoryId) : '${catName(e.categoryId)}・${e.note}';
     for (final li in e.lineItems) {
       if (!li.name.toLowerCase().contains(q)) continue;
@@ -141,7 +140,6 @@ class _EntrySearchPageState extends ConsumerState<EntrySearchPage> {
       entries: ref.watch(entriesProvider),
       listItems: ref.watch(listItemsProvider),
       categories: ref.watch(categoriesProvider),
-      me: ref.watch(currentMemberIdProvider),
     );
     final series = priceSeries(hits);
     final empty = _query.text.trim().isEmpty;

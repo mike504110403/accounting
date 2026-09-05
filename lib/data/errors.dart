@@ -1,7 +1,7 @@
 /// 資料層對外的唯一例外型別，以及「DB／Auth 原始錯誤 → 使用者看得懂的中文」轉譯。
 ///
 /// 頁面一律 catch [LedgerException] 並顯示 `e.message`；PostgREST 的英文訊息
-/// （`entry settled: amount locked, use an adjustment entry`）不會外流到 UI。
+/// （`month closed: 2026-08`）不會外流到 UI。
 library;
 
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -75,26 +75,26 @@ String _postgrestMessage(PostgrestException e) => dbMessage(e.message, code: e.c
 
 /// DB 訊息 → 中文。比對 `docs/specs/db-contract.md`「Trigger（前端要預期的錯誤）」與 RPC 的 raise 清單。
 ///
-/// 公開的原因是**記憶體替身也要用它**：`InMemoryLedgerRepository` 的清帳與鎖月守衛
+/// 公開的原因是**記憶體替身也要用它**：`InMemoryLedgerRepository` 的清帳、補入與鎖月守衛
 /// 拿 DB 的英文 raise 逐字餵進來，兩個實作看到的中文才保證是同一句
 /// （契約測試對兩個實作跑同一組訊息斷言）。
 String dbMessage(String m, {String? code}) {
   // check constraint（SQLSTATE 23514）：訊息裡帶 constraint 名稱。
   if (m.contains('entries_amount_sign')) return '負數金額請開啟「修正筆」';
-  if (m.contains('entries_private_payer')) return '私人帳目的付款人必須是自己';
-  if (m.contains('entries_private_no_split')) return '私人帳目不能分攤';
+  if (m.contains('entries_income_no_payer')) return '收入不需要付款人';
   if (m.contains('budget_allocation') && m.contains('expense category')) {
     return '預算只能設定在支出分類';
   }
-  // v1.4：每分類每月只能設定一次（unique 23505），金額必須 > 0。
+  // 每分類每月只能設定一次（unique 23505），金額必須 > 0。
   if (m.contains('budget_allocation_one_per_category_month') ||
       (code == '23505' && m.contains('budget_allocation'))) {
     return '這個分類本月已設定預算，設定後不可修改';
   }
   if (m.contains('budget_allocation_amount_positive')) return '預算金額必須大於 0';
-  if (m.contains('members_monthly_topup_range')) return '每月補入額必須介於 0 與 1 億之間';
+  // v1.5：個人補入金額必須 > 0（`personal_topups_amount_positive`）。
+  if (m.contains('personal_topups_amount_positive')) return '補入金額必須大於 0';
 
-  // 鎖月 trigger（v1.4）：訊息帶的是被擋的那筆所屬的月份。
+  // 鎖月 trigger：訊息帶的是被擋的那筆所屬的月份（帳目、細項、預算、補入共用）。
   if (m.startsWith('month closed:')) return '該月已清帳';
 
   // 清帳 RPC 的可清條件（`close_month` 與 `month_close_preview` 共用同一組訊息）。
@@ -102,49 +102,19 @@ String dbMessage(String m, {String? code}) {
     if (m.contains('month not ended')) return '本月尚未結束';
     if (m.contains('already closed')) return '該月已清帳';
     if (m.contains('nothing to close')) return '沒有可清的月份';
-    if (m.contains('unsettled entries in month')) return '有拆帳尚未簽完';
     final mustClose = RegExp(r'must close (\d{4})-(\d{2}) first').firstMatch(m);
     if (mustClose != null) return '請先清 ${mustClose.group(1)}／${mustClose.group(2)}';
     if (m.contains('month must be first day')) return '清帳月份格式錯誤，請重新整理後再試';
     // not a member／not authenticated 落到下面共用的那幾條。
   }
 
-  // settled 鎖定（trigger 一律以 `entry settled: ` 開頭）。
-  if (m.startsWith('entry settled:')) {
-    if (m.contains('amount locked')) return '這筆已結帳，金額鎖住，請改用修正筆';
-    if (m.contains('payer locked')) return '這筆已結帳，付款人鎖住，請改用修正筆';
-    if (m.contains('split_method locked')) return '這筆已結帳，分攤方式鎖住，請改用修正筆';
-    if (m.contains('scope locked')) return '這筆已結帳，共同／私人鎖住，請改用修正筆';
-    if (m.contains('kind locked')) return '這筆已結帳，收入／支出鎖住，請改用修正筆';
-    if (m.contains('occurred_on locked')) return '這筆已結帳，日期鎖住，請改用修正筆';
-    if (m.contains('split locked')) return '這筆已結帳，分攤鎖住，請改用修正筆';
-    if (m.contains('delete blocked')) return '已結帳的帳目不能刪除，請改用修正筆';
-    if (m.contains('child tables locked')) return '這筆已結帳，只能改分類與備註';
-    return '這筆已結帳，無法修改';
-  }
-
-  // 分攤守恆。
-  if (m.contains('do not sum to amount') || m.contains('splits (')) {
-    return '分攤金額合計與主筆金額不符';
-  }
-  if (m.contains('nets do not balance')) return '結算淨額不平衡，請重新整理後再試';
-
   // RPC raise。
   if (m.contains('invalid invite code')) return '邀請碼不正確';
-  if (m.contains('a pending settlement already exists')) return '已經有一筆結算正在等待簽核';
-  if (m.contains('no settleable entries')) return '目前沒有可結算的帳目';
-  if (m.contains('nothing to settle')) return '目前淨額為零，不需要結算';
-  if (m.contains('not a required signer')) return '你不是這筆結算的簽核人';
-  if (m.contains('settlement is not pending')) return '這筆結算已經處理過了';
-  if (m.contains('only the initiator or a required signer may cancel')) {
-    return '只有發起人或簽核人可以取消結算';
-  }
-  if (m.contains('settlement not found')) return '找不到這筆結算，請重新整理';
   if (m.contains('entry not found or not visible')) return '找不到這筆帳目，請重新整理';
   if (m.contains('not a member')) return '你不是這本帳本的成員';
   if (m.contains('is immutable')) return '這個欄位不可修改';
 
-  // 權限層（比 trigger 更早發生）。
+  // 權限層（比 trigger 更早發生）：補入只能寫自己那列，寫別人就是這條。
   if (code == '42501' || m.contains('permission denied')) {
     return '沒有權限執行這個操作';
   }

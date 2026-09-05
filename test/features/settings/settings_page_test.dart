@@ -1,4 +1,3 @@
-import 'package:accounting/app/format.dart';
 import 'package:accounting/app/theme.dart';
 import 'package:accounting/app/theme_mode.dart';
 import 'package:accounting/domain/mock_data.dart';
@@ -8,7 +7,6 @@ import 'package:accounting/features/settings/closes_page.dart';
 import 'package:accounting/data/current_ledger.dart';
 import 'package:accounting/features/settings/settings_page.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -42,7 +40,7 @@ class _RelayNameOnJoinRepository extends InMemoryLedgerRepository {
 
   @override
   Future<List<Ledger>> myLedgers() async =>
-      [Ledger(id: 'ledger-other', name: '原本那本', inviteCode: 'CCCCCCCCCC', defaultRatio: const {kMeId: 100})];
+      [const Ledger(id: 'ledger-other', name: '原本那本', inviteCode: 'CCCCCCCCCC')];
 
   @override
   Future<void> updateMember(Member member) {
@@ -52,15 +50,7 @@ class _RelayNameOnJoinRepository extends InMemoryLedgerRepository {
 
   Future<void> _relayName(Ledger l) async {
     final me = (await fetchMembers(l.id)).firstWhere((m) => m.id == kMeId);
-    await super.updateMember(Member(
-      id: me.id,
-      ledgerId: me.ledgerId,
-      userId: me.userId,
-      displayName: '4yrcfzrc99',
-      monthlyTopup: me.monthlyTopup,
-      openingBalancePersonal: me.openingBalancePersonal,
-      joinedAt: me.joinedAt,
-    ));
+    await super.updateMember(me.copyWith(displayName: '4yrcfzrc99'));
   }
 
   @override
@@ -129,19 +119,6 @@ Future<ProviderContainer> _pump(WidgetTester tester, [ProviderContainer? withCon
   return container;
 }
 
-/// 點設定頁裡「分攤比例」一行，開 bottom sheet。
-Future<void> _openRatioSheet(WidgetTester tester) async {
-  await tester.tap(find.text('分攤比例'));
-  await tester.pumpAndSettle();
-}
-
-/// 點設定頁裡「我的每月補入額」一行，開「餘額設定」bottom sheet
-/// （兩筆餘額拆成兩列，兩列開的是同一個 sheet）。
-Future<void> _openBalanceSheet(WidgetTester tester, {String row = '我的每月補入額'}) async {
-  await tester.tap(find.text(row));
-  await tester.pumpAndSettle();
-}
-
 /// 點設定頁裡「分類管理」一行，進子頁。
 Future<void> _openCategoryPage(WidgetTester tester) async {
   // 預設 800×600 測試面板下，「我的名稱」列（2026-09-05）把這列推到 y≈631 螢幕外；先捲到可見。
@@ -159,33 +136,20 @@ void main() {
     );
   });
 
-  testWidgets('比例合計≠100 擋存，ledger 不變', (tester) async {
-    final container = await _pump(tester);
-    final before = container.read(ledgerProvider).defaultRatio;
+  testWidgets('設定頁：無「分攤比例」「共同期初餘額」「我的每月補入額」列', (tester) async {
+    await _pump(tester);
 
-    await _openRatioSheet(tester);
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kMeId')), '70');
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kWifeId')), '40');
-    await tester.tap(find.byKey(const ValueKey('save-ratio-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('比例合計需為 100'), findsOneWidget);
-    expect(container.read(ledgerProvider).defaultRatio, before);
+    expect(find.text('分攤比例'), findsNothing);
+    expect(find.text('共同期初餘額'), findsNothing);
+    expect(find.text('我的每月補入額'), findsNothing);
   });
 
-  testWidgets('比例合計＝100 儲存成功，ledger 更新', (tester) async {
-    final container = await _pump(tester);
+  testWidgets('設定頁：有「我的名稱」「成員」「清帳」列', (tester) async {
+    await _pump(tester);
 
-    await _openRatioSheet(tester);
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kMeId')), '60');
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kWifeId')), '40');
-    await tester.tap(find.byKey(const ValueKey('save-ratio-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('已儲存'), findsOneWidget);
-    expect(container.read(ledgerProvider).defaultRatio, {kMeId: 60, kWifeId: 40});
-    // 成功後 sheet 應已關閉（MAJOR-2：先 pop 再 snack），欄位不該還在畫面上。
-    expect(find.byKey(ValueKey('ratio-field-$kMeId')), findsNothing);
+    expect(find.text('我的名稱'), findsOneWidget);
+    expect(find.text('成員'), findsOneWidget);
+    expect(find.text('清帳'), findsOneWidget);
   });
 
   testWidgets('刪除使用中分類被擋，分類仍存在', (tester) async {
@@ -234,102 +198,6 @@ void main() {
 
     expect(find.text('交通費'), findsOneWidget);
     expect(container.read(categoriesProvider).firstWhere((c) => c.id == 'c-transport').name, '交通費');
-  });
-
-  testWidgets('餘額設定：載入帶出現值，一顆儲存同時存共同期初餘額與我的每月補入額', (tester) async {
-    // Mike 的期初個人餘額刻意給非 0：這一欄 v1.4 已廢用，但更新補入額時不該被洗掉
-    // （假資料裡它是 0，用 0 斷言等於什麼都沒測）。
-    final container = await _pump(
-      tester,
-      ProviderContainer(overrides: [
-        ledgerRepositoryProvider.overrideWithValue(repoWith(members: [
-          Member(
-            id: kMeId,
-            ledgerId: kLedgerId,
-            userId: 'u1',
-            displayName: 'Mike',
-            monthlyTopup: 10000,
-            openingBalancePersonal: 777,
-            joinedAt: DateTime(2026, 1, 1),
-          ),
-        ])),
-      ]),
-    );
-    final personalBefore =
-        container.read(membersProvider).firstWhere((m) => m.id == kMeId).openingBalancePersonal;
-    expect(personalBefore, 777);
-
-    await _openBalanceSheet(tester);
-    // 載入值＝ledger.openingBalanceShared 與 me.monthlyTopup（不是期初個人餘額）。
-    expect(
-      tester.widget<TextField>(find.byKey(const ValueKey('balance-shared-field'))).controller?.text,
-      '${container.read(ledgerProvider).openingBalanceShared}',
-    );
-    expect(
-      tester.widget<TextField>(find.byKey(const ValueKey('balance-topup-field'))).controller?.text,
-      '${container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup}',
-    );
-
-    // 一顆「儲存」同時存兩欄（不再各存各的、各自 pop 一次）。
-    await tester.enterText(find.byKey(const ValueKey('balance-shared-field')), '99999');
-    await tester.enterText(find.byKey(const ValueKey('balance-topup-field')), '12345');
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
-    await tester.pumpAndSettle();
-
-    expect(container.read(ledgerProvider).openingBalanceShared, 99999);
-    final me = container.read(membersProvider).firstWhere((m) => m.id == kMeId);
-    expect(me.monthlyTopup, 12345);
-    // 廢用的期初個人餘額原樣帶過去，不被這次更新洗掉。
-    expect(me.openingBalancePersonal, personalBefore);
-    expect(find.byKey(const ValueKey('balance-shared-field')), findsNothing); // sheet 已關
-  });
-
-  testWidgets('餘額設定：清空補入額 → 錯誤行，member 不變', (tester) async {
-    final container = await _pump(tester);
-    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup;
-
-    await _openBalanceSheet(tester);
-    await tester.enterText(find.byKey(const ValueKey('balance-topup-field')), '');
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('請輸入有效金額'), findsOneWidget);
-    expect(find.byKey(const ValueKey('balance-topup-field')), findsOneWidget); // sheet 沒關
-    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup, before);
-  });
-
-  testWidgets('餘額設定：補入額超過 1 億 → DB check 擋下，sheet 內顯示那句中文、不 pop', (tester) async {
-    // 記憶體替身的 `updateMember` 帶了與 DB 同一條 check（`members_monthly_topup_range`）。
-    final container = await _pump(tester);
-    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup;
-    final sharedBefore = container.read(ledgerProvider).openingBalanceShared;
-
-    await _openBalanceSheet(tester);
-    await tester.enterText(find.byKey(const ValueKey('balance-shared-field')), '${sharedBefore + 1}');
-    await tester.enterText(find.byKey(const ValueKey('balance-topup-field')), '100000001');
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('每月補入額必須介於 0 與 1 億之間'), findsOneWidget);
-    expect(find.byKey(const ValueKey('balance-topup-field')), findsOneWidget); // sheet 沒關
-    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup, before);
-    // 補償：已寫進去的共同欄退回原值。
-    expect(container.read(ledgerProvider).openingBalanceShared, sharedBefore);
-  });
-
-  testWidgets('餘額設定 sheet 只有兩欄（個人期初餘額欄位已從 UI 拿掉），兩列開的是同一個 sheet', (tester) async {
-    await _pump(tester);
-
-    await _openBalanceSheet(tester, row: '共同期初餘額');
-    expect(find.byKey(const ValueKey('balance-shared-field')), findsOneWidget);
-    expect(find.byKey(const ValueKey('balance-topup-field')), findsOneWidget);
-    expect(find.byType(TextField), findsNWidgets(2)); // 就這兩欄，沒有個人期初那欄
-    await tester.tapAt(const Offset(20, 20)); // 關掉
-    await tester.pumpAndSettle();
-
-    await _openBalanceSheet(tester, row: '我的每月補入額');
-    expect(find.byKey(const ValueKey('balance-shared-field')), findsOneWidget);
-    expect(find.byType(TextField), findsNWidgets(2));
   });
 
   testWidgets('我的名稱列：顯示自己的 display_name，sheet 改名儲存後列與 membersProvider 都更新', (tester) async {
@@ -385,13 +253,22 @@ void main() {
     expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).displayName, before);
   });
 
+  testWidgets('成員列：點開列出所有成員', (tester) async {
+    await _pump(tester);
+
+    await tester.tap(find.text('成員'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Mike'), findsWidgets);
+    expect(find.text('老婆'), findsOneWidget);
+  });
+
   testWidgets('帳本切換 sheet：加入帳本會把目前的名稱帶過去，不留 RPC 的 email 前綴代號', (tester) async {
     final container = ProviderContainer(overrides: [
       ledgerRepositoryProvider.overrideWithValue(_RelayNameOnJoinRepository(
         seed: snapshotWith(
-          ledger: Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB', defaultRatio: const {kMeId: 100}),
+          ledger: const Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB'),
           entries: const [],
-          settlements: const [],
         ),
       )),
     ]);
@@ -442,9 +319,8 @@ void main() {
   testWidgets('帳本切換 sheet：帶名失敗 → 仍切換並關 sheet，SnackBar 提示可到「我的名稱」改', (tester) async {
     final repo = _RelayNameOnJoinRepository(
       seed: snapshotWith(
-        ledger: Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB', defaultRatio: const {kMeId: 100}),
+        ledger: const Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB'),
         entries: const [],
-        settlements: const [],
       ),
     );
     final container = ProviderContainer(overrides: [
@@ -499,14 +375,9 @@ void main() {
   });
 
   testWidgets('帳本切換 sheet：加入帳本用正確的 10 碼邀請碼可切過去', (tester) async {
-    final other = Ledger(
-      id: 'ledger-2',
-      name: '第二本',
-      inviteCode: 'BBBBBBBBBB',
-      defaultRatio: const {kMeId: 100},
-    );
+    const other = Ledger(id: 'ledger-2', name: '第二本', inviteCode: 'BBBBBBBBBB');
     final container = ProviderContainer(overrides: [
-      ledgerRepositoryProvider.overrideWithValue(repoWith(ledger: other, entries: const [], settlements: const [])),
+      ledgerRepositoryProvider.overrideWithValue(repoWith(ledger: other, entries: const [])),
     ]);
     await _pump(tester, container);
     await tester.tap(find.text('帳本切換'));
@@ -536,27 +407,6 @@ void main() {
     expect(container.read(entriesProvider), isEmpty, reason: '換帳本＝整份快照換掉，不得殘留上一本的帳目');
   });
 
-  testWidgets('餘額兩列的值文字不被攔腰截斷（MAJOR-1：Spacer+Flexible 平分寬度的舊 bug，取最緊的樣本列）', (tester) async {
-    tester.view.physicalSize = const Size(390, 844);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-
-    final container = await _pump(tester);
-
-    // 兩筆餘額各一列（2026-09-05 起），兩列都驗：seed 值是 390px 下最緊的樣本
-    // ——值從 seed 讀，假資料改了這條測試要跟著動，不是繼續驗一組不存在的數字。
-    final seedShared = fmtAmount(container.read(ledgerProvider).openingBalanceShared);
-    final seedTopup =
-        fmtAmount(container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup);
-    for (final (label, value) in [('共同期初餘額', seedShared), ('我的每月補入額', seedTopup)]) {
-      final rowFinder = find.ancestor(of: find.text(label), matching: find.byType(Row)).first;
-      final valueFinder = find.descendant(of: rowFinder, matching: find.text(value));
-      final paragraph = tester.renderObject<RenderParagraph>(valueFinder);
-      expect(paragraph.didExceedMaxLines, isFalse, reason: '「$label」那列的值被截斷了');
-    }
-  });
-
   testWidgets('外觀列：標籤與 SegmentedButton 同一行（單行、標籤在左）', (tester) async {
     await _pump(tester);
 
@@ -564,32 +414,20 @@ void main() {
     expect(find.descendant(of: appearanceRow, matching: find.byKey(const Key('theme-mode-toggle'))), findsOneWidget);
   });
 
-  testWidgets('比例儲存失敗：sheet 內顯示錯誤且維持開啟（MAJOR-2：不再用被 sheet 蓋住看不到的 SnackBar）', (tester) async {
-    await _pump(tester, ProviderContainer(overrides: [ledgerStateProvider.overrideWith(() => _ThrowingLedgerNotifier())]));
+  testWidgets('帳本名稱儲存失敗：sheet 內顯示錯誤且維持開啟（MAJOR-2：不再用被 sheet 蓋住看不到的 SnackBar）', (tester) async {
+    final container = await _pump(tester, ProviderContainer(overrides: [ledgerStateProvider.overrideWith(() => _ThrowingLedgerNotifier())]));
+    final before = container.read(ledgerProvider).name;
 
-    await _openRatioSheet(tester);
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kMeId')), '60');
-    await tester.enterText(find.byKey(ValueKey('ratio-field-$kWifeId')), '40');
-    await tester.tap(find.byKey(const ValueKey('save-ratio-button')));
+    await tester.tap(find.text('帳本名稱'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('ledger-name-field')), '新家名稱');
+    await tester.tap(find.byKey(const ValueKey('save-ledger-name-button')));
     await tester.pumpAndSettle();
 
     expect(find.text('儲存失敗，請重試'), findsOneWidget);
     // sheet 沒關（欄位還在），錯誤是 sheet 內的一行，不是可能被蓋住的 SnackBar。
-    expect(find.byKey(ValueKey('ratio-field-$kMeId')), findsOneWidget);
-  });
-
-  testWidgets('餘額設定儲存失敗（共同欄寫入炸掉）：sheet 內顯示錯誤且維持開啟、ledger 不變', (tester) async {
-    final container = await _pump(tester, ProviderContainer(overrides: [ledgerStateProvider.overrideWith(() => _ThrowingLedgerNotifier())]));
-    final before = container.read(ledgerProvider).openingBalanceShared;
-
-    await _openBalanceSheet(tester);
-    await tester.enterText(find.byKey(const ValueKey('balance-shared-field')), '99999');
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('儲存失敗，請重試'), findsOneWidget);
-    expect(find.byKey(const ValueKey('balance-shared-field')), findsOneWidget); // sheet 沒關
-    expect(container.read(ledgerProvider).openingBalanceShared, before);
+    expect(find.byKey(const ValueKey('ledger-name-field')), findsOneWidget);
+    expect(container.read(ledgerProvider).name, before);
   });
 
   testWidgets('新增分類儲存失敗：sheet 內顯示錯誤且維持開啟、分類清單不變', (tester) async {
@@ -610,24 +448,6 @@ void main() {
     // sheet 沒關（步驟精靈停在圖示步，名稱欄不在畫面上，改驗儲存鈕仍在）。
     expect(find.byKey(const ValueKey('save-category-button')), findsOneWidget);
     expect(container.read(categoriesProvider).length, before);
-  });
-
-  testWidgets('餘額設定儲存失敗（補入額寫入炸掉）：sheet 內顯示錯誤且維持開啟、member 不變、已寫入的共同欄退回原值', (tester) async {
-    final container = await _pump(tester, ProviderContainer(overrides: [membersStateProvider.overrideWith(() => _ThrowingMembersNotifier())]));
-    final before = container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup;
-    final sharedBefore = container.read(ledgerProvider).openingBalanceShared;
-
-    await _openBalanceSheet(tester);
-    // 共同欄也改成新值：共同先寫成功、個人再炸，斷言共同被退回（不是沒動過就剛好等於原值）。
-    await tester.enterText(find.byKey(const ValueKey('balance-shared-field')), '${sharedBefore + 1}');
-    await tester.enterText(find.byKey(const ValueKey('balance-topup-field')), '99999');
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('儲存失敗，請重試'), findsOneWidget);
-    expect(find.byKey(const ValueKey('balance-topup-field')), findsOneWidget); // sheet 沒關
-    expect(container.read(membersProvider).firstWhere((m) => m.id == kMeId).monthlyTopup, before);
-    expect(container.read(ledgerProvider).openingBalanceShared, sharedBefore);
   });
 
   testWidgets('帳本切換 sheet：碼長不對與錯碼都用 error 色顯示在 sheet 內，不切帳本', (tester) async {
@@ -748,7 +568,7 @@ void main() {
     expect(find.text('請輸入名稱'), findsOneWidget);
   });
 
-  testWidgets('真主題（buildTheme）下開四個 sheet 都不炸', (tester) async {
+  testWidgets('真主題（buildTheme）下開設定頁的幾個 sheet 都不炸', (tester) async {
     await _pump(tester);
 
     await tester.tap(find.text('帳本名稱'));
@@ -766,14 +586,13 @@ void main() {
     await tester.tapAt(const Offset(20, 20)); // 點外面關掉 sheet
     await tester.pumpAndSettle();
 
-    await _openRatioSheet(tester);
+    await tester.tap(find.text('我的名稱'));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     await tester.tapAt(const Offset(20, 20));
     await tester.pumpAndSettle();
 
-    await _openBalanceSheet(tester);
-    expect(tester.takeException(), isNull);
-    await tester.tap(find.byKey(const ValueKey('save-balance-button')));
+    await tester.tap(find.text('成員'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
@@ -786,7 +605,7 @@ void main() {
 
     await _pump(tester);
 
-    // 餘額拆兩列＋新增「清帳」列之後仍要塞得下：多加一列就會讓這條紅。
+    // 去分攤比例與餘額設定後應更寬裕，但一頁顯示是硬要求：加新列前先確認這條還是綠的。
     final position = tester
         .state<ScrollableState>(find.descendant(
           of: find.byType(SettingsPage),
@@ -796,7 +615,7 @@ void main() {
     expect(position.maxScrollExtent, 0.0);
   });
 
-  // ── 清帳入口（v1.4） ────────────────────────────────────────────────
+  // ── 清帳入口（v1.5） ────────────────────────────────────────────────
 
   testWidgets('清帳列：沒有任何清帳紀錄時顯示「尚未清帳」', (tester) async {
     await _pump(tester);

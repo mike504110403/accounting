@@ -36,7 +36,7 @@ abstract class LedgerRepository {
   void clearSnapshot();
 
   // ── 月摘要（DB 端計算）───────────────────────────────────────────────
-  /// 衍生數字（共同餘額／預算／已花／超支／個人餘額）一律由後端依 Supabase
+  /// 衍生數字（共同餘額／預算／已花／超支／每人補入剩餘）一律由後端依 Supabase
   /// 資料計算（Mike 裁示 2026-09-03）；`until` 只取日期分量。
   Future<MonthSummary> monthSummary(String ledgerId, DateTime until);
 
@@ -47,13 +47,10 @@ abstract class LedgerRepository {
   Future<Ledger> joinLedger(String code);
   Future<Ledger> rotateInviteCode(String ledgerId);
 
-  /// 只送 `name, default_ratio, opening_balance_shared`（其餘欄位沒有 update 授權）。
+  /// 只送 `name`（v1.5 起 `ledgers` 只有這一欄有 update 授權）。
   Future<void> updateLedger(Ledger ledger);
 
-  /// 只送 `display_name, monthly_topup`，且只能是自己那列。
-  ///
-  /// `opening_balance_personal` v1.4 起廢用（欄位仍在 DB、仍有 update 授權，
-  /// 但不入任何公式），所以不再送。
+  /// 只送 `display_name`，且只能是自己那列（v1.5 起 `members` 只有這一欄可改）。
   Future<void> updateMember(Member member);
 
   Future<Ledger> fetchLedger(String ledgerId);
@@ -73,19 +70,28 @@ abstract class LedgerRepository {
 
   /// 新增或更新一筆帳目（`entry.id` 為空＝新增）。
   ///
-  /// [writeSplits]／[writeLineItems] 對應 `upsert_entry` 的三種語意：
-  /// `false` ＝ 那張子表完全不動（`null`）；`true` ＝ 用 `entry` 上的清單全刪重建
-  /// （空清單就是清空）。已結帳的帳目兩個都必須是 `false`，否則 DB raise。
-  Future<Entry> upsertEntry(Entry entry, {bool writeSplits = true, bool writeLineItems = true});
+  /// [writeLineItems] 對應 `upsert_entry` 的 `p_line_items` 三種語意：
+  /// `false` ＝ 細項完全不動（`null`）；`true` ＝ 用 `entry.lineItems` 全刪重建
+  /// （空清單就是清空）。v1.5 起沒有分攤子表，所以只剩這一個旗標。
+  Future<Entry> upsertEntry(Entry entry, {bool writeLineItems = true});
 
   Future<void> removeEntry(String id);
 
   /// 直接重寫某筆帳目的細項（先刪後插，同一批）。
   ///
-  /// **已結帳的帳目要改細項只能走這支**：ADR-0002 明文允許改細項，但 `upsert_entry`
-  /// 的子表寫法是「全刪重建」，settled 下會被 policy 擋成半套，所以那支直接 raise。
-  /// `line_items` 表本身對成員是全權（select/insert/update/delete），跟隨父 entry 的 RLS。
+  /// `line_items` 表本身對成員是全權（select/insert/update/delete），跟隨父 entry 的 RLS；
+  /// 已清月份的帳目連細項都動不了（DB 的 `a_line_items_month_closed_trg` 看父筆的 occurred_on）。
   Future<List<LineItem>> replaceLineItems(String entryId, List<LineItem> items);
+
+  // ── 個人補入（v1.5／ADR-0009）────────────────────────────────────────
+  Future<List<PersonalTopup>> fetchTopups(String ledgerId);
+
+  /// 記一筆自己的補入。**只能寫自己那列**（`member_id = created_by = 本人`），
+  /// 金額必須 > 0，已清月份不可寫；`month` 是 DB 產生的欄位，不送。
+  Future<PersonalTopup> addTopup(PersonalTopup topup);
+
+  /// 刪掉自己的一筆補入（未清月才行；`personal_topups` 沒有 UPDATE）。
+  Future<void> removeTopup(String id);
 
   // ── 預算（影子紀錄）──────────────────────────────────────────────────
   Future<List<BudgetAllocation>> fetchAllocations(String ledgerId);
@@ -100,21 +106,19 @@ abstract class LedgerRepository {
   Future<void> updateListItem(ListItem item);
   Future<void> removeListItem(String id);
 
-  // ── 結算（一律走 RPC，前端對 settlements 只有 select） ──────────────
-  Future<List<Settlement>> fetchSettlements(String ledgerId);
-  Future<Settlement> initiateSettlement(String ledgerId);
-  Future<Settlement> approveSettlement(String settlementId);
-  Future<Settlement> cancelSettlement(String settlementId);
-
-  // ── 月清帳（v1.4，只讀 ＋ 兩支 RPC）──────────────────────────────────
+  // ── 月清帳（v1.5，只讀 ＋ 兩支 RPC）──────────────────────────────────
   Future<List<MonthClose>> fetchMonthCloses(String ledgerId);
 
   /// 清帳預覽：可清條件不過就丟 [LedgerException]（中文），過了回和落地
-  /// `details` 相同的明細，外加 `warnings`（落地的快照不帶）。
+  /// `details` 相同的明細，外加 `income_amount`（落地的快照不帶）。
   Future<MonthCloseDetails> monthClosePreview(String ledgerId, DateTime month);
 
   /// 執行清帳。任一成員可執行、不需多簽、**不可撤銷**；失敗一律丟 [LedgerException]。
-  Future<MonthClose> closeMonth(String ledgerId, DateTime month);
+  ///
+  /// [recordIncome]＝「一鍵記共同收入」（預設勾）：在同一段交易裡把
+  /// 「Σ應轉入 − Σ應補出」記成該月最後一天、分類「清帳轉入」的一筆共同收入
+  /// （金額 ≤ 0 就不記），`MonthClose.incomeEntryId` 指向它。
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month, {bool recordIncome = true});
 }
 
 /// 目前使用的資料來源。預設是記憶體實作——測試與 `--dart-define=USE_MOCK=true` 直接可用；

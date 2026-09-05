@@ -3,7 +3,6 @@
 library;
 
 import '../../domain/models.dart';
-import '../entries/split_math.dart';
 
 /// 沒有店家的購物項目分組標籤。
 const kNoStoreLabel = '未分店家';
@@ -28,12 +27,11 @@ Map<String, List<ListItem>> groupByStore(List<ListItem> items) {
   return {for (final k in keys) k: map[k]!};
 }
 
-/// 依購物清單項目組裝一筆共同支出（勾選結帳流程唯一組裝點）：
+/// 依購物清單項目組裝一筆家庭支出（勾選結帳流程唯一組裝點，v1.5／ADR-0009）：
 /// - `actuals` 缺項用該項目的 estimated，兩者皆無則 0。
-/// - `total` 由呼叫端決定（可手改，ADR-0001 允許與細項加總有差額）。
+/// - `total`＝各項金額加總（UI 唯讀，v1.5 不可手改）。
 /// - note 用第一個有填店家的項目店名，都沒有則「購物」。
-/// - 依 ADR-0005 新增共同支出預設：payer 共同錢包、split common。
-/// - v1.4 起沒有資金來源狀態機：一律走 Entry 建構的餘額支出預設值（ADR-0008）。
+/// - 只記「誰先付」：[payerId] 為 null＝共同錢包、否則該成員先付；沒有範圍／分攤（ADR-0009 廢）。
 Entry buildEntryFromItems({
   required List<ListItem> items,
   required Map<String, int> actuals,
@@ -42,12 +40,7 @@ Entry buildEntryFromItems({
   required DateTime date,
   required String ledgerId,
   required String me,
-  // 結帳方式（Mike 裁示 2026-09-04：與支出表單同一組選項）。
-  String? payerId, // null＝共同錢包
-  SplitMethod splitMethod = SplitMethod.common,
-  List<Member> members = const [],
-  Map<String, int> ratio = const {},
-  Map<String, int> manual = const {},
+  required String? payerId, // null＝共同錢包
 }) {
   assert(items.isNotEmpty);
   // id 一律留空字串＝新筆，交給 repository（Supabase 由 DB）產生。
@@ -69,25 +62,16 @@ Entry buildEntryFromItems({
         sort: i,
       ),
   ];
-  final splits = payerId == null
-      ? const <EntrySplit>[]
-      : toEntrySplits(
-          entryId,
-          buildSplits(amount: total, method: splitMethod, members: members, ratio: ratio, manual: manual),
-        );
   return Entry(
     id: entryId,
     ledgerId: ledgerId,
     kind: EntryKind.expense,
-    scope: EntryScope.shared,
     amount: total,
     categoryId: categoryId,
     occurredOn: date,
     createdBy: me,
     note: storeName ?? '購物',
     payerId: payerId,
-    splitMethod: payerId == null ? SplitMethod.common : splitMethod,
-    splits: splits,
     lineItems: lineItems,
   );
 }

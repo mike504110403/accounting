@@ -67,11 +67,13 @@ wait_for_db() {
 }
 
 # migration 是否真的落在這個連線看得到的資料庫上
+# 三張表刻意各挑一個「時代」的產物：entries（0001）、month_closes（0027）、personal_topups（0028），
+# 任何一支 migration 沒套到都會少一張。
 schema_ready() {
   local n
   n="$("$PSQL" "$DB_URL" -q -t -A -c \
     "select count(*) from pg_class c join pg_namespace ns on ns.oid = c.relnamespace \
-      where ns.nspname = 'public' and c.relname in ('settlements','entries','settlement_signers')" \
+      where ns.nspname = 'public' and c.relname in ('entries','month_closes','personal_topups')" \
     2>/dev/null || echo 0)"
   [ "$n" = "3" ]
 }
@@ -79,19 +81,18 @@ schema_ready() {
 # 種子是不是「剛 reset 完」的原始狀態。
 # 只驗表存在是不夠的：實際踩過 reset 之後連過去卻是上一輪跑剩的資料，
 # 筆數對得上（測試都 rollback）但個別欄位被改過，於是測試在中段莫名其妙爆掉。
-# 這裡驗三件事：帳目筆數、沒有殘留的結算、每筆分攤加總與主筆金額相符。
+# v1.5 的三個計數（seed.sql 改了就要同步改這裡）：
+#   entries 8 筆（本月 6，含一組沖銷 ＋ 上月 2）、personal_topups 5 筆（本月 3 ＋ 上月 2）、month_closes 0 筆。
+#   month_closes 必須是 0：清帳測試每一條都假設「還沒清過任何月」。
 seed_ready() {
   local out
   out="$("$PSQL" "$DB_URL" -q -t -A -F',' -c \
     "select (select count(*) from public.entries),
-            (select count(*) from public.settlements),
-            (select count(*) from public.entries e
-              where e.split_method <> 'common' and e.scope <> 'private'
-                and exists (select 1 from public.entry_splits s where s.entry_id = e.id)
-                and abs((select sum(s.share) from public.entry_splits s where s.entry_id = e.id) - e.amount) >= 0.01)" \
+            (select count(*) from public.personal_topups),
+            (select count(*) from public.month_closes)" \
     2>/dev/null || echo "x")"
-  if [ "$out" != "10,0,0" ]; then
-    echo "  種子狀態不對（entries,settlements,分攤不符筆數 = $out，預期 10,0,0）" >&2
+  if [ "$out" != "8,5,0" ]; then
+    echo "  種子狀態不對（entries,personal_topups,month_closes = $out，預期 8,5,0）" >&2
     return 1
   fi
   return 0

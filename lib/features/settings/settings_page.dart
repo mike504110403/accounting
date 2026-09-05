@@ -16,7 +16,7 @@ import '../../domain/models.dart';
 import 'closes_page.dart' show lastClosedMonth;
 import 'member_name_sheet.dart' show MemberNameSheet, saveMyDisplayName;
 
-/// 設定：帳本、外觀、成員、餘額設定、清帳與分類管理入口（波 1 工人實作，替換本檔內容）。
+/// 設定：帳本、外觀、成員、清帳與分類管理入口（波 1 工人實作，替換本檔內容）。
 /// 緊湊單頁：每個項目一行，點進去才開 bottom sheet 編輯（spec v1.1 UI 互動原則：表單一律 bottom sheet）。
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
@@ -49,12 +49,10 @@ class SettingsPage extends StatelessWidget {
   }
 }
 
-Ledger _copyLedger(Ledger l, {String? name, Map<String, int>? defaultRatio, int? openingBalanceShared}) => Ledger(
+Ledger _copyLedger(Ledger l, {String? name}) => Ledger(
       id: l.id,
       name: name ?? l.name,
       inviteCode: l.inviteCode,
-      defaultRatio: defaultRatio ?? l.defaultRatio,
-      openingBalanceShared: openingBalanceShared ?? l.openingBalanceShared,
     );
 
 Member? _findMember(List<Member> members, String id) {
@@ -500,17 +498,11 @@ class _MembersCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final ledger = ref.watch(ledgerProvider);
     final members = ref.watch(membersProvider);
     final meId = ref.watch(currentMemberIdProvider);
     final me = _findMember(members, meId);
 
     final namesSummary = members.map((m) => m.displayName).join('、');
-    final ratioSummary = members.map((m) => '${m.displayName} ${ledger.defaultRatio[m.id] ?? 0}%').join('・');
-    // 兩筆餘額拆成兩列（Mike 裁示 2026-09-05）：390px 下 value 的可用寬只有 247px，
-    // 「共同 120,000・我每月 10,000」量過要 299px，擠在一列一定截斷（MAJOR-1）。
-    // 兩列都開同一個「餘額設定」sheet。
-    void openBalanceSheet() => _openSheet(context, (_) => const _BalanceSettingsSheet());
 
     return Card(
       child: Column(
@@ -525,23 +517,6 @@ class _MembersCard extends ConsumerWidget {
             label: '成員',
             value: namesSummary.isEmpty ? '尚無成員' : namesSummary,
             onTap: () => _openSheet(context, (_) => _MembersListSheet(members: members)),
-          ),
-          _SettingsRow(
-            label: '分攤比例',
-            value: ratioSummary.isEmpty ? '尚無成員' : ratioSummary,
-            onTap: () => _openSheet(context, (_) => const _RatioSheet()),
-          ),
-          _SettingsRow(
-            key: const Key('shared-opening-row'),
-            label: '共同期初餘額',
-            value: fmtAmount(ledger.openingBalanceShared),
-            onTap: openBalanceSheet,
-          ),
-          _SettingsRow(
-            key: const Key('monthly-topup-row'),
-            label: '我的每月補入額',
-            value: fmtAmount(me?.monthlyTopup ?? 0),
-            onTap: openBalanceSheet,
           ),
         ],
       ),
@@ -569,260 +544,6 @@ class _MembersListSheet extends StatelessWidget {
               leading: CircleAvatar(child: Text(m.displayName.isNotEmpty ? m.displayName.substring(0, 1) : '?')),
               title: Text(m.displayName),
             ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RatioSheet extends ConsumerStatefulWidget {
-  const _RatioSheet();
-
-  @override
-  ConsumerState<_RatioSheet> createState() => _RatioSheetState();
-}
-
-class _RatioSheetState extends ConsumerState<_RatioSheet> {
-  final Map<String, TextEditingController> _controllers = {};
-  String? _error;
-  bool _saving = false;
-
-  TextEditingController _controllerFor(Member m, Map<String, int> ratio) =>
-      _controllers.putIfAbsent(m.id, () => TextEditingController(text: (ratio[m.id] ?? 0).toString()));
-
-  @override
-  void dispose() {
-    for (final c in _controllers.values) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
-  Future<void> _save(Ledger ledger, List<Member> members) async {
-    if (_saving) return;
-    final newRatio = <String, int>{};
-    var sum = 0;
-    for (final m in members) {
-      final v = int.tryParse(_controllers[m.id]?.text.trim() ?? '') ?? 0;
-      newRatio[m.id] = v;
-      sum += v;
-    }
-    if (sum != 100) {
-      setState(() => _error = '比例合計需為 100（目前 $sum）');
-      return;
-    }
-    // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功先 pop 再補 SnackBar。
-    final messenger = ScaffoldMessenger.of(context);
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    try {
-      await ref.read(ledgerStateProvider.notifier).update(_copyLedger(ledger, defaultRatio: newRatio));
-      if (!mounted) return;
-      Navigator.of(context).pop();
-      messenger.showSnackBar(const SnackBar(content: Text('已儲存')));
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _saving = false;
-        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final members = ref.watch(membersProvider);
-    final ledger = ref.watch(ledgerProvider);
-    return Padding(
-      padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).viewInsets.bottom + 16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('預設分攤比例', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              for (final m in members) ...[
-                Expanded(
-                  child: TextField(
-                    key: ValueKey('ratio-field-${m.id}'),
-                    controller: _controllerFor(m, ledger.defaultRatio),
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    decoration: InputDecoration(labelText: m.displayName, suffixText: '%'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-              ],
-            ],
-          ),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-            ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              key: const ValueKey('save-ratio-button'),
-              onPressed: _saving ? null : () => _save(ledger, members),
-              child: Text(_saving ? '儲存中…' : '儲存比例'),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 餘額設定（v1.4）：共同期初餘額一個 ＋ 我的每月補入額一個。
-/// `opening_balance_personal` 已廢用，欄位從 UI 整個拿掉（只在寫入時原樣帶過去）。
-class _BalanceSettingsSheet extends ConsumerStatefulWidget {
-  const _BalanceSettingsSheet();
-
-  @override
-  ConsumerState<_BalanceSettingsSheet> createState() => _BalanceSettingsSheetState();
-}
-
-class _BalanceSettingsSheetState extends ConsumerState<_BalanceSettingsSheet> {
-  late final TextEditingController _sharedController;
-  late final TextEditingController _topupController;
-  String? _error;
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    final ledger = ref.read(ledgerProvider);
-    final meId = ref.read(currentMemberIdProvider);
-    final me = _findMember(ref.read(membersProvider), meId);
-    _sharedController = TextEditingController(text: ledger.openingBalanceShared.toString());
-    _topupController = TextEditingController(text: (me?.monthlyTopup ?? 0).toString());
-  }
-
-  @override
-  void dispose() {
-    _sharedController.dispose();
-    _topupController.dispose();
-    super.dispose();
-  }
-
-  // 一顆「儲存」同時存兩欄（任一失敗都停在 sheet 內顯示錯誤，不半途 pop）。
-  // sheet 蓋在上面時 SnackBar 會被擋住看不到（MAJOR-2）：錯誤改 sheet 內一行；成功先 pop 再補 SnackBar。
-  Future<void> _save(Ledger ledger, Member? me) async {
-    if (_saving) return;
-    final sharedV = int.tryParse(_sharedController.text.trim());
-    if (sharedV == null) {
-      setState(() => _error = '請輸入有效金額');
-      return;
-    }
-    final topupV = me == null ? null : int.tryParse(_topupController.text.trim());
-    if (me != null && topupV == null) {
-      setState(() => _error = '請輸入有效金額');
-      return;
-    }
-    final messenger = ScaffoldMessenger.of(context);
-    final ledgerNotifier = ref.read(ledgerStateProvider.notifier);
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    try {
-      await ledgerNotifier.update(_copyLedger(ledger, openingBalanceShared: sharedV));
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _saving = false;
-        _error = e is LedgerException ? e.message : '儲存失敗，請重試';
-      });
-      return;
-    }
-    if (me != null) {
-      try {
-        // v1.4：只改「每月補入額」。廢用的 `openingBalancePersonal` 原樣帶過去
-        // ——Supabase 版根本不送這一欄，這裡只是別讓一次更新把成員資料洗掉。
-        await ref.read(membersStateProvider.notifier).update(Member(
-              id: me.id,
-              ledgerId: me.ledgerId,
-              userId: me.userId,
-              displayName: me.displayName,
-              monthlyTopup: topupV!,
-              openingBalancePersonal: me.openingBalancePersonal,
-              joinedAt: me.joinedAt,
-            ));
-      } catch (e) {
-        // 兩張表沒有共同交易，個人欄寫入失敗時把已寫進去的共同欄退回原值，
-        // 讓「儲存失敗」文案與事實一致（兩欄都沒存）。
-        // 退回本身若也炸，吞掉：本來就已在失敗路徑、sheet 仍留在畫面讓使用者重試。
-        try {
-          await ledgerNotifier.update(ledger);
-        } catch (_) {}
-        if (!mounted) return;
-        setState(() {
-          _saving = false;
-          _error = e is LedgerException ? e.message : '儲存失敗，請重試';
-        });
-        return;
-      }
-    }
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    messenger.showSnackBar(const SnackBar(content: Text('已儲存')));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ledger = ref.watch(ledgerProvider);
-    final members = ref.watch(membersProvider);
-    final meId = ref.watch(currentMemberIdProvider);
-    final me = _findMember(members, meId);
-
-    return Padding(
-      padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(context).viewInsets.bottom + 16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('餘額設定', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('balance-shared-field'),
-            controller: _sharedController,
-            keyboardType: TextInputType.number,
-            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: '共同期初餘額'),
-          ),
-          if (me != null) ...[
-            const SizedBox(height: 8),
-            TextField(
-              key: const ValueKey('balance-topup-field'),
-              controller: _topupController,
-              keyboardType: TextInputType.number,
-              // 負數由 digitsOnly 擋在輸入端；上界（1 億）由 DB check
-              // `members_monthly_topup_range` 擋，訊息走 errors.dart 顯示在下面那行。
-              inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              decoration: const InputDecoration(labelText: '我的每月補入額'),
-            ),
-          ] else
-            const Padding(padding: EdgeInsets.only(top: 8), child: Text('尚無成員資料')),
-          if (_error != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-            ),
-          const SizedBox(height: 12),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              key: const ValueKey('save-balance-button'),
-              onPressed: _saving ? null : () => _save(ledger, me),
-              child: Text(_saving ? '儲存中…' : '儲存'),
-            ),
-          ),
         ],
       ),
     );

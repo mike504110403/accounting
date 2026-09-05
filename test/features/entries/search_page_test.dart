@@ -1,3 +1,4 @@
+import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
 import 'package:accounting/main.dart';
@@ -6,25 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:syncfusion_flutter_charts/charts.dart';
 
-/// 多一筆老婆的私人支出，驗私人資料只顯示自己的。
-class WithWifePrivate extends EntriesNotifier {
-  @override
-  List<Entry> build() => [
-        ...super.build(),
-        Entry(
-          id: 'e-wife-private',
-          ledgerId: kLedgerId,
-          kind: EntryKind.expense,
-          scope: EntryScope.private,
-          amount: 999,
-          categoryId: 'c-fun',
-          occurredOn: DateTime.now(),
-          createdBy: kWifeId,
-          note: '老婆的雞蛋秘密',
-          lineItems: const [LineItem(id: 'li-w1', entryId: 'e-wife-private', name: '雞蛋禮盒', amount: 999)],
-        ),
-      ];
-}
+import '../../support/fixtures.dart';
+
+ProviderContainer containerFor(LedgerRepository repo) =>
+    ProviderContainer(overrides: [ledgerRepositoryProvider.overrideWithValue(repo)]);
 
 Future<ProviderContainer> pumpApp(WidgetTester tester, [ProviderContainer? container]) async {
   tester.view.physicalSize = const Size(390, 844);
@@ -48,50 +34,79 @@ Future<void> openSearch(WidgetTester tester, String query) async {
   await tester.pumpAndSettle();
 }
 
+DateTime get _thisMonth => monthOf(DateTime.now());
+
+/// 兩位成員各記一筆含「牛奶」細項的支出：v1.5 沒有私人範圍，兩筆都該搜得到。
+List<Entry> milkByBothMembers() => [
+      Entry(
+        id: 'e-milk-mike',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        amount: 300,
+        categoryId: 'c-food',
+        occurredOn: DateTime(_thisMonth.year, _thisMonth.month, 3),
+        createdBy: kMeId,
+        note: 'Mike 的採買',
+        payerId: kMeId,
+        lineItems: const [LineItem(id: 'li-m1', entryId: 'e-milk-mike', name: '牛奶', amount: 95)],
+      ),
+      Entry(
+        id: 'e-milk-wife',
+        ledgerId: kLedgerId,
+        kind: EntryKind.expense,
+        amount: 220,
+        categoryId: 'c-food',
+        occurredOn: DateTime(_thisMonth.year, _thisMonth.month, 8),
+        createdBy: kWifeId,
+        note: '老婆的採買',
+        payerId: kWifeId,
+        lineItems: const [LineItem(id: 'li-w1', entryId: 'e-milk-wife', name: '牛奶', amount: 110)],
+      ),
+    ];
+
 void main() {
+  // 驗收 6：v1.5 沒有 scope，兩個人記的都搜得到（v1.4 時老婆那筆若是私人就會被濾掉）。
+  testWidgets('兩位成員各記一筆「牛奶」細項：兩筆都搜得到', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: milkByBothMembers(), listItems: const [])));
+    await openSearch(tester, '牛奶');
 
-  testWidgets('搜尋品項：命中細項並顯示所屬主筆備註', (tester) async {
-    await pumpApp(tester);
-    await openSearch(tester, '雞蛋');
-
-    expect(inResults('雞蛋'), findsNWidgets(3));
-    // li-1 89（全聯買菜）、li-6 189（Costco）、li-8 80（菜市場）
-    expect(inResults('89'), findsOneWidget);
-    expect(inResults('189'), findsOneWidget);
-    expect(inResults('80'), findsOneWidget);
-    expect(find.textContaining('全聯買菜'), findsWidgets);
-    expect(find.textContaining('Costco'), findsWidgets);
-    expect(find.textContaining('菜市場'), findsWidgets);
-    // 同名 ≥2 筆 → 頂部價格折線卡
-    expect(find.byType(SfCartesianChart), findsOneWidget);
-    expect(find.text('雞蛋 價格變化'), findsOneWidget);
+    expect(inResults('牛奶'), findsNWidgets(2));
+    expect(inResults('95'), findsOneWidget);
+    expect(inResults('110'), findsOneWidget);
+    expect(find.textContaining('Mike 的採買'), findsWidgets);
+    expect(find.textContaining('老婆的採買'), findsWidgets);
   });
 
-  testWidgets('同名品項 ≥2 筆時顯示價格折線卡', (tester) async {
-    await pumpApp(tester);
-    await openSearch(tester, '雞蛋');
+  testWidgets('同名品項 ≥2 筆時顯示價格折線卡；只有 1 筆就不畫', (tester) async {
+    await pumpApp(tester, containerFor(repoWith(entries: milkByBothMembers(), listItems: const [])));
+    await openSearch(tester, '牛奶');
     expect(find.byType(SfCartesianChart), findsOneWidget);
+    expect(find.text('牛奶 價格變化'), findsOneWidget);
 
-    await tester.enterText(find.byKey(const Key('search-field')), '高麗菜');
+    await tester.enterText(find.byKey(const Key('search-field')), 'Mike 的採買');
     await tester.pumpAndSettle();
     expect(find.byType(SfCartesianChart), findsNothing);
+  });
+
+  testWidgets('搜尋品項：命中細項並顯示所屬主筆備註（波 1 假資料）', (tester) async {
+    await pumpApp(tester);
+    await openSearch(tester, '雞蛋');
+
+    // 假資料本月「本月買菜」帶三列細項：雞蛋 89、牛奶 95、高麗菜 45。
+    expect(inResults('雞蛋'), findsOneWidget);
+    expect(inResults('89'), findsOneWidget);
+    expect(find.textContaining('本月買菜'), findsWidgets);
   });
 
   testWidgets('備註命中自成一列、清單命中帶清單標籤', (tester) async {
     await pumpApp(tester);
     await openSearch(tester, '牛奶');
+    // 假資料的購物清單有一項「牛奶」。
     expect(inResults('清單'), findsOneWidget);
 
-    await tester.enterText(find.byKey(const Key('search-field')), '房租');
+    await tester.enterText(find.byKey(const Key('search-field')), '本月買菜');
     await tester.pumpAndSettle();
-    expect(inResults('房租'), findsWidgets);
-  });
-
-  testWidgets('私人資料只顯示自己的', (tester) async {
-    await pumpApp(tester, ProviderContainer(overrides: [entriesProvider.overrideWith(WithWifePrivate.new)]));
-    await openSearch(tester, '雞蛋');
-    expect(find.text('雞蛋禮盒'), findsNothing);
-    expect(find.textContaining('老婆的雞蛋秘密'), findsNothing);
+    expect(inResults('本月買菜'), findsWidgets);
   });
 
   testWidgets('空字串顯示提示、無結果顯示空狀態', (tester) async {
@@ -105,12 +120,11 @@ void main() {
     expect(find.textContaining('找不到'), findsOneWidget);
   });
 
-  testWidgets('點結果進到主筆表單', (tester) async {
+  testWidgets('點結果進到主筆明細', (tester) async {
     await pumpApp(tester);
     await openSearch(tester, '高麗菜');
     await tester.tap(inResults('高麗菜'));
     await tester.pumpAndSettle();
-    // 編輯＝單頁明細 hub（2026-09-03）。
     expect(find.byKey(const Key('edit-mode')), findsOneWidget);
     expect(find.text('明細'), findsOneWidget);
   });

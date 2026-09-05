@@ -16,7 +16,7 @@ class LedgerSnapshot {
     required this.entries,
     required this.allocations,
     required this.listItems,
-    required this.settlements,
+    required this.topups,
     required this.closes,
     required this.currentMemberId,
   });
@@ -26,13 +26,13 @@ class LedgerSnapshot {
   /// 這種狀態下 `router.redirect` 已經把使用者送去 `/login` 或 `/onboarding`，
   /// 四個 Tab 不會被 build；佔位值只是讓 provider 圖不必為了「還沒登入」丟例外。
   factory LedgerSnapshot.empty() => const LedgerSnapshot(
-        ledger: Ledger(id: '', name: '', inviteCode: '', defaultRatio: {}),
+        ledger: Ledger(id: '', name: '', inviteCode: ''),
         members: [],
         categories: [],
         entries: [],
         allocations: [],
         listItems: [],
-        settlements: [],
+        topups: [],
         closes: [],
         currentMemberId: '',
       );
@@ -43,9 +43,11 @@ class LedgerSnapshot {
   final List<Entry> entries;
   final List<BudgetAllocation> allocations;
   final List<ListItem> listItems;
-  final List<Settlement> settlements;
 
-  /// 這本帳本的清帳紀錄（v1.4／ADR-0008），前端只讀。
+  /// 個人補入（v1.5／ADR-0009）：每人每月手動記的補入，兩人都看得到彼此的。
+  final List<PersonalTopup> topups;
+
+  /// 這本帳本的清帳紀錄（v1.5／ADR-0009），前端只讀。
   final List<MonthClose> closes;
 
   /// 目前登入者在這本帳本的 member id。
@@ -60,7 +62,7 @@ class LedgerSnapshot {
     List<Entry>? entries,
     List<BudgetAllocation>? allocations,
     List<ListItem>? listItems,
-    List<Settlement>? settlements,
+    List<PersonalTopup>? topups,
     List<MonthClose>? closes,
     String? currentMemberId,
   }) =>
@@ -71,7 +73,7 @@ class LedgerSnapshot {
         entries: entries ?? this.entries,
         allocations: allocations ?? this.allocations,
         listItems: listItems ?? this.listItems,
-        settlements: settlements ?? this.settlements,
+        topups: topups ?? this.topups,
         closes: closes ?? this.closes,
         currentMemberId: currentMemberId ?? this.currentMemberId,
       );

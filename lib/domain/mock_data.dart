@@ -12,7 +12,6 @@
 /// 假資料本身住在 `lib/data/in_memory_repository.dart`。
 library;
 
-import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/ledger_repository.dart';
@@ -22,13 +21,14 @@ export '../data/in_memory_repository.dart' show InMemoryLedgerRepository, kLedge
 export '../data/ledger_repository.dart'
     show LedgerRepository, LedgerException, LedgerSnapshot, ledgerRepositoryProvider, snapshotProvider;
 
-/// 帳本狀態（名稱、default_ratio、期初餘額…）。
+/// 帳本狀態（v1.5 只剩名稱與邀請碼）。
 class LedgerNotifier extends Notifier<Ledger> {
   @override
   Ledger build() => ref.watch(snapshotProvider).ledger;
 
   LedgerRepository get _repo => ref.read(ledgerRepositoryProvider);
 
+  /// 只有名稱改得動（repository 也只送 `name`）。
   Future<void> update(Ledger l) async {
     await _repo.updateLedger(l);
     state = l;
@@ -53,7 +53,7 @@ final ledgerProvider = Provider<Ledger>((ref) => ref.watch(ledgerStateProvider))
 /// 目前登入者在這本帳本的 member id。
 final currentMemberIdProvider = Provider<String>((ref) => ref.watch(snapshotProvider).currentMemberId);
 
-/// 成員狀態（暱稱、個人期初餘額）。
+/// 成員狀態（v1.5 只有「我的名稱」改得動）。
 class MembersNotifier extends Notifier<List<Member>> {
   @override
   List<Member> build() => ref.watch(snapshotProvider).members;
@@ -142,7 +142,7 @@ final categoriesStateProvider =
 /// 讀取入口，型別維持 Provider&lt;List&lt;Category&gt;&gt;（供其他工人 `overrideWithValue` 測試用）。
 final categoriesProvider = Provider<List<Category>>((ref) => ref.watch(categoriesStateProvider));
 
-/// 帳目狀態：新增／修改／刪除。寫入一律走 `upsert_entry`（主筆＋分攤＋細項同一交易）。
+/// 帳目狀態：新增／修改／刪除。寫入一律走 `upsert_entry`（主筆＋細項同一交易）。
 class EntriesNotifier extends Notifier<List<Entry>> {
   @override
   List<Entry> build() => ref.watch(snapshotProvider).entries;
@@ -156,15 +156,14 @@ class EntriesNotifier extends Notifier<List<Entry>> {
     return saved;
   }
 
-  /// [writeSplits]／[writeLineItems] 見 `LedgerRepository.upsertEntry`；
-  /// 已結帳的帳目兩個都要傳 `false`（DB 不接受重寫子表）。
-  Future<Entry> update(Entry e, {bool writeSplits = true, bool writeLineItems = true}) async {
-    final saved = await _repo.upsertEntry(e, writeSplits: writeSplits, writeLineItems: writeLineItems);
+  /// [writeLineItems] 見 `LedgerRepository.upsertEntry`（`false`＝細項完全不動）。
+  Future<Entry> update(Entry e, {bool writeLineItems = true}) async {
+    final saved = await _repo.upsertEntry(e, writeLineItems: writeLineItems);
     state = [for (final x in state) x.id == saved.id ? saved : x];
     return saved;
   }
 
-  /// 已結帳的帳目改細項的唯一路徑（ADR-0002 允許改細項，但不能走 `upsert_entry`）。
+  /// 直接重寫細項（先刪後插）。
   Future<void> replaceLineItems(String entryId, List<LineItem> items) async {
     final saved = await _repo.replaceLineItems(entryId, items);
     state = [
@@ -184,7 +183,7 @@ class EntriesNotifier extends Notifier<List<Entry>> {
 
 final entriesProvider = NotifierProvider<EntriesNotifier, List<Entry>>(EntriesNotifier.new);
 
-/// 預算狀態（v1.4／ADR-0008）：一列＝某分類某月的預算影子紀錄。
+/// 預算狀態（ADR-0008，v1.5 沿用）：一列＝某分類某月的預算影子紀錄。
 /// **只有 add**——設定後不可改、不可刪、不可退回（DB 連 UPDATE／DELETE 授權都收回了）。
 class AllocationsNotifier extends Notifier<List<BudgetAllocation>> {
   @override
@@ -237,52 +236,39 @@ class ListItemsNotifier extends Notifier<List<ListItem>> {
 
 final listItemsProvider = NotifierProvider<ListItemsNotifier, List<ListItem>>(ListItemsNotifier.new);
 
-/// 結算狀態。前端對 `settlements` 只有 select——三個動作全部只能經由 RPC。
-class SettlementsNotifier extends Notifier<List<Settlement>> {
+/// 個人補入狀態（v1.5／ADR-0009）：每人每月手動記的補入，**只有 add／remove**
+/// （`personal_topups` 沒有 UPDATE），而且只能動自己那列。
+///
+/// 快取生命週期與其他表相同：`build()` 從 `snapshotProvider` 取初值（切帳本／登入／
+/// 登出時整份重建）；Realtime 的 `personal_topups` 事件與輪詢都走 [refresh] 重抓整表；
+/// [add]／[remove] 成功後同步更新 state，不等事件回來。
+class TopupsNotifier extends Notifier<List<PersonalTopup>> {
   @override
-  List<Settlement> build() => ref.watch(snapshotProvider).settlements;
+  List<PersonalTopup> build() => ref.watch(snapshotProvider).topups;
 
   LedgerRepository get _repo => ref.read(ledgerRepositoryProvider);
 
-  Future<Settlement> initiate(String ledgerId) async {
-    final s = await _repo.initiateSettlement(ledgerId);
-    await _resync(ledgerId);
-    return s;
+  /// [t] 的 id 留空字串＝新筆。回傳的是存好之後（帶 DB id 與 month）的那筆。
+  Future<PersonalTopup> add(PersonalTopup t) async {
+    final saved = await _repo.addTopup(t);
+    state = [...state, saved];
+    return saved;
   }
 
-  Future<Settlement> approve(String settlementId) async {
-    final s = await _repo.approveSettlement(settlementId);
-    await _resync(s.ledgerId);
-    return s;
-  }
-
-  Future<Settlement> cancel(String settlementId) async {
-    final s = await _repo.cancelSettlement(settlementId);
-    await _resync(s.ledgerId);
-    return s;
-  }
-
-  /// 結算會連帶改 entries 的 `settled_state`（trigger 做的），所以兩張表一起重抓。
-  ///
-  /// RPC 已經成功了，重抓失敗不該回報成「操作失敗」——記一筆就好，Realtime 會補上。
-  Future<void> _resync(String ledgerId) async {
-    try {
-      state = await _repo.fetchSettlements(ledgerId);
-      await ref.read(entriesProvider.notifier).refresh();
-    } catch (e, st) {
-      debugPrint('結算後重抓失敗: $e\n$st');
-    }
+  Future<void> remove(String id) async {
+    await _repo.removeTopup(id);
+    state = state.where((x) => x.id != id).toList();
   }
 
   Future<void> refresh() async {
-    state = await _repo.fetchSettlements(ref.read(snapshotProvider).ledger.id);
+    state = await _repo.fetchTopups(ref.read(snapshotProvider).ledger.id);
   }
 }
 
-final settlementsProvider =
-    NotifierProvider<SettlementsNotifier, List<Settlement>>(SettlementsNotifier.new);
+final topupsProvider =
+    NotifierProvider<TopupsNotifier, List<PersonalTopup>>(TopupsNotifier.new);
 
-/// 清帳紀錄（v1.4／ADR-0008）。前端只讀：清帳只能經 `close_month` RPC，
+/// 清帳紀錄（v1.5／ADR-0009）。前端只讀：清帳只能經 `close_month` RPC，
 /// 成功之後由呼叫端（或 Realtime 的 `month_closes` 事件）`refresh()` 把列表換掉。
 class MonthClosesNotifier extends Notifier<List<MonthClose>> {
   @override

@@ -1,4 +1,4 @@
-/// 清帳的「對帳」呈現詞彙（spec v1.4「清帳」節／ADR-0008）。
+/// 清帳的「對帳」呈現詞彙（spec v1.5「清帳」節／ADR-0009）。
 ///
 /// 這一份同時被預覽 sheet 與清帳列表的展開明細吃：兩處看到的欄位、方向文案、
 /// 金額寫法必須是同一份——清帳不可撤銷，預覽跟事後明細長得不一樣的話，
@@ -14,22 +14,16 @@ import '../../app/format.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 
-/// 一位成員該月的處理方向。月末餘額 > 0 ＝ 他手上還有額度要繳回共同帳戶；
-/// < 0 ＝ 他超支了，共同帳戶要補他；＝ 0 ＝ 剛好，不用動錢。
+/// 一位成員該月的處理方向。月末（補入 − 先付）> 0 ＝ 他手上還有補入要繳回共同帳戶；
+/// < 0 ＝ 他先付超過補入，共同帳戶要補他；＝ 0 ＝ 剛好，不用動錢。
 String closeDirectionText(MonthCloseMemberLine line) {
   if (line.ending > 0) return '${line.displayName} 轉 ${fmtAmount(line.ending)} 給共同帳戶';
   if (line.ending < 0) return '共同帳戶補 ${line.displayName} ${fmtAmount(-line.ending)}';
   return '免處理';
 }
 
-/// 預覽警示。DB 只給 `{code, count}`（結構化，不回中文句子），文案是前端的事；
-/// 認不得的 code 也要說得出話——DB 之後多加一種提醒時，畫面不能整行消失。
-String closeWarningText(CloseWarning w) => switch (w.code) {
-      'unsplit_advances' => '${w.count} 筆代墊尚未拆帳，將由付款人全額承擔',
-      _ => '${w.count} 筆需注意',
-    };
-
-/// 對帳明細（唯讀）：每位成員一列三個數字＋一行方向文案，末尾共同餘額變動。
+/// 對帳明細（唯讀）：每位成員一列三個數字（補入、先付、月末）＋一行方向文案，
+/// 末尾對照該月共同錢包支出合計（清帳不動共同餘額，這裡只供對照）。
 class CloseDetailsView extends StatelessWidget {
   const CloseDetailsView({super.key, required this.details});
 
@@ -45,9 +39,9 @@ class CloseDetailsView extends StatelessWidget {
         Row(
           children: [
             const Expanded(flex: 3, child: SizedBox.shrink()),
-            Expanded(flex: 2, child: Text('補入額', textAlign: TextAlign.right, style: muted)),
-            Expanded(flex: 2, child: Text('淨變動', textAlign: TextAlign.right, style: muted)),
-            Expanded(flex: 2, child: Text('月末餘額', textAlign: TextAlign.right, style: muted)),
+            Expanded(flex: 2, child: Text('補入', textAlign: TextAlign.right, style: muted)),
+            Expanded(flex: 2, child: Text('先付', textAlign: TextAlign.right, style: muted)),
+            Expanded(flex: 2, child: Text('月末', textAlign: TextAlign.right, style: muted)),
           ],
         ),
         for (final line in details.members) ...[
@@ -56,7 +50,7 @@ class CloseDetailsView extends StatelessWidget {
             children: [
               Expanded(flex: 3, child: Text(line.displayName, maxLines: 1, overflow: TextOverflow.ellipsis)),
               Expanded(flex: 2, child: Text(fmtAmount(line.topup), textAlign: TextAlign.right)),
-              Expanded(flex: 2, child: Text(fmtSignedAmount(line.net), textAlign: TextAlign.right)),
+              Expanded(flex: 2, child: Text(fmtAmount(line.paid), textAlign: TextAlign.right)),
               Expanded(
                 flex: 2,
                 child: Text(
@@ -74,7 +68,7 @@ class CloseDetailsView extends StatelessWidget {
           ),
         ],
         const SizedBox(height: 8),
-        Text('共同餘額本月變動 ${fmtSignedAmount(details.sharedDelta)}', style: muted),
+        Text('共同錢包支出 ${fmtAmount(details.sharedPaid)}', style: muted),
       ],
     );
   }
@@ -90,7 +84,7 @@ class ClosePreviewSheet extends ConsumerStatefulWidget {
   /// 要清的月份（月初；`SupabaseLedgerRepository` 不代為正規化）。
   final DateTime month;
 
-  /// `month_close_preview` 剛回來的明細（含 `warnings`）。
+  /// `month_close_preview` 剛回來的明細（含 `income_amount`）。
   final MonthCloseDetails details;
 
   @override
@@ -100,6 +94,25 @@ class ClosePreviewSheet extends ConsumerStatefulWidget {
 class _ClosePreviewSheetState extends ConsumerState<ClosePreviewSheet> {
   bool _closing = false;
   String? _error;
+
+  /// 「一鍵記共同收入」勾選狀態。已知本月不需要轉入（[_incomeKnownNonPositive]）
+  /// 時強制不勾且停用；其餘情況（含 RPC 沒給 `incomeAmount` 的極端狀況）預設勾
+  /// （spec v1.5：確認頁提供、預設勾——金額未知就交給 DB 判斷，勾了也不會多記一筆）。
+  late bool _recordIncome;
+
+  @override
+  void initState() {
+    super.initState();
+    _recordIncome = !_incomeKnownNonPositive;
+  }
+
+  /// `month_close_preview` 回來的應轉入金額；只有預覽帶這欄，落地快照不帶（見 model 註解）。
+  int? get _incomeAmount => widget.details.incomeAmount;
+
+  /// 「已經確定知道」這個月不需要轉入：`incomeAmount` 有值且 ≤ 0。
+  /// `incomeAmount == null`（RPC 沒給）不算「知道是 0 以下」，只是「不知道」——
+  /// 這時勾選框照樣可勾、預設勾，只是金額顯示「—」。
+  bool get _incomeKnownNonPositive => _incomeAmount != null && _incomeAmount! <= 0;
 
   Future<bool> _askConfirm() async {
     final ok = await showDialog<bool>(
@@ -136,7 +149,9 @@ class _ClosePreviewSheetState extends ConsumerState<ClosePreviewSheet> {
       // ledgerId 一律取當下的 `ledgerProvider`，不從頁面參數帶進來：
       // sheet 開著時切帳本的話，參數會是上一本的 id，清到別人的帳本上。
       final ledgerId = ref.read(ledgerProvider).id;
-      await ref.read(ledgerRepositoryProvider).closeMonth(ledgerId, widget.month);
+      await ref
+          .read(ledgerRepositoryProvider)
+          .closeMonth(ledgerId, widget.month, recordIncome: _recordIncome);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -145,13 +160,19 @@ class _ClosePreviewSheetState extends ConsumerState<ClosePreviewSheet> {
       });
       return;
     }
-    // 清完只要重抓 closes：`monthSummaryProvider` 自己 watch 了 `monthClosesProvider`
-    // 會跟著重打 RPC，entries 本身沒被清帳改動（只是變成不可寫）。
+    // 清完只要重抓 closes 與 entries：`monthSummaryProvider` 自己 watch 了
+    // `monthClosesProvider` 會跟著重打 RPC；「一鍵記共同收入」勾選時 `close_month`
+    // 同一交易多記一筆收入，entriesProvider 也要重抓才看得到那一筆。
     // 重抓失敗不改變「已經清帳成功」這件事：吞掉並照常收尾（輪詢／Realtime 會補上）。
     try {
       await ref.read(monthClosesProvider.notifier).refresh();
     } catch (e, st) {
-      debugPrint('清帳後重抓失敗: $e\n$st');
+      debugPrint('清帳後重抓 closes 失敗: $e\n$st');
+    }
+    try {
+      await ref.read(entriesProvider.notifier).refresh();
+    } catch (e, st) {
+      debugPrint('清帳後重抓 entries 失敗: $e\n$st');
     }
     if (!mounted) return;
     Navigator.of(context).pop(true);
@@ -160,7 +181,7 @@ class _ClosePreviewSheetState extends ConsumerState<ClosePreviewSheet> {
   @override
   Widget build(BuildContext context) {
     final t = Theme.of(context);
-    final warnings = widget.details.warnings;
+    final incomeAmount = _incomeAmount;
     // 清帳寫入中一律關不掉（下拉、點外面、系統返回都走 maybePop → 吃這裡的 canPop）：
     // sheet 在 await 中途被關掉的話，成功與否只剩 SnackBar 沒得顯示，人不知道清了沒。
     return PopScope(
@@ -175,24 +196,23 @@ class _ClosePreviewSheetState extends ConsumerState<ClosePreviewSheet> {
               Text('${fmtYearMonth(widget.month)} 對帳', style: t.textTheme.titleLarge),
               const SizedBox(height: 12),
               CloseDetailsView(details: widget.details),
-              for (final w in warnings)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Icon(Icons.info_outline, size: 16, color: t.colorScheme.tertiary),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          closeWarningText(w),
-                          key: Key('close-warning-${w.code}'),
-                          style: t.textTheme.bodySmall?.copyWith(fontSize: 12, color: t.colorScheme.tertiary),
-                        ),
-                      ),
-                    ],
-                  ),
+              const SizedBox(height: 8),
+              // 整列可點（不是只有小方塊）：CheckboxListTile 本身就處理了列點擊 toggle。
+              CheckboxListTile(
+                key: const Key('record-income-checkbox'),
+                value: _recordIncome,
+                onChanged: _incomeKnownNonPositive
+                    ? null
+                    : (v) => setState(() => _recordIncome = v ?? false),
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(
+                  _incomeKnownNonPositive
+                      ? '本月無需轉入'
+                      : '一鍵記共同收入 ${incomeAmount != null ? fmtAmount(incomeAmount) : '—'}',
                 ),
+              ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),

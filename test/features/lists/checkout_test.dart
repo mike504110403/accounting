@@ -25,10 +25,7 @@ void main() {
   group('buildEntryFromItems', () {
     final date = DateTime(2026, 9, 2);
 
-    final me = Member(id: 'm-1', ledgerId: 'ledger', userId: 'u1', displayName: 'Mike', joinedAt: DateTime(1970));
-    final wife = Member(id: 'm-2', ledgerId: 'ledger', userId: 'u2', displayName: '老婆', joinedAt: DateTime(1970));
-
-    test('結帳方式：成員代墊＋均分 → payer/splits/method 正確', () {
+    test('誰先付：payerId 帶入成員 id，沒有分攤／範圍（ADR-0009）', () {
       final entry = buildEntryFromItems(
         items: [l1, l2],
         actuals: {'l1': 100, 'l2': 100},
@@ -38,31 +35,9 @@ void main() {
         ledgerId: 'ledger',
         me: 'm-1',
         payerId: 'm-1',
-        splitMethod: SplitMethod.equal,
-        members: [me, wife],
       );
       expect(entry.payerId, 'm-1');
-      expect(entry.splitMethod, SplitMethod.equal);
-      expect(entry.splits.length, 2);
-      expect(entry.splits.map((s) => s.share).reduce((a, b) => a + b), 200);
-    });
-
-    test('結帳方式：金額分攤用 manual 值', () {
-      final entry = buildEntryFromItems(
-        items: [l1],
-        actuals: {'l1': 300},
-        total: 300,
-        categoryId: 'c-food',
-        date: date,
-        ledgerId: 'ledger',
-        me: 'm-1',
-        payerId: 'm-2',
-        splitMethod: SplitMethod.amount,
-        members: [me, wife],
-        manual: const {'m-1': 120, 'm-2': 180},
-      );
-      expect(entry.splits.firstWhere((s) => s.memberId == 'm-1').share, 120);
-      expect(entry.splits.firstWhere((s) => s.memberId == 'm-2').share, 180);
+      expect(entry.amount, 200);
     });
 
     test('組裝共同支出：金額用 actuals，缺項回退 estimated，note 用店家名', () {
@@ -74,11 +49,10 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
+        payerId: null,
       );
       expect(entry.kind, EntryKind.expense);
-      expect(entry.scope, EntryScope.shared);
       expect(entry.payerId, isNull);
-      expect(entry.splitMethod, SplitMethod.common);
       expect(entry.amount, 180);
       expect(entry.categoryId, 'c-food');
       expect(entry.occurredOn, date);
@@ -101,6 +75,7 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
+        payerId: null,
       );
       expect(entry.note, '購物');
     });
@@ -115,6 +90,7 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
+        payerId: null,
       );
       expect(entry.lineItems.single.amount, 0);
     });
@@ -130,9 +106,28 @@ void main() {
         date: date,
         ledgerId: 'ledger',
         me: 'm-mike',
+        payerId: null,
       );
       expect(entry.categoryId, 'c-food');
       expect(entry.amount, 180);
+    });
+
+    test('toUpsertJson() 不含 scope／split_method／entry_splits（ADR-0009）', () {
+      final entry = buildEntryFromItems(
+        items: [l1, l2],
+        actuals: {'l1': 100},
+        total: 180,
+        categoryId: 'c-food',
+        date: date,
+        ledgerId: 'ledger',
+        me: 'm-mike',
+        payerId: 'm-1',
+      );
+      final json = entry.toUpsertJson();
+      expect(json.containsKey('scope'), isFalse);
+      expect(json.containsKey('split_method'), isFalse);
+      expect(json.containsKey('entry_splits'), isFalse);
+      expect(json['payer_id'], 'm-1');
     });
   });
 
@@ -161,7 +156,6 @@ void main() {
         id: 'e-1',
         ledgerId: 'ledger',
         kind: EntryKind.expense,
-        scope: EntryScope.shared,
         amount: 120,
         categoryId: 'c-food',
         occurredOn: DateTime(2026, 9, 2),
@@ -184,7 +178,6 @@ void main() {
         id: 'e-2',
         ledgerId: 'ledger',
         kind: EntryKind.expense,
-        scope: EntryScope.shared,
         amount: 120,
         categoryId: 'c-food',
         occurredOn: DateTime(2026, 9, 2),

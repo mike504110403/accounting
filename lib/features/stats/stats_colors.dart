@@ -40,7 +40,15 @@ Color sliceColor(ColorScheme cs, int i) {
 /// 不要退回 0——那會和第一個分類同色，看起來像是同一項。
 Color sliceColorAt(ColorScheme cs, int i) => i < 0 ? cs.outline : sliceColor(cs, i);
 
-/// 三條趨勢線的顏色，各取主題語意色。
+/// 趨勢線固定兩條的顏色，各取主題語意色。
 Color spendColor(ColorScheme cs) => cs.primary;
-Color overColor(ColorScheme cs) => cs.error;
 Color balanceColor(ColorScheme cs) => cs.secondary;
+
+/// [memberColor] 的索引位移：借用 [sliceColor] 的黃金角散色，偏移幾個索引錯開
+/// 圓餅慣用的前幾個分類色，避免趨勢卡與支出分布卡並排時第一條補入線跟圓餅第一
+/// 塊分類撞色。`stats_page.dart` 的圓餅「依付款人」配色也要用同一個位移——同一
+/// 成員在圓餅片與趨勢補入線才會是同一個顏色，兩張卡對得起來。
+const kMemberColorOffset = 4;
+
+/// 第 [i] 位成員的補入線顏色（v1.5：每人補入一條，人數不定）。
+Color memberColor(ColorScheme cs, int i) => sliceColor(cs, i + kMemberColorOffset);

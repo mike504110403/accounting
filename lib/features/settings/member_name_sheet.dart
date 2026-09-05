@@ -22,7 +22,7 @@ String? validateMemberName(String raw) {
   return null;
 }
 
-/// 把「目前帳本裡的我」改名。只送 display_name（與 monthly_topup 一起是 RLS 允許改的兩欄）。
+/// 把「目前帳本裡的我」改名。只送 display_name（v1.5 起 `members` 只有這一欄可改）。
 ///
 /// 呼叫前提：快照已載好（`currentLedgerIdProvider.select` 之後）。找不到自己＝快照壞了，
 /// 丟 [LedgerException] 讓呼叫端照一般錯誤顯示。
@@ -34,15 +34,7 @@ Future<void> saveMyDisplayName(WidgetRef ref, String name) async {
     if (m.id == meId) me = m;
   }
   if (me == null) throw const LedgerException('找不到你的成員資料，請重新載入');
-  await ref.read(membersStateProvider.notifier).update(Member(
-        id: me.id,
-        ledgerId: me.ledgerId,
-        userId: me.userId,
-        displayName: name.trim(),
-        monthlyTopup: me.monthlyTopup,
-        openingBalancePersonal: me.openingBalancePersonal,
-        joinedAt: me.joinedAt,
-      ));
+  await ref.read(membersStateProvider.notifier).update(me.copyWith(displayName: name.trim()));
 }
 
 /// 設定頁「我的名稱」bottom sheet：一欄一鈕，錯誤顯示在 sheet 內（與其他設定 sheet 同款）。
@@ -112,7 +104,7 @@ class _MemberNameSheetState extends ConsumerState<MemberNameSheet> {
         children: [
           Text('我的名稱', style: t.textTheme.titleLarge),
           const SizedBox(height: 4),
-          Text('對方在帳目、結算與清帳明細裡看到的就是這個名字。',
+          Text('對方在帳目與清帳明細裡看到的就是這個名字。',
               style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
           const SizedBox(height: 12),
           TextField(

@@ -1,5 +1,6 @@
 /// Supabase 實作。寫入入口一律照 `docs/specs/db-contract.md`「寫入入口一覽」：
-/// 帳目走 `upsert_entry` RPC、結算走三支 RPC、其餘直接寫表（只送有欄位級授權的欄位）。
+/// 帳目走 `upsert_entry` RPC、清帳走 `month_close_preview`／`close_month`，
+/// 其餘直接寫表（只送有欄位級授權的欄位）。
 library;
 
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -45,7 +46,7 @@ class SupabaseLedgerRepository implements LedgerRepository {
           _client.from('entries').select(_entrySelect).eq('ledger_id', ledgerId),
           _client.from('budget_allocation').select().eq('ledger_id', ledgerId),
           _client.from('list_items').select().eq('ledger_id', ledgerId),
-          _client.from('settlements').select(_settlementSelect).eq('ledger_id', ledgerId),
+          _client.from('personal_topups').select().eq('ledger_id', ledgerId),
           _client.from('month_closes').select().eq('ledger_id', ledgerId),
         ]);
 
@@ -61,17 +62,15 @@ class SupabaseLedgerRepository implements LedgerRepository {
           entries: parseRows('entries', results[3] as List, Entry.fromJson),
           allocations: parseRows('budget_allocation', results[4] as List, BudgetAllocation.fromJson),
           listItems: parseRows('list_items', results[5] as List, ListItem.fromJson),
-          settlements: parseRows('settlements', results[6] as List, Settlement.fromJson),
+          topups: parseRows('personal_topups', results[6] as List, PersonalTopup.fromJson),
           closes: parseRows('month_closes', results[7] as List, MonthClose.fromJson),
           currentMemberId: me.first.id,
         );
         return _snapshot;
       });
 
-  /// 巢狀 select：一次把子表帶回來，不做 N+1。
-  static const _entrySelect = '*, line_items(*), entry_splits(*)';
-  static const _settlementSelect =
-      '*, settlement_entries(entry_id), settlement_approvals(member_id, approved_at)';
+  /// 巢狀 select：一次把細項帶回來，不做 N+1（v1.5 沒有分攤子表）。
+  static const _entrySelect = '*, line_items(*)';
 
   // ── 帳本層 ──────────────────────────────────────────────────────────
 
@@ -81,7 +80,10 @@ class SupabaseLedgerRepository implements LedgerRepository {
           'p_ledger': ledgerId,
           'p_until': _dateParam(until),
         });
-        return MonthSummary.fromJson((json as Map).cast<String, dynamic>());
+        // 走 parseRow（與 monthClosePreview 同法）：缺鍵／型別不符要變成可讀的
+        // 「資料格式不正確」，不能讓 TypeError 掉進 guard 最外層被誤報成「連線失敗」。
+        return parseRow('month_summary', (json as Map).cast<String, dynamic>(),
+            MonthSummary.fromJson);
       });
 
   @override
@@ -115,23 +117,17 @@ class SupabaseLedgerRepository implements LedgerRepository {
 
   @override
   Future<void> updateLedger(Ledger ledger) => guard(() async {
-        // 只有這三欄有 UPDATE 授權；多送一欄（例如 invite_code）就是 permission denied。
-        await _client.from('ledgers').update({
-          'name': ledger.name,
-          'default_ratio': ledger.defaultRatio,
-          'opening_balance_shared': ledger.openingBalanceShared,
-        }).eq('id', ledger.id);
+        // v1.5：只有 `name` 有 UPDATE 授權；多送一欄（例如 invite_code）就是 permission denied。
+        await _client.from('ledgers').update({'name': ledger.name}).eq('id', ledger.id);
         _snapshot = _snapshot.copyWith(ledger: ledger);
       });
 
   @override
   Future<void> updateMember(Member member) => guard(() async {
-        // v1.4：只送這兩欄。`opening_balance_personal` 已廢用（欄位與授權還在，
-        // 但不入公式），送了只會把一個沒人讀的欄位寫花。
-        await _client.from('members').update({
-          'display_name': member.displayName,
-          'monthly_topup': member.monthlyTopup,
-        }).eq('id', member.id);
+        // v1.5：只有 `display_name` 可改，且只能是自己那列。
+        await _client
+            .from('members')
+            .update({'display_name': member.displayName}).eq('id', member.id);
       });
 
   @override
@@ -195,14 +191,11 @@ class SupabaseLedgerRepository implements LedgerRepository {
       });
 
   @override
-  Future<Entry> upsertEntry(Entry entry, {bool writeSplits = true, bool writeLineItems = true}) =>
+  Future<Entry> upsertEntry(Entry entry, {bool writeLineItems = true}) =>
       guard(() async {
         final row = await _client.rpc<dynamic>('upsert_entry', params: {
           'p_entry': entry.toUpsertJson(),
-          // null＝不動那張子表；[]＝清空；有內容＝全刪重建（db-contract 三種語意）。
-          'p_splits': writeSplits
-              ? [for (final s in entry.splits) {'member_id': s.memberId, 'share': s.share}]
-              : null,
+          // null＝不動細項；[]＝清空；有內容＝全刪重建（db-contract 三種語意）。
           'p_line_items': writeLineItems
               ? [
                   for (final li in entry.lineItems)
@@ -211,15 +204,15 @@ class SupabaseLedgerRepository implements LedgerRepository {
               : null,
         });
         final id = requireId(row);
-        // RPC 只回主筆；子表要再撈一次才拿得到 DB 產生的 id。
+        // RPC 只回主筆；細項要再撈一次才拿得到 DB 產生的 id。
         final full = await _client.from('entries').select(_entrySelect).eq('id', id).single();
         return parseRow('entries', full, Entry.fromJson);
       });
 
   @override
   Future<List<LineItem>> replaceLineItems(String entryId, List<LineItem> items) => guard(() async {
-        // 先刪後插。`line_items` 對成員是全權，跟隨父 entry 的 RLS——
-        // 已結帳的帳目走這條就不會踩到 `upsert_entry` 的 settled 子表守衛。
+        // 先刪後插。`line_items` 對成員是全權，跟隨父 entry 的 RLS
+        //（已清月份的父筆連細項都動不了，那是 DB 的鎖月 trigger 擋的）。
         await _client.from('line_items').delete().eq('entry_id', entryId);
         if (items.isEmpty) return const <LineItem>[];
         final rows = await _client
@@ -234,9 +227,38 @@ class SupabaseLedgerRepository implements LedgerRepository {
 
   @override
   Future<void> removeEntry(String id) => guard(() async {
-        // 已結帳的帳目被 delete policy 過濾掉＝影響 0 列且不 raise，要自己看回傳列數。
+        // 被 delete policy 過濾掉＝影響 0 列且不 raise，要自己看回傳列數。
         final rows = await _client.from('entries').delete().eq('id', id).select('id');
-        if (rows.isEmpty) throw const LedgerException('這筆帳目無法刪除（可能已結帳）');
+        if (rows.isEmpty) throw const LedgerException('這筆帳目無法刪除，請重新整理');
+      });
+
+  // ── 個人補入（v1.5）─────────────────────────────────────────────────
+
+  @override
+  Future<List<PersonalTopup>> fetchTopups(String ledgerId) => guard(() async {
+        final rows = await _client.from('personal_topups').select().eq('ledger_id', ledgerId);
+        return parseRows('personal_topups', rows, PersonalTopup.fromJson);
+      });
+
+  @override
+  Future<PersonalTopup> addTopup(PersonalTopup topup) => guard(() async {
+        final payload = topup.toJson()
+          ..remove('id')
+          // 不能以別人的名義補入：created_by 一律強制成自己（比照 addAllocation）。
+          // `member_id` **照送呼叫端給的值**——補到別人頭上必須被 RLS 打回 42501，
+          // 前端偷偷改寫成自己的話那道 policy 永遠測不到，兩個實作也會分岔
+          //（記憶體版對同一個輸入是丟「沒有權限執行這個操作」）。
+          ..['created_by'] = _myMemberId;
+        final row = await _client.from('personal_topups').insert(payload).select().single();
+        return parseRow('personal_topups', row, PersonalTopup.fromJson);
+      });
+
+  @override
+  Future<void> removeTopup(String id) => guard(() async {
+        // 別人的那列被 delete policy 過濾掉＝影響 0 列且不 raise，要自己看回傳列數
+        //（比照 removeEntry）。靜靜成功的話，畫面會把一列根本沒刪掉的補入抹掉。
+        final rows = await _client.from('personal_topups').delete().eq('id', id).select('id');
+        if (rows.isEmpty) throw const LedgerException('這筆補入無法刪除，請重新整理');
       });
 
   // ── 預算撥款 ────────────────────────────────────────────────────────
@@ -285,37 +307,6 @@ class SupabaseLedgerRepository implements LedgerRepository {
         await _client.from('list_items').delete().eq('id', id);
       });
 
-  // ── 結算 ────────────────────────────────────────────────────────────
-
-  @override
-  Future<List<Settlement>> fetchSettlements(String ledgerId) => guard(() async {
-        final rows =
-            await _client.from('settlements').select(_settlementSelect).eq('ledger_id', ledgerId);
-        return parseRows('settlements', rows, Settlement.fromJson);
-      });
-
-  @override
-  Future<Settlement> initiateSettlement(String ledgerId) =>
-      _settlementRpc('initiate_settlement', {'ledger': ledgerId});
-
-  @override
-  Future<Settlement> approveSettlement(String settlementId) =>
-      _settlementRpc('approve_settlement', {'id': settlementId});
-
-  @override
-  Future<Settlement> cancelSettlement(String settlementId) =>
-      _settlementRpc('cancel_settlement', {'id': settlementId});
-
-  /// 三支結算 RPC 只回 `settlements` 主列（沒有 entryIds／approvedBy），
-  /// 再撈一次巢狀版本才是完整的 [Settlement]。
-  Future<Settlement> _settlementRpc(String fn, Map<String, dynamic> params) => guard(() async {
-        final row = await _client.rpc<dynamic>(fn, params: params);
-        final id = requireId(row);
-        final full =
-            await _client.from('settlements').select(_settlementSelect).eq('id', id).single();
-        return parseRow('settlements', full, Settlement.fromJson);
-      });
-
   // ── 月清帳 ──────────────────────────────────────────────────────────
 
   @override
@@ -337,10 +328,12 @@ class SupabaseLedgerRepository implements LedgerRepository {
       });
 
   @override
-  Future<MonthClose> closeMonth(String ledgerId, DateTime month) => guard(() async {
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month, {bool recordIncome = true}) =>
+      guard(() async {
         final row = await _client.rpc<dynamic>('close_month', params: {
           'p_ledger': ledgerId,
           'p_month': _dateParam(month),
+          'p_record_income': recordIncome,
         });
         return parseRow('month_closes', asRowMap(row), MonthClose.fromJson);
       });

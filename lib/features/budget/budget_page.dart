@@ -9,10 +9,11 @@ import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import 'allocation_sheet.dart';
 import 'budget_widgets.dart';
+import 'topup_section.dart';
 
-/// 預算 Tab（v1.4／ADR-0008）：頂部四數字（共同餘額／本月預算／本月共同支出／本月超支），
-/// 每分類一列預算／已花／剩餘／超支，點列開 sheet 設定本月預算；本月完全沒有任何預算時
-/// 提示可複製上月（只補上月有值且本月尚未設定的分類）。
+/// 預算 Tab（v1.5／ADR-0009）：頂部四數字（共同餘額／本月預算合計／本月支出／本月超支），
+/// 「個人補入」區塊（[TopupSection]），每分類一列預算／已花／剩餘／超支，點列開 sheet
+/// 設定本月預算；本月完全沒有任何預算時提示可複製上月（只補上月有值且本月尚未設定的分類）。
 class BudgetPage extends ConsumerStatefulWidget {
   const BudgetPage({super.key});
 
@@ -33,6 +34,7 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
   Widget build(BuildContext context) {
     final categories = ref.watch(categoriesProvider);
     final allocations = ref.watch(allocationsProvider);
+    final entries = ref.watch(entriesProvider);
 
     final expenseCats = categories.where((c) => c.kind == EntryKind.expense).toList()..sort((a, b) => a.sort.compareTo(b.sort));
 
@@ -40,26 +42,44 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
     final until = DateTime(_month.year, _month.month + 1, 0);
 
     // 衍生數字一律吃 DB month_summary（Mike 裁示 2026-09-03）；重刷期間沿用上一份
-    // server 值（AsyncValue 預設 skipLoadingOnRefresh），首載前先畫 0。
+    // server 值（AsyncValue 預設 skipLoadingOnRefresh）。首載前 `.value` 是 null，
+    // 這時整份改用同一組 `balance_math` 純函式對本地已載入的 entries／allocations
+    // 現算 fallback（與 `TopupSection`、`stats_page.dart` 同一套慣例），不是靜靜畫
+    // 0——0 會在有資料的帳本上先閃一次假的「都是 0」。用 `if (summary == null)`
+    // 整包分支而不是逐欄位 `??`：四個數字／四個分類欄位要嘛全走 server、要嘛全走
+    // 本地公式，不會半個 server 半個本地混著看。
     final summary = ref.watch(monthSummaryProvider(until)).value;
-    final topBalance = summary?.sharedBalance ?? 0;
-    final topBudget = summary?.budgetTotal ?? 0;
-    final topSpent = summary?.spentTotal ?? 0;
-    final topOver = summary?.overspendTotal ?? 0;
+    final int topBalance;
+    final int topBudget;
+    final int topSpent;
+    final int topOver;
+    if (summary == null) {
+      topBalance = sharedBalance(entries: entries, until: until);
+      topBudget = totalAllocated(allocations: allocations, month: until);
+      topSpent = totalSpent(entries: entries, until: until);
+      topOver = totalOverspend(entries: entries, allocations: allocations, until: until);
+    } else {
+      topBalance = summary.sharedBalance;
+      topBudget = summary.budgetTotal;
+      topSpent = summary.spentTotal;
+      topOver = summary.overspendTotal;
+    }
 
-    final rows = [
-      for (final c in expenseCats)
-        () {
-          final env = summary?.envelopeOf(c.id);
-          return CategoryRowData(
-            category: c,
-            allocated: env?.allocated ?? 0,
-            spent: env?.spent ?? 0,
-            remaining: env?.remaining ?? 0,
-            over: env?.over ?? 0,
-          );
-        }(),
-    ];
+    CategoryRowData rowDataOf(Category c) {
+      if (summary == null) {
+        return CategoryRowData(
+          category: c,
+          allocated: allocatedIn(allocations: allocations, categoryId: c.id, month: until),
+          spent: spentIn(entries: entries, categoryId: c.id, until: until),
+          remaining: remainingIn(allocations: allocations, entries: entries, categoryId: c.id, until: until),
+          over: overspend(allocations: allocations, entries: entries, categoryId: c.id, until: until),
+        );
+      }
+      final env = summary.envelopeOf(c.id);
+      return CategoryRowData(category: c, allocated: env.allocated, spent: env.spent, remaining: env.remaining, over: env.over);
+    }
+
+    final rows = [for (final c in expenseCats) rowDataOf(c)];
 
     // 「設定本月預算」提示：只在看的是當月或未來月、summary 已經首載完成、且該月完全
     // 沒有任何預算時出現（spec 口徑）。「已設定」判定一律看 monthSummary.envelopeOf(id)
@@ -129,6 +149,8 @@ class _BudgetPageState extends ConsumerState<BudgetPage> {
                     style: TextStyle(color: Theme.of(context).colorScheme.error),
                   ),
                 ),
+              const SizedBox(height: 8),
+              TopupSection(month: _month),
               const SizedBox(height: 16),
               for (final r in rows) ...[
                 CategoryRow(row: r, onTap: () => _openSheet(r.category)),

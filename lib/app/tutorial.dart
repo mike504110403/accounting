@@ -53,7 +53,7 @@ const tutorialSteps = <TutorialStep>[
   TutorialStep(
     target: 'fab-add',
     title: '記帳入口',
-    body: '之後點「＋新增」記收入或支出：一步一步選分類、填金額就好。先看看其他頁面。',
+    body: '之後點「＋新增」記收入或支出：選分類、填金額，再選誰先付（預設你自己，也可以改成共同錢包）。先付的錢從你的補入剩餘扣，共同錢包付的從共同餘額扣。先看看其他頁面。',
   ),
   TutorialStep(
     target: 'tab-budget',
@@ -64,7 +64,7 @@ const tutorialSteps = <TutorialStep>[
   TutorialStep(
     target: 'budget-summary',
     title: '本月預算',
-    body: '設定各分類的本月預算；所有共同支出都會扣，超支一眼看得到。',
+    body: '設定各分類的本月預算；所有支出都會扣，超支一眼看得到。',
   ),
   TutorialStep(
     target: 'tab-lists',
@@ -90,11 +90,6 @@ const tutorialSteps = <TutorialStep>[
     body: '點「帳目」回到主頁。',
   ),
   TutorialStep(
-    target: 'view-toggle',
-    title: '家庭與個人',
-    body: '家庭視角看共同帳（共同錢包與預算）；個人視角看自己的份額與私人帳。代墊先動個人餘額，結算簽核完成就歸位。',
-  ),
-  TutorialStep(
     target: 'settings-gear',
     advanceRoutePrefix: '/settings',
     title: '點齒輪',
@@ -108,7 +103,7 @@ const tutorialSteps = <TutorialStep>[
   ),
   TutorialStep(
     title: '分類管理',
-    body: '這裡可以新增分類、拖曳排序；左滑任一列＝編輯／刪除。分攤比例、餘額設定與清帳也都在設定裡。',
+    body: '這裡可以新增分類、拖曳排序；左滑任一列＝編輯／刪除。我的名稱、成員與清帳都在設定裡；每月到預算頁補入。',
   ),
   TutorialStep(
     title: '準備好了！',

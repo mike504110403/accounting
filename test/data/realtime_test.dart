@@ -1,7 +1,7 @@
 /// Realtime：事件到達就重抓該表。
 ///
 /// 用假的事件來源手動觸發——真的 websocket 進不了單元測試，但「收到事件之後做什麼」
-/// 才是會寫錯的那一半（漏掉重抓＝老婆按了發起，我這邊永遠看不到待簽卡）。
+/// 才是會寫錯的那一半（漏掉重抓＝老婆那台補入了，我這邊永遠看不到）。
 library;
 
 import 'package:accounting/data/current_ledger.dart';
@@ -20,7 +20,7 @@ void main() {
 
   setUp(() {
     fake = FakeRealtimeSource();
-    repo = repoWith(settlements: const []);
+    repo = repoWith();
     container = ProviderContainer(overrides: [
       ledgerRepositoryProvider.overrideWithValue(repo),
       realtimeSourceProvider.overrideWithValue(fake),
@@ -42,12 +42,12 @@ void main() {
       id: '',
       ledgerId: kLedgerId,
       kind: EntryKind.expense,
-      scope: EntryScope.shared,
       amount: 999,
       categoryId: 'c-food',
       occurredOn: DateTime.now(),
       createdBy: kWifeId,
       note: '老婆那台新增的',
+      payerId: kWifeId,
     ));
     expect(container.read(entriesProvider).length, before, reason: '事件還沒到，本機不該自己知道');
 
@@ -58,39 +58,28 @@ void main() {
     expect(container.read(entriesProvider).any((e) => e.note == '老婆那台新增的'), isTrue);
   });
 
-  test('settlements 事件 → 連帳目一起重抓（settled_state 是 trigger 改的）', () async {
-    expect(container.read(settlementsProvider), isEmpty);
-    await repo.upsertEntry(Entry(
-      id: 'e-remote',
-      ledgerId: kLedgerId,
-      kind: EntryKind.expense,
-      scope: EntryScope.shared,
-      amount: 1000,
-      categoryId: 'c-food',
-      occurredOn: DateTime.now(),
-      createdBy: kWifeId,
-      note: '老婆代墊',
-      payerId: kWifeId,
-      splitMethod: SplitMethod.equal,
-      splits: const [
-        EntrySplit(entryId: 'e-remote', memberId: kMeId, share: 500),
-        EntrySplit(entryId: 'e-remote', memberId: kWifeId, share: 500),
-      ],
-    ));
-    // 老婆那台發起結算。
+  test('personal_topups 事件 → 重抓補入', () async {
+    final before = container.read(topupsProvider).length;
+    // 模擬「老婆那台按了補入」：直接動 repository，不經過 notifier。
     repo.currentMemberId = kWifeId;
-    await repo.initiateSettlement(kLedgerId);
+    final now = DateTime.now();
+    await repo.addTopup(PersonalTopup(
+      id: '',
+      ledgerId: kLedgerId,
+      memberId: kWifeId,
+      amount: 4321,
+      occurredOn: DateTime(now.year, now.month, now.day),
+      createdBy: kWifeId,
+      note: '老婆那台補入的',
+    ));
     repo.currentMemberId = kMeId;
+    expect(container.read(topupsProvider).length, before, reason: '事件還沒到，本機不該自己知道');
 
-    fake.emit(LedgerTable.settlements);
+    fake.emit(LedgerTable.personalTopups);
     await pumpEventQueue();
 
-    expect(container.read(settlementsProvider).single.status, SettlementStatus.pending);
-    expect(
-      container.read(entriesProvider).firstWhere((e) => e.id == 'e-remote').settledState,
-      SettledState.settling,
-      reason: '只重抓 settlements 的話，對方那邊的金額不會變成鎖住',
-    );
+    expect(container.read(topupsProvider).length, before + 1);
+    expect(container.read(topupsProvider).any((t) => t.amount == 4321), isTrue);
   });
 
   test('DELETE 事件（payload 沒有 ledger_id，靠不帶 filter 的訂閱收到）→ 重抓', () async {
@@ -140,13 +129,15 @@ void main() {
     expect(container.read(allocationsProvider).any((a) => a.note == '遠端撥款'), isTrue);
   });
 
-  test('month_closes 事件 → 重抓清帳紀錄，並連帳目一起重抓（清完那幾個月就鎖住了）', () async {
+  test('month_closes 事件 → 重抓清帳紀錄，並連帳目一起重抓（清完鎖月，還多一筆清帳收入）', () async {
     expect(container.read(monthClosesProvider), isEmpty);
     final now = DateTime.now();
     final lastMonth = DateTime(now.year, now.month - 1, 1);
+    final beforeEntries = container.read(entriesProvider).length;
 
     // 模擬「老婆那台按了清帳」：直接動 repository，不經過 notifier。
-    await repo.closeMonth(kLedgerId, lastMonth);
+    final closed = await repo.closeMonth(kLedgerId, lastMonth);
+    expect(closed.incomeEntryId, isNotNull, reason: '種子上月兩人都有補入剩餘 → 會記一筆共同收入');
     expect(container.read(monthClosesProvider), isEmpty, reason: '事件還沒到，本機不該自己知道');
 
     fake.emit(LedgerTable.monthCloses);
@@ -154,8 +145,9 @@ void main() {
 
     expect(container.read(monthClosesProvider), hasLength(1));
     expect(container.read(monthClosesProvider).single.month, lastMonth);
-    // 連帳目一起重抓：鎖月之後列表能不能改由 entries 的內容決定，不能只更新 closes。
-    expect(container.read(entriesProvider), isNotEmpty);
+    // 連帳目一起重抓：鎖月之後列表能不能改由 entries 的內容決定，而且清帳會多記一筆收入。
+    expect(container.read(entriesProvider).length, beforeEntries + 1);
+    expect(container.read(entriesProvider).any((e) => e.id == closed.incomeEntryId), isTrue);
   });
 
   test('重抓失敗不會變成 uncaught（背景刷新不該打斷使用者）', () async {

@@ -41,7 +41,7 @@ class CategoryRowData {
   bool get noActivity => allocated == 0 && spent == 0;
 }
 
-/// 頂部摘要卡（v1.4／ADR-0008，四格）：共同餘額大字；第二列本月預算／本月共同支出／
+/// 頂部摘要卡（v1.5／ADR-0009，四格）：共同餘額大字；第二列本月預算合計／本月支出／
 /// 本月超支（0 時顯示「—」不上紅）。
 class SummaryCard extends StatelessWidget {
   const SummaryCard({
@@ -52,13 +52,13 @@ class SummaryCard extends StatelessWidget {
     required this.overspendTotal,
   });
 
-  /// 共同餘額＝共同期初 ＋ Σ共同收入 − Σ共同錢包支出（預算不再預扣）。
+  /// 共同餘額＝Σ共同收入 − Σ共同錢包支出（v1.5 起無期初餘額）。
   final int sharedBalance;
 
   /// 本月所有分類的預算合計。
   final int budgetTotal;
 
-  /// 本月所有共同支出合計（不分 payer）。
+  /// 本月**全部**支出合計（不分共同錢包付或成員先付）。
   final int spentTotal;
   final int overspendTotal;
 
@@ -80,8 +80,8 @@ class SummaryCard extends StatelessWidget {
             const SizedBox(height: 12),
             Row(
               children: [
-                Expanded(child: _stat(context, '本月預算', fmtMoney(budgetTotal))),
-                Expanded(child: _stat(context, '本月共同支出', fmtMoney(spentTotal))),
+                Expanded(child: _stat(context, '本月預算合計', fmtMoney(budgetTotal))),
+                Expanded(child: _stat(context, '本月支出', fmtMoney(spentTotal))),
                 Expanded(
                   child: _stat(
                     context,
@@ -234,9 +234,10 @@ class CategoryRow extends StatelessWidget {
                       if (row.noActivity)
                         Text('未設定', style: textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant))
                       else if (row.allocated == 0)
-                        // 沒設預算但有共同支出（如 seed 住房）：仍要標「未設定」——這不是
-                        // 「設了預算又花超」，是「根本沒設」；但已花不可藏（spec：已花＝
-                        // 所有共同支出，含沖銷後的負數淨額，一樣不能假裝沒發生）；超支只在
+                        // 沒設預算但本月已有支出（v1.5 seed 目前沒有這個組合，widget test
+                        // 用自造 fixture 覆蓋）：仍要標「未設定」——這不是「設了預算又花超」，
+                        // 是「根本沒設」；但已花不可藏（spec：已花＝全部支出，不分誰付，含
+                        // 沖銷後的負數淨額，一樣不能假裝沒發生）；超支只在
                         // over > 0 才畫——沖銷把這個分類的當月淨額沖成 0 或負數時，
                         // balance_math 把 over 夾在 0，這裡不畫一行「超支 0」誤導人。
                         Column(

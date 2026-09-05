@@ -1,4 +1,4 @@
-/// 清帳頁（v1.4／ADR-0008）：按鈕月份、預覽 sheet、二次確認、清帳列表、失敗路徑。
+/// 清帳頁（v1.5／ADR-0009）：按鈕月份、預覽 sheet、二次確認、清帳列表、失敗路徑。
 ///
 /// 資料一律走 `InMemoryLedgerRepository`——它的可清條件與訊息是逐條照 DB
 /// `month_close_guard` 寫的，所以這裡測到的「什麼時候會被擋、擋了說哪句話」和線上是同一套。
@@ -7,18 +7,15 @@
 /// 兩邊分岔時顯示 RPC 回來的訊息——底下有一條測試專門走那個分岔。
 library;
 
-import 'package:accounting/app/router.dart';
+import 'dart:async';
+
+import 'package:accounting/app/format.dart';
 import 'package:accounting/app/theme.dart';
 import 'package:accounting/domain/balance_math.dart';
 import 'package:accounting/domain/mock_data.dart';
 import 'package:accounting/domain/models.dart';
-import 'dart:async';
-
-import 'package:accounting/app/format.dart';
 import 'package:accounting/features/settings/close_preview_sheet.dart';
 import 'package:accounting/features/settings/closes_page.dart';
-import 'package:accounting/features/settings/settings_page.dart';
-import 'package:accounting/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,20 +28,19 @@ final _prev2 = prevMonth(_prev);
 
 DateTime _dayIn(DateTime month, int day) => DateTime(month.year, month.month, day);
 
-Member _member(String id, String name, {required DateTime joined, int topup = 10000}) => Member(
+Member _member(String id, String name, {required DateTime joined}) => Member(
       id: id,
       ledgerId: kLedgerId,
       userId: 'u-$id',
       displayName: name,
-      monthlyTopup: topup,
       joinedAt: joined,
     );
 
-Entry _private(String id, String by, int amount, DateTime on) => Entry(
+/// [by] 先付的支出。
+Entry _paidBy(String id, String by, int amount, DateTime on) => Entry(
       id: id,
       ledgerId: kLedgerId,
       kind: EntryKind.expense,
-      scope: EntryScope.private,
       amount: amount,
       categoryId: 'c-food',
       occurredOn: on,
@@ -52,50 +48,49 @@ Entry _private(String id, String by, int amount, DateTime on) => Entry(
       payerId: by,
     );
 
-/// 共同錢包支出（`payerId == null`）：只動共同餘額，不進任何人的個人淨變動。
+/// 共同錢包支出（`payerId == null`）：只動共同餘額，不進任何人的月末。
 Entry _sharedWallet(String id, int amount, DateTime on) => Entry(
       id: id,
       ledgerId: kLedgerId,
       kind: EntryKind.expense,
-      scope: EntryScope.shared,
       amount: amount,
       categoryId: 'c-food',
       occurredOn: on,
       createdBy: kMeId,
     );
 
-/// 有分攤列、還沒結算的拆帳：擋住清帳（`close_month: unsettled entries in month`）。
-Entry _unsettledSplit(String id, DateTime on) => Entry(
-      id: id,
-      ledgerId: kLedgerId,
-      kind: EntryKind.expense,
-      scope: EntryScope.shared,
-      amount: 1000,
-      categoryId: 'c-food',
-      occurredOn: on,
-      createdBy: kMeId,
-      payerId: kMeId,
-      splitMethod: SplitMethod.equal,
-      splits: [
-        EntrySplit(entryId: id, memberId: kMeId, share: 500),
-        EntrySplit(entryId: id, memberId: kWifeId, share: 500),
-      ],
-    );
-
-/// 三位成員：Mike 與老婆上上個月加入（有補入額），小孩本月才加入（那個月補入額算 0）。
+/// 三位成員：Mike 與老婆上上個月加入（最早可清月＝上上個月），小孩本月才加入
+/// （那個月補入與先付都算 0）。
 List<Member> _threeMembers() => [
       _member(kMeId, 'Mike', joined: _prev2),
       _member(kWifeId, '老婆', joined: _prev2),
-      _member('m-kid', '小孩', joined: _cur, topup: 5000),
+      _member('m-kid', '小孩', joined: _cur),
     ];
 
-/// 上上個月的帳目，湊出月末餘額的三種方向：
-/// Mike ＋10,000−3,000 ＝ +7,000（轉給共同）、老婆 ＋10,000−12,000 ＝ −2,000（共同補他）、
-/// 小孩 0＋0 ＝ 0（免處理）；另有一筆共同錢包支出 500 讓 shared_delta ＝ −500。
+/// 上上個月的補入與帳目，湊出月末的三種方向：
+/// Mike 補入 10,000 − 先付 3,000 ＝ ending +7,000（轉給共同）、
+/// 老婆補入 10,000 − 先付 12,000 ＝ ending −2,000（共同補他）、
+/// 另有一筆共同錢包支出 500（對照列）。應記共同收入＝7,000−2,000＝5,000。
 List<Entry> _threeDirectionEntries() => [
-      _private('e-mike', kMeId, 3000, _dayIn(_prev2, 10)),
-      _private('e-wife', kWifeId, 12000, _dayIn(_prev2, 11)),
+      _paidBy('e-mike', kMeId, 3000, _dayIn(_prev2, 10)),
+      _paidBy('e-wife', kWifeId, 12000, _dayIn(_prev2, 11)),
       _sharedWallet('e-wallet', 500, _dayIn(_prev2, 12)),
+    ];
+
+List<PersonalTopup> _threeDirectionTopups() => [
+      topupFixture(memberId: kMeId, amount: 10000, occurredOn: _dayIn(_prev2, 1)),
+      topupFixture(memberId: kWifeId, amount: 10000, occurredOn: _dayIn(_prev2, 1)),
+    ];
+
+/// 兩位成員月末剛好互相抵銷（+2,000 ／ −2,000）：應記共同收入邊界值 0。
+List<Entry> _zeroSumEntries() => [
+      _paidBy('e-mike0', kMeId, 3000, _dayIn(_prev2, 10)), // topup 5000 → ending +2000
+      _paidBy('e-wife0', kWifeId, 7000, _dayIn(_prev2, 11)), // topup 5000 → ending -2000
+    ];
+
+List<PersonalTopup> _zeroSumTopups() => [
+      topupFixture(memberId: kMeId, amount: 5000, occurredOn: _dayIn(_prev2, 1)),
+      topupFixture(memberId: kWifeId, amount: 5000, occurredOn: _dayIn(_prev2, 1)),
     ];
 
 /// `closeMonth` 卡住不回：用來把 sheet 釘在「清帳中…」那個狀態上，
@@ -106,9 +101,24 @@ class _HangingCloseRepository extends InMemoryLedgerRepository {
   final gate = Completer<void>();
 
   @override
-  Future<MonthClose> closeMonth(String ledgerId, DateTime month) async {
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month, {bool recordIncome = true}) async {
     await gate.future;
-    return super.closeMonth(ledgerId, month);
+    return super.closeMonth(ledgerId, month, recordIncome: recordIncome);
+  }
+}
+
+/// 記下 `closeMonth` 實際收到的 `recordIncome`——用來驗「勾選框停用時到底送了什麼」，
+/// 不能只看效果（`incomeAmount == 0` 時不管 `recordIncome` 是不是 true 都不會記那筆收入，
+/// 光看「沒有多一筆」測不出真正傳的值）。
+class _RecordIncomeSpyRepository extends InMemoryLedgerRepository {
+  _RecordIncomeSpyRepository({super.seed});
+
+  bool? lastRecordIncome;
+
+  @override
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month, {bool recordIncome = true}) {
+    lastRecordIncome = recordIncome;
+    return super.closeMonth(ledgerId, month, recordIncome: recordIncome);
   }
 }
 
@@ -139,11 +149,22 @@ Future<void> _tapCloseButton(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+/// 給 390×667 不爆版測試用的範例明細（與「預覽 sheet 的呈現」那組的 `details()` 同構）。
+MonthCloseDetails _sampleCloseDetails() => MonthCloseDetails(
+      month: _prev2,
+      members: [
+        closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, paid: 3000),
+        closeLine(memberId: kWifeId, displayName: '老婆', topup: 10000, paid: 12000),
+      ],
+      sharedPaid: 500,
+      incomeAmount: 5000,
+    );
+
 void main() {
   group('清帳按鈕：月份＝下一個可清月，可清條件不成立就 disabled ＋一行原因', () {
-    testWidgets('沒清過：取最早有帳目（或成員加入）的那個月', (tester) async {
-      // 成員預設上個月加入，帳目最早在上上個月 → 取兩者較早的上上個月。
-      await _pump(tester, _containerFor(repoWith(entries: [_private('e-1', kMeId, 100, _dayIn(_prev2, 5))])));
+    testWidgets('沒清過：取最早有帳目（或成員加入、補入）的那個月', (tester) async {
+      // 成員預設上個月加入，帳目最早在上上個月 → 取三者較早的上上個月。
+      await _pump(tester, _containerFor(repoWith(entries: [_paidBy('e-1', kMeId, 100, _dayIn(_prev2, 5))])));
 
       expect(find.text('清帳 ${fmtYearMonth(_prev2)}'), findsOneWidget);
       expect(find.byKey(const Key('close-disabled-reason')), findsNothing);
@@ -153,7 +174,7 @@ void main() {
       await _pump(
         tester,
         _containerFor(repoWith(
-          entries: [_private('e-1', kMeId, 100, _dayIn(_prev2, 5))],
+          entries: [_paidBy('e-1', kMeId, 100, _dayIn(_prev2, 5))],
           closes: [closeFixture(month: _prev2)],
         )),
       );
@@ -165,7 +186,7 @@ void main() {
       await _pump(
         tester,
         _containerFor(repoWith(
-          entries: [_private('e-1', kMeId, 100, _dayIn(_prev2, 5))],
+          entries: [_paidBy('e-1', kMeId, 100, _dayIn(_prev2, 5))],
           closes: [closeFixture(month: _prev2), closeFixture(month: _prev)],
         )),
       );
@@ -181,75 +202,58 @@ void main() {
       );
     });
 
-    testWidgets('沒有成員也沒有帳目（推不出月份）：按鈕 disabled ＋一行「沒有可清的月份」', (tester) async {
+    testWidgets('沒有成員、帳目、補入（推不出月份）：按鈕 disabled ＋一行「沒有可清的月份」', (tester) async {
       await _pump(
         tester,
-        _containerFor(repoWith(members: const [], entries: const [], settlements: const [])),
+        _containerFor(repoWith(members: const [], entries: const [], topups: const [])),
       );
 
       expect(tester.widget<FilledButton>(find.byKey(const Key('close-month-button'))).onPressed, isNull);
       expect(find.text('沒有可清的月份'), findsOneWidget);
     });
+  });
 
-    testWidgets('下一個可清月有未結算拆帳：按鈕 disabled ＋一行「有拆帳尚未簽完」', (tester) async {
-      await _pump(
-        tester,
-        _containerFor(repoWith(
-          members: _threeMembers(),
-          entries: [_unsettledSplit('e-open', _dayIn(_prev2, 8))],
-        )),
+  group('nextClosableMonth（純函式）：三個來源（成員加入／帳目／補入）都要考慮', () {
+    test('沒有帳目、只有補入：以補入月份為最早可清月', () {
+      // 成員本身加入月較晚，唯一比它早的線索是補入——刪掉補入那段迴圈這條就會紅。
+      final result = nextClosableMonth(
+        closes: const [],
+        members: [_member(kMeId, 'Mike', joined: DateTime(2025, 5, 1))],
+        entries: const [],
+        topups: [topupFixture(memberId: kMeId, amount: 1000, occurredOn: DateTime(2025, 1, 10))],
       );
 
-      expect(tester.widget<FilledButton>(find.byKey(const Key('close-month-button'))).onPressed, isNull);
-      expect(find.text('有拆帳尚未簽完'), findsOneWidget);
-      // 月份仍寫在按鈕上：那個月確實還等著被清，只是先要把拆帳簽完。
-      expect(find.text('清帳 ${fmtYearMonth(_prev2)}'), findsOneWidget);
+      expect(result, DateTime(2025, 1, 1));
     });
 
-    testWidgets('沒有分攤列的拆帳不擋清帳：按鈕照常可按（擋了那個月永遠清不掉）', (tester) async {
-      await _pump(
-        tester,
-        _containerFor(repoWith(
-          members: _threeMembers(),
-          entries: [
-            Entry(
-              id: 'e-loose',
-              ledgerId: kLedgerId,
-              kind: EntryKind.expense,
-              scope: EntryScope.shared,
-              amount: 800,
-              categoryId: 'c-food',
-              occurredOn: _dayIn(_prev2, 13),
-              createdBy: kMeId,
-              payerId: kMeId,
-              splitMethod: SplitMethod.equal,
-            ),
-          ],
-        )),
+    test('成員加入月早於帳目與補入：以成員加入月為最早可清月', () {
+      final result = nextClosableMonth(
+        closes: const [],
+        members: [_member(kMeId, 'Mike', joined: DateTime(2025, 1, 1))],
+        entries: [_paidBy('e-1', kMeId, 100, DateTime(2025, 6, 15))],
+        topups: [topupFixture(memberId: kMeId, amount: 1000, occurredOn: DateTime(2025, 9, 1))],
       );
 
-      expect(tester.widget<FilledButton>(find.byKey(const Key('close-month-button'))).onPressed, isNotNull);
-      expect(find.byKey(const Key('close-disabled-reason')), findsNothing);
+      expect(result, DateTime(2025, 1, 1));
     });
   });
 
   group('預覽', () {
-    testWidgets('preview 被 RPC 擋下：頁內紅字（RPC 的中文訊息）、不開 sheet', (tester) async {
-      // 前端推算過關（那個月沒有未結算拆帳），RPC 才是最終判定：
-      // 這裡讓記憶體實作在 preview 當下才發現拆帳沒簽完，驗「分岔時以 RPC 訊息為準」。
-      final repo = repoWith(members: _threeMembers(), entries: _threeDirectionEntries());
+    testWidgets('preview 被 RPC 擋下（分岔）：頁內紅字（RPC 的中文訊息）、不開 sheet', (tester) async {
+      // 前端推算出來的月份沒問題（按鈕是開的），但按下去之前那個月被別的裝置搶先清掉了：
+      // RPC 才是最終判定，這裡驗「分岔時以 RPC 訊息為準」。
+      final repo = repoWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups());
       final container = await _pump(tester, _containerFor(repo));
 
-      // 前端看得到的資料裡沒有未簽拆帳 → 按鈕是開的。
       expect(tester.widget<FilledButton>(find.byKey(const Key('close-month-button'))).onPressed, isNotNull);
-      // 按下去之前，那個月多出一筆未簽拆帳（等同「別人剛記了一筆」）。
-      await repo.upsertEntry(_unsettledSplit('e-late', _dayIn(_prev2, 8)));
+      // 繞過前端 provider 直接清掉（模擬別的裝置）：頁面的 monthClosesProvider 還沒重讀，仍以為沒清。
+      await repo.closeMonth(kLedgerId, _prev2);
 
       await _tapCloseButton(tester);
 
       final error = find.byKey(const Key('close-error'));
       expect(error, findsOneWidget);
-      expect(tester.widget<Text>(error).data, contains('尚未簽完'));
+      expect(tester.widget<Text>(error).data, '該月已清帳');
       expect(
         tester.widget<Text>(error).style?.color,
         Theme.of(tester.element(error)).colorScheme.error,
@@ -261,7 +265,7 @@ void main() {
     testWidgets('preview 成功就開 sheet（標題＝該月對帳）', (tester) async {
       await _pump(
         tester,
-        _containerFor(repoWith(members: _threeMembers(), entries: _threeDirectionEntries())),
+        _containerFor(repoWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups())),
       );
 
       await _tapCloseButton(tester);
@@ -273,17 +277,17 @@ void main() {
   });
 
   group('預覽 sheet 的呈現（直接餵 MonthCloseDetails）', () {
-    // 方向文案要湊齊 ending 正／負／零三種，預設兩位成員做不出來——
+    // 方向文案要湊齊 ending 正／負／零三種：兩位成員做不出「免處理」那格，
     // 這一組不經 repository，直接給 sheet 一份明細，測的是「明細怎麼被讀出來」。
-    MonthCloseDetails details({List<CloseWarning> warnings = const []}) => MonthCloseDetails(
+    MonthCloseDetails details({int sharedPaid = 500, int? incomeAmount = 5000}) => MonthCloseDetails(
           month: _prev2,
           members: [
-            closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, net: -3000),
-            closeLine(memberId: kWifeId, displayName: '老婆', topup: 10000, net: -12000),
-            closeLine(memberId: 'm-kid', displayName: '小孩'),
+            closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, paid: 3000), // ending +7000
+            closeLine(memberId: kWifeId, displayName: '老婆', topup: 10000, paid: 12000), // ending -2000
+            closeLine(memberId: 'm-kid', displayName: '小孩'), // topup/paid 都 0 → ending 0
           ],
-          sharedDelta: -500,
-          warnings: warnings,
+          sharedPaid: sharedPaid,
+          incomeAmount: incomeAmount,
         );
 
     Future<void> pumpSheet(WidgetTester tester, MonthCloseDetails d) async {
@@ -299,16 +303,14 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    testWidgets('三種方向文案各一例、負數月末餘額紅字、底部共同餘額變動', (tester) async {
+    testWidgets('三種方向文案各一例、負數月末紅字、共同錢包支出對照列', (tester) async {
       await pumpSheet(tester, details());
 
       expect(find.text('Mike 轉 7,000 給共同帳戶'), findsOneWidget); // ending > 0
       expect(find.text('共同帳戶補 老婆 2,000'), findsOneWidget); // ending < 0
       expect(find.text('免處理'), findsOneWidget); // ending == 0
-      expect(find.text('共同餘額本月變動 -500'), findsOneWidget);
-      // 數字欄帶正負號：正數補「+」（10,000 − 3,000 ＝ +7,000），負數沿用既有負號。
+      expect(find.text('共同錢包支出 500'), findsOneWidget);
       expect(find.text('+7,000'), findsOneWidget);
-      expect(find.text('-3,000'), findsOneWidget);
 
       final endingText = find.text('-2,000');
       expect(endingText, findsOneWidget);
@@ -318,19 +320,43 @@ void main() {
       );
     });
 
-    testWidgets('warnings 空 → 沒有警示行；非空 → 已知 code 給專屬文案、未知 code 也說得出話', (tester) async {
-      await pumpSheet(tester, details());
-      expect(find.byKey(const Key('close-warning-unsplit_advances')), findsNothing);
+    testWidgets('incomeAmount > 0：勾選框預設勾且顯示金額，整列可點', (tester) async {
+      await pumpSheet(tester, details(incomeAmount: 5000));
 
-      await pumpSheet(
-        tester,
-        details(warnings: const [
-          CloseWarning(code: 'unsplit_advances', count: 2),
-          CloseWarning(code: 'something_new', count: 5),
-        ]),
+      final checkbox =
+          tester.widget<CheckboxListTile>(find.byKey(const Key('record-income-checkbox')));
+      expect(checkbox.value, isTrue);
+      expect(checkbox.onChanged, isNotNull);
+      expect(find.text('一鍵記共同收入 5,000'), findsOneWidget);
+
+      // 整列可點（不是只有小方塊）：點文字所在的 tile 也能 toggle。
+      await tester.tap(find.byKey(const Key('record-income-checkbox')));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<CheckboxListTile>(find.byKey(const Key('record-income-checkbox'))).value,
+        isFalse,
       );
-      expect(find.text('2 筆代墊尚未拆帳，將由付款人全額承擔'), findsOneWidget);
-      expect(find.text('5 筆需注意'), findsOneWidget);
+    });
+
+    testWidgets('incomeAmount <= 0：勾選框停用、強制不勾，顯示「本月無需轉入」', (tester) async {
+      await pumpSheet(tester, details(incomeAmount: -1000));
+
+      final checkbox =
+          tester.widget<CheckboxListTile>(find.byKey(const Key('record-income-checkbox')));
+      expect(checkbox.onChanged, isNull);
+      expect(checkbox.value, isFalse);
+      expect(find.text('本月無需轉入'), findsOneWidget);
+      expect(find.textContaining('一鍵記共同收入'), findsNothing);
+    });
+
+    testWidgets('incomeAmount 為 null（RPC 沒給）：勾選框照常可勾且預設勾，金額顯示「—」', (tester) async {
+      await pumpSheet(tester, details(incomeAmount: null));
+
+      final checkbox =
+          tester.widget<CheckboxListTile>(find.byKey(const Key('record-income-checkbox')));
+      expect(checkbox.value, isTrue);
+      expect(checkbox.onChanged, isNotNull);
+      expect(find.text('一鍵記共同收入 —'), findsOneWidget);
     });
   });
 
@@ -338,7 +364,7 @@ void main() {
     testWidgets('二次確認 dialog 取消：列表筆數不變、sheet 留著', (tester) async {
       final container = await _pump(
         tester,
-        _containerFor(repoWith(members: _threeMembers(), entries: _threeDirectionEntries())),
+        _containerFor(repoWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups())),
       );
       final before = container.read(monthClosesProvider).length;
 
@@ -354,11 +380,10 @@ void main() {
       expect(find.byType(ClosePreviewSheet), findsOneWidget);
     });
 
-    testWidgets('確定 → 清帳成功：sheet 關閉、SnackBar、列表多一筆', (tester) async {
-      final container = await _pump(
-        tester,
-        _containerFor(repoWith(members: _threeMembers(), entries: _threeDirectionEntries())),
-      );
+    testWidgets('確定（勾選維持預設）→ 清帳成功：sheet 關閉、SnackBar、列表多一筆、多記一筆「清帳轉入」收入', (tester) async {
+      final repo = repoWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups());
+      final container = await _pump(tester, _containerFor(repo));
+      final entriesBefore = container.read(entriesProvider).length;
 
       await _tapCloseButton(tester);
       await tester.tap(find.byKey(const Key('confirm-close-button')));
@@ -369,18 +394,73 @@ void main() {
       expect(find.byType(ClosePreviewSheet), findsNothing);
       expect(find.text('已清帳 ${fmtYearMonth(_prev2)}'), findsOneWidget); // SnackBar
       expect(container.read(monthClosesProvider).length, 1);
-      expect(container.read(monthClosesProvider).single.month, _prev2);
-      // 列表那一列：月份・清帳者・日期，摘要帶各成員月末餘額。
+      final close = container.read(monthClosesProvider).single;
+      expect(close.month, _prev2);
+      expect(close.incomeEntryId, isNotNull);
+      // 列表那一列：月份・清帳者・日期，摘要帶各成員月末。
       expect(find.textContaining('${fmtYearMonth(_prev2)}・Mike・'), findsOneWidget);
       expect(find.textContaining('Mike +7,000'), findsOneWidget);
       expect(find.text('尚未清帳'), findsNothing);
+
+      // 「一鍵記共同收入」：多一筆落在「清帳轉入」分類的收入，金額＝7,000−2,000＝5,000。
+      expect(container.read(entriesProvider).length, entriesBefore + 1);
+      final categories = await repo.fetchCategories(kLedgerId);
+      final incomeCategory = categories.singleWhere((c) => c.name == '清帳轉入');
+      final incomeEntry =
+          container.read(entriesProvider).singleWhere((e) => e.id == close.incomeEntryId);
+      expect(incomeEntry.kind, EntryKind.income);
+      expect(incomeEntry.amount, 5000);
+      expect(incomeEntry.categoryId, incomeCategory.id);
+    });
+
+    testWidgets('取消勾選「一鍵記共同收入」→ closeMonth 的 recordIncome 為 false，沒有新增收入', (tester) async {
+      final repo = repoWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups());
+      final container = await _pump(tester, _containerFor(repo));
+      final entriesBefore = container.read(entriesProvider).length;
+
+      await _tapCloseButton(tester);
+      await tester.tap(find.byKey(const Key('record-income-checkbox')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('confirm-close-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('close-confirm-ok')));
+      await tester.pumpAndSettle();
+
+      expect(container.read(monthClosesProvider).length, 1);
+      expect(container.read(monthClosesProvider).single.incomeEntryId, isNull);
+      expect(container.read(entriesProvider).length, entriesBefore);
+    });
+
+    testWidgets('incomeAmount＝0（邊界）：勾選框停用、實際送出的 recordIncome 為 false，不記收入', (tester) async {
+      final repo = _RecordIncomeSpyRepository(
+        seed: snapshotWith(entries: _zeroSumEntries(), topups: _zeroSumTopups()),
+      );
+      final container = await _pump(tester, _containerFor(repo));
+      final entriesBefore = container.read(entriesProvider).length;
+
+      await _tapCloseButton(tester);
+
+      final checkbox =
+          tester.widget<CheckboxListTile>(find.byKey(const Key('record-income-checkbox')));
+      expect(checkbox.onChanged, isNull, reason: 'incomeAmount == 0 也算「已知不需要轉入」，要停用');
+      expect(checkbox.value, isFalse);
+      expect(find.text('本月無需轉入'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('confirm-close-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('close-confirm-ok')));
+      await tester.pumpAndSettle();
+
+      expect(repo.lastRecordIncome, isFalse);
+      expect(container.read(monthClosesProvider).single.incomeEntryId, isNull);
+      expect(container.read(entriesProvider).length, entriesBefore);
     });
 
     testWidgets('closeMonth 失敗：sheet 內錯誤行、解除 loading、不 pop、列表不變', (tester) async {
       final container = await _pump(
         tester,
         _containerFor(FailingRepository(
-          seed: snapshotWith(members: _threeMembers(), entries: _threeDirectionEntries()),
+          seed: snapshotWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups()),
           failCloseMonth: true,
         )),
       );
@@ -402,7 +482,7 @@ void main() {
 
     testWidgets('清帳寫入中：sheet 關不掉（系統返回與點外面都不生效），寫完才收', (tester) async {
       final repo = _HangingCloseRepository(
-        seed: snapshotWith(members: _threeMembers(), entries: _threeDirectionEntries()),
+        seed: snapshotWith(entries: _threeDirectionEntries(), topups: _threeDirectionTopups()),
       );
       final container = await _pump(tester, _containerFor(repo));
 
@@ -463,11 +543,11 @@ void main() {
     testWidgets('依月份倒序、點列才展開完整明細', (tester) async {
       final older = closeFixture(
         month: _prev2,
-        members: [closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, net: -3000)],
+        members: [closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, paid: 13000)], // -3000
       );
       final newer = closeFixture(
         month: _prev,
-        members: [closeLine(memberId: kWifeId, displayName: '老婆', topup: 10000, net: -12000)],
+        members: [closeLine(memberId: kWifeId, displayName: '老婆', topup: 10000, paid: 22000)], // -12000
       );
       await _pump(
         tester,
@@ -487,56 +567,55 @@ void main() {
       expect(find.text('共同帳戶補 老婆 12,000'), findsNothing);
       await tester.tap(find.textContaining('${fmtYearMonth(_prev)}・'));
       await tester.pumpAndSettle();
-      expect(find.text('共同帳戶補 老婆 2,000'), findsOneWidget);
-      expect(find.text('共同餘額本月變動 0'), findsOneWidget);
+      expect(find.text('共同帳戶補 老婆 12,000'), findsOneWidget);
+      expect(find.text('共同錢包支出 0'), findsOneWidget);
     });
   });
 
-  testWidgets('真實組裝（seam）：AccountingApp → 設定 → 清帳 → 預覽 → 確認 → 列表一筆，統計頁個人餘額卡回到補入額', (tester) async {
-    tester.view.physicalSize = const Size(390, 844);
-    tester.view.devicePixelRatio = 1.0;
-    addTearDown(tester.view.reset);
+  group('390×667 不爆版（無 overflow）', () {
+    testWidgets('清帳頁', (tester) async {
+      tester.view.physicalSize = const Size(390, 667);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    // 一筆帳目都沒有（假資料的當月帳會讓餘額 ≠ 補入額）、兩位成員上上個月加入：
-    // 清掉上上個月之後，個人餘額只剩「上個月＋本月」各補一次 10,000。
-    final container = _containerFor(repoWith(
-      members: [_member(kMeId, 'Mike', joined: _prev2), _member(kWifeId, '老婆', joined: _prev2)],
-      entries: const [],
-      allocations: const [],
-      settlements: const [],
-    ));
-    addTearDown(container.dispose);
-    await tester.pumpWidget(UncontrolledProviderScope(container: container, child: const AccountingApp()));
-    await tester.pumpAndSettle();
+      final container = _containerFor(repoWith(
+        members: _threeMembers(),
+        closes: [
+          closeFixture(
+            month: _prev2,
+            members: [closeLine(memberId: kMeId, displayName: 'Mike', topup: 10000, paid: 3000)],
+          ),
+        ],
+      ));
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: MaterialApp(theme: buildTheme(Brightness.light), home: const ClosesPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
 
-    container.read(routerProvider).go('/entries');
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('設定'));
-    await tester.pumpAndSettle();
-    expect(find.byType(SettingsPage), findsOneWidget);
+    testWidgets('預覽 sheet', (tester) async {
+      tester.view.physicalSize = const Size(390, 667);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
 
-    await tester.tap(find.text('清帳'));
-    await tester.pumpAndSettle();
-    expect(find.byType(ClosesPage), findsOneWidget);
-
-    await _tapCloseButton(tester);
-    await tester.tap(find.byKey(const Key('confirm-close-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('close-confirm-ok')));
-    await tester.pumpAndSettle();
-
-    expect(container.read(monthClosesProvider).length, 1);
-    expect(find.byType(ExpansionTile), findsOneWidget);
-
-    // 統計頁個人視角的餘額卡（月摘要 RPC 的口徑）：上上個月整段移出公式，只剩兩次補入額。
-    container.read(routerProvider).go('/stats');
-    await tester.pumpAndSettle();
-    await tester.tap(find.descendant(
-        of: find.byKey(const Key('view-mode-toggle')), matching: find.text('個人')));
-    await tester.pumpAndSettle();
-    expect(
-      find.descendant(of: find.byKey(const Key('month-summary')), matching: find.text('20,000')),
-      findsOneWidget,
-    );
+      final container = ProviderContainer();
+      addTearDown(container.dispose);
+      await tester.pumpWidget(UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: buildTheme(Brightness.light),
+          home: Scaffold(body: ClosePreviewSheet(month: _prev2, details: _sampleCloseDetails())),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
   });
 }

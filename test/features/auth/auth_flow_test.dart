@@ -79,7 +79,7 @@ void main() {
       await pumpApp(tester, signedOutContainer());
       expect(find.byType(LoginPage), findsOneWidget);
       expect(find.byType(EntriesPage), findsNothing);
-      expect(find.text('菜市場'), findsNothing, reason: '沒登入不該看到任何帳本資料');
+      expect(find.text('本月買菜'), findsNothing, reason: '沒登入不該看到任何帳本資料');
     });
 
     testWidgets('錯密碼 → 頁內紅字、按鈕恢復可按、仍停在登入頁', (tester) async {
@@ -112,7 +112,7 @@ void main() {
 
       expect(find.byType(EntriesPage), findsOneWidget);
       expect(c.read(currentLedgerIdProvider), kLedgerId);
-      expect(find.text('菜市場'), findsOneWidget);
+      expect(find.text('本月買菜'), findsOneWidget);
     });
 
     testWidgets('登入成功但這個帳號還沒有帳本 → 進首登頁', (tester) async {
@@ -298,7 +298,7 @@ void main() {
       expect(find.byKey(const Key('onboarding-create-button')), findsNothing,
           reason: '有帳本就不該看到「建立帳本」那兩條路');
       expect(c.read(currentLedgerIdProvider), kLedgerId);
-      expect(find.text('菜市場'), findsOneWidget);
+      expect(find.text('本月買菜'), findsOneWidget);
     });
 
     testWidgets('真的一本都沒有時才顯示兩條路', (tester) async {
@@ -347,7 +347,7 @@ void main() {
       ]);
       await pumpApp(tester, container);
       expect(find.byType(LoginPage), findsOneWidget);
-      expect(find.text('菜市場'), findsNothing);
+      expect(find.text('本月買菜'), findsNothing);
 
       await tester.enterText(find.byKey(const Key('login-email-field')), 'mike@test.local');
       await tester.enterText(find.byKey(const Key('login-password-field')), 'password');
@@ -356,12 +356,12 @@ void main() {
       // 一 frame 一 frame 走完整個切換過程，中間不能閃出 A 的資料。
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 16));
-        expect(find.text('菜市場'), findsNothing, reason: '第 $i 個 frame 漏了清快照');
+        expect(find.text('本月買菜'), findsNothing, reason: '第 $i 個 frame 漏了清快照');
       }
       await tester.pumpAndSettle();
 
       expect(find.byType(OnboardingPage), findsOneWidget, reason: 'B 沒有帳本 → 首登頁');
-      expect(find.text('菜市場'), findsNothing);
+      expect(find.text('本月買菜'), findsNothing);
       expect(container.read(entriesProvider), isEmpty);
     });
   });
@@ -386,7 +386,7 @@ void main() {
 
       expect(find.byKey(const Key('boot-error-message')), findsNothing);
       expect(find.byType(EntriesPage), findsOneWidget);
-      expect(find.text('菜市場'), findsOneWidget);
+      expect(find.text('本月買菜'), findsOneWidget);
     });
 
     testWidgets('重試又失敗 → 停在錯誤畫面，按鈕恢復可按', (tester) async {
@@ -409,7 +409,7 @@ void main() {
   group('登出', () {
     testWidgets('設定頁登出 → 回登入頁，快照清空（換帳號看不到上一本的資料）', (tester) async {
       final c = await pumpApp(tester, ProviderContainer());
-      expect(find.text('菜市場'), findsOneWidget);
+      expect(find.text('本月買菜'), findsOneWidget);
 
       c.read(routerProvider).go('/settings');
       await tester.pumpAndSettle();
@@ -420,7 +420,7 @@ void main() {
       expect(c.read(currentLedgerIdProvider), isNull);
       expect(c.read(entriesProvider), isEmpty, reason: '登出要清整份快照');
       expect(c.read(ledgerProvider).id, isEmpty);
-      expect(find.text('菜市場'), findsNothing);
+      expect(find.text('本月買菜'), findsNothing);
     });
   });
 }

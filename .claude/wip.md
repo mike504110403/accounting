@@ -1,14 +1,61 @@
-# WIP — accounting 記帳 app（/mega：帳務規則 v1.4）
+# WIP — accounting 記帳 app（/mega：帳務規則 v1.5，ADR-0009）
 
-更新：2026-09-05 凌晨（/wip 收斂；v1.4 已合 dev 並推 origin、雲端 dev／prod 已 migration、TestFlight build 7 已上傳，等 Mike 手測）
+更新：2026-09-05 16:20（波 1 DB 已合併 feature；波 3 五分支全部完成進 review，settings 修復輪中）
 
 ## 任務背景與目標
 
-夫妻共同記帳 Flutter Web/iOS app（Supabase 後端）。spec `docs/specs/ledger.md`（**v1.4**，帳務規則見「餘額與預算」「清帳」節）、決策 `docs/adr/0001–0008`、DB 契約 `docs/specs/db-contract.md`。
-v1.4（ADR-0008，Mike 2026-09-04 十題裁示）：個人餘額改額度制（每月補入額）、預算改影子紀錄（每分類每月設定一次、不可改）、drop 資金來源、新增月清帳（三方對帳明細、個人餘額歸零、鎖定該月及更早月份）、共同餘額只由手動收支推動。
+夫妻共同記帳 Flutter Web/iOS app（Supabase 後端）。**spec `docs/specs/ledger.md` v1.5 已定稿（feature/rules-v15 f9e15e9）、ADR-0009 已落**：單一帳目只記誰先付、手動個人補入（`personal_topups`）、三個數（共同餘額／個人補入剩餘／分類預算剩餘）、照補入三方清帳＋一鍵記共同收入、統計無視角、prod 資料清空重來。廢 ADR-0002／0003、0008 額度制與比例。
+前案 v1.4 全案已落 dev；成員名稱功能（/solo）已落 dev 5d88705。dev 未推 remote、未出 build 8（決定與 v1.5 同波上，舊 build 對新 DB 必炸）。
 
-**設計原則（Mike 2026-09-05）**：只有 Mike 與老婆兩人用、純客製化——裁示題一律照兩人互信判，不做多租戶硬化，只守「外人進不來」。
-**環境政策（Mike 2026-09-05）**：**不再起地端 DB**；地端開發連 Supabase dev（app 預設），TestFlight 連 prod（`tool/build_ios.sh` 注入）。
+**設計原則（Mike 09-05）**：只有兩人用、純客製化；裁示題照兩人互信判。**環境政策**：不起地端 DB（例外：本案 DB 波要跑 SQL 測試，波 1 工人在自己 worktree 起地端棧，跑完即關）。
+
+## 已解決策
+
+- ADR-0009 八題（office-hours 四題＋grilling 四題）全部落檔；spec v1.5 定稿。細節看 ADR。
+
+## 需求／波次看板
+
+| 波次 | 內容 | 階段 | 分支 | 切自 | 依賴 | review 現況 | token |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 波 1 DB | migration `20260905000100_rules_v15.sql`、SQL 測試、seed、db-contract | **已合併 feature（5e162c0）**，合併後 `run.sh` 全綠 | wt/rules-v15/db（已刪） | dev 5d88705 | 獨立 | db／security／code 一輪各 1～2 MAJOR（清帳競態共享鎖、鎖月測試回歸），修復後三方複審全過 | — |
+| 波 2 data | `lib/domain`＋`lib/data` 對齊 v1.5、資料層測試 | **已合併 feature（530705b）** | wt/rules-v15/data（已刪） | 同上 | INTEGRATION 等波 1 合併後大腦跑 | code-reviewer 一輪打回 2 MAJOR、修復後複審全過 | — |
+| 波 3 頁面 | entries／budget（補入區塊）／stats／settings＋closes／lists 五工人各據 feature 目錄 | **stats（d24146d）、lists（9a16af3）、entries（fe0e596）、settings（0f2e7ea）已合併 feature**；budget 8cdf44e 等複審後合併，之後跑合併點必做 | wt/rules-v15/{entries,budget,stats,settings,lists} ← feature 530705b | — | 依賴波 2（已合） | 影子審 3 BLOCKER 皆已裁示（router stub、MonthAppBar 契約、tutorial 步驟）；四 code-reviewer 進行中 | — |
+| 波 4 部署 | migration push dev → smoke → prod；build 8 上傳；Mike 手測 | 待波 3 | — | — | 依賴波 3 | — | — |
+
+brief 檔（session scratchpad，不進 git）：`brief-v15-db.md`、`brief-v15-data.md`、`brief-v15-common.md`＋五份頁面 brief。
+
+## 收斂時進行中的工人
+
+v15-db-implementer（波 1）；v15-{entries,budget,stats,settings,lists}-implementer＋v15-pages-brief-reviewer（波 3）。
+
+## 合併點必做（波 3 五分支合回 feature 後，大腦親跑）
+
+- `flutter analyze` 全 repo、`flutter test` 全套（含工人在 router stub 下跑綠的 widget test、`auth_flow_test`、`tutorial_test`）。
+- INTEGRATION：起地端棧（DB 波 migration）→ `flutter test --dart-define=INTEGRATION=true test/data/ledger_repository_contract_test.dart`。
+- `lib/features/auth/onboarding_page.dart` import `settings/member_name_sheet.dart`（settings 已改 copyWith，合併後應自然編過）。
+
+## 待 Mike 裁示
+
+- SQL 測試需地端 DB：本案採「有新 migration 時臨時起棧跑完就關」，事後確認即可。
+- 統計第一列 6 顆按鈕 390px 偏擠（v1.4 遺留，波 3 stats 工人順帶重排）。
+
+## 下一步
+
+1. 收兩份影子審報告（BLOCKER 才中止工人）。
+2. 波 1／波 2 回報 → /verify（DB：本機 run.sh 親跑；data：analyze＋test 親跑）→ review chain（DB：db／security／code；data：code）→ 合併回 feature。
+3. 波 3 五份 brief 從 spec 切片（等波 2 合併，契約以波 2 落地的 `lib/data` 為準）。
+4. 波 4：migration 先 push 雲端 dev 驗證（dev 有 27 筆 v1.4 資料，驗 truncate／drop 路徑）→ prod → `tool/build_ios.sh --build-number 8` → Mike 手測（清單另寫 `.claude/handtest-v15.md`）。
+5. 工程死亡點：Mike 手測 v1.5 過即可刪本檔。
+
+## 環境備忘
+
+- 雲端 Supabase：dev ref wxqbxsagfvtxnvaloklr（app 預設）、prod ref 在 `~/mike/supabase/prod.env`；DB 密碼 dev `~/.config/accounting/supabase.env`、prod 同上檔。pooler 連法 `postgresql://postgres.<ref>:<pw>@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres`。主 checkout `supabase/.temp` link 雲端 dev，`db push` 直打 dev；prod 用 `db push --db-url`。
+- 既有雷：`~/.claude/ledgers/accounting.md`。
+- 看畫面：`tool/dev.sh 8787`（連雲端 dev）；iOS：`tool/build_ios.sh --build-number N` → `xcrun altool --upload-app --apiKey/--apiIssuer`（key 在 `~/.appstoreconnect/private_keys/`，env 在 `~/mike/asc/asc.env`）。下一顆 build 號 8。
+- PATH：`flutter` `/opt/homebrew/bin`、`docker` `/usr/local/bin`、`psql`／`pg_dump` `/opt/homebrew/opt/libpq/bin`；macOS 無 `timeout`。
+- SQL 測試跑法：`PATH="/usr/local/bin:/opt/homebrew/opt/libpq/bin:$PATH" supabase/tests/run.sh`。
+
+## 附：v1.4 收尾狀態（保留供對照，v1.5 落地後刪）
 
 ## 已完成
 
@@ -47,6 +94,12 @@ v1.4（ADR-0008，Mike 2026-09-04 十題裁示）：個人餘額改額度制（�
    - **頁面結構（Mike 09-05）只剩四頁**：(1) 帳目——不分家庭／個人；(2) 統計——圖一起統計（支出就是支出，只分誰先付）；(3) 預算——多加「個人補入」區塊，個人餘額也放這頁；(4) 清單——維持，結帳行為改新制。
    - **總綱（Mike 09-05）**：概念上只有一種帳目＝家庭支出，只區分「買的東西類型（分類）」與「誰先付錢（共同餘額或某人代墊）」。個人補入概念上也是預算＝個人先預留出來付共同支出的錢；原本的分類預算是影子紀錄所有支出、用來審視家庭開銷。每月清帳＝使用者依明細把真實的錢互相清償，清償後回到設定狀態（補入額歸位）。
    - 影響面待 scout-trace：`entry_member_effects` 錢公式、`month_summary`、`close_month` 快照、統計個人視角、預算影子紀錄（ADR-0006／0008 多處要改寫）。**先 /office-hours 對齊語意再開工。**
+
+## 合併點必做（波 3 五分支合回 feature 後，大腦親跑）
+
+- `flutter analyze` 全 repo、`flutter test` 全套（含工人在 router stub 下跑綠的 widget test、`auth_flow_test`、`tutorial_test`）。
+- INTEGRATION：起地端棧（DB 波 migration）→ `flutter test --dart-define=INTEGRATION=true test/data/ledger_repository_contract_test.dart`。
+- `lib/features/auth/onboarding_page.dart` import `settings/member_name_sheet.dart`（settings 已改 copyWith，合併後應自然編過）。
 
 ## 待 Mike 裁示
 

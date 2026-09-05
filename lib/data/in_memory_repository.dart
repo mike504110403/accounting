@@ -1,8 +1,8 @@
 /// 記憶體版 repository：波 1 的假資料與行為搬過來的地方。
 ///
 /// 用途有二：`flutter test`（所有 widget 測試的預設資料來源）與
-/// `--dart-define=USE_MOCK=true`（不連網跑整個 App）。結算在這裡是本地模擬——
-/// 真正的原子性與多簽守衛在 Postgres，這份只是讓畫面跑得動。
+/// `--dart-define=USE_MOCK=true`（不連網跑整個 App）。清帳在這裡是本地模擬——
+/// 真正的原子性與守衛在 Postgres，這份只是讓畫面跑得動、讓契約測試跑得到同一組斷言。
 library;
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
@@ -10,7 +10,6 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../domain/balance_math.dart';
 import '../domain/models.dart';
 import '../domain/month_summary.dart';
-import '../features/entries/settlement_math.dart';
 import 'errors.dart';
 import 'ledger_repository.dart';
 
@@ -18,7 +17,16 @@ const kLedgerId = 'ledger-1';
 const kMeId = 'm-mike';
 const kWifeId = 'm-wife';
 
+/// 清帳「一鍵記共同收入」用的分類名稱（帳本沒有時自動建，spec v1.5「清帳」）。
+const kCloseIncomeCategoryName = '清帳轉入';
+
 DateTime _d(int y, int m, int d) => DateTime(y, m, d);
+
+/// 某個月的最後一天（清帳記的那筆共同收入落在這一天）。
+DateTime _lastDayOf(DateTime month) => DateTime(month.year, month.month + 1, 0);
+
+String _ym(DateTime m) =>
+    '${m.year.toString().padLeft(4, '0')}-${m.month.toString().padLeft(2, '0')}';
 
 class InMemoryLedgerRepository implements LedgerRepository {
   /// [seed] 給測試指定初始內容（不給就是波 1 的那組假資料）。
@@ -38,7 +46,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
     _entries = [...s.entries];
     _allocations = [...s.allocations];
     _listItems = [...s.listItems];
-    _settlements = [...s.settlements];
+    _topups = [...s.topups];
     _closes = [...s.closes];
     _currentMemberId = s.currentMemberId;
   }
@@ -49,7 +57,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
   late List<Entry> _entries;
   late List<BudgetAllocation> _allocations;
   late List<ListItem> _listItems;
-  late List<Settlement> _settlements;
+  late List<PersonalTopup> _topups;
   late List<MonthClose> _closes;
   String _currentMemberId = kMeId;
   bool _cleared = false;
@@ -75,7 +83,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
           entries: List.unmodifiable(_entries),
           allocations: List.unmodifiable(_allocations),
           listItems: List.unmodifiable(_listItems),
-          settlements: List.unmodifiable(_settlements),
+          topups: List.unmodifiable(_topups),
           closes: List.unmodifiable(_closes),
           currentMemberId: _currentMemberId,
         );
@@ -114,28 +122,23 @@ class InMemoryLedgerRepository implements LedgerRepository {
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
     final micros = DateTime.now().microsecondsSinceEpoch;
     final code = [for (var i = 0; i < 10; i++) alphabet[(micros >> (i * 3)) % alphabet.length]].join();
-    _ledger = Ledger(
-      id: _ledger.id,
-      name: _ledger.name,
-      inviteCode: code,
-      defaultRatio: _ledger.defaultRatio,
-      openingBalanceShared: _ledger.openingBalanceShared,
-    );
+    _ledger = Ledger(id: _ledger.id, name: _ledger.name, inviteCode: code);
     return _ledger;
   }
 
+  /// 只有 `name` 有 update 授權（v1.5）：其餘欄位就算呼叫端改了也不落地，
+  /// 記憶體版比照 DB 只覆寫那一欄，不然替身會比真 DB 寬鬆。
   @override
-  Future<void> updateLedger(Ledger ledger) async => _ledger = ledger;
+  Future<void> updateLedger(Ledger ledger) async {
+    _ledger = Ledger(id: _ledger.id, name: ledger.name, inviteCode: _ledger.inviteCode);
+  }
 
+  /// 只有 `display_name` 有 update 授權（v1.5）：其餘欄位一律沿用既有值。
   @override
   Future<void> updateMember(Member member) async {
-    // DB check `members_monthly_topup_range`（0 ≤ monthly_topup ≤ 1 億）在這裡也要擋：
-    // 少了它，UI 送出超界值在替身上會「存成功」，線上卻被 Postgres 打回——
-    // 兩個實作對同一個輸入必須給同一個答案（訊息也走 errors.dart 的同一張表）。
-    if (member.monthlyTopup < 0 || member.monthlyTopup > 100000000) {
-      _raiseDb('violates check constraint "members_monthly_topup_range"');
-    }
-    _members = [for (final m in _members) m.id == member.id ? member : m];
+    _members = [
+      for (final m in _members) m.id == member.id ? m.copyWith(displayName: member.displayName) : m,
+    ];
   }
 
   @override
@@ -176,55 +179,20 @@ class InMemoryLedgerRepository implements LedgerRepository {
   Future<List<Entry>> fetchEntries(String ledgerId) async => List.unmodifiable(_entries);
 
   @override
-  Future<Entry> upsertEntry(Entry entry, {bool writeSplits = true, bool writeLineItems = true}) async {
+  Future<Entry> upsertEntry(Entry entry, {bool writeLineItems = true}) async {
     final existing = entry.id.isEmpty ? null : _findEntry(entry.id);
-    final settled = existing != null && existing.settledState == SettledState.settled;
 
-    // 三道守衛的先後**逐段對齊真 DB**（同一筆同時踩兩道時，兩個實作要吐同一句）：
-    //   1. `upsert_entry` RPC 自己的 settled 子表守衛——在 UPDATE 之前就 raise，
-    //      所以排在鎖月之前（`rules_v14.sql` 的 `entry settled: child tables locked`）；
-    //   2. UPDATE 觸發 trigger，依名稱字母序 `a_entries_month_closed_trg` 先跑（鎖月）；
-    //   3. 最後才是 `entries_lock_settled_trg` 的欄位級鎖定。
-    if (settled && (writeSplits || writeLineItems)) {
-      throw const LedgerException('這筆已結帳，只能改分類與備註');
+    // DB check `entries_income_no_payer`：收入只有共同收入，沒有付款人。
+    if (entry.kind == EntryKind.income && entry.payerId != null) {
+      _raiseDb('violates check constraint "entries_income_no_payer"');
     }
 
-    // 鎖月（v1.4）：新值與舊值兩個月都要看——「把日期搬進鎖定範圍」與「動鎖定範圍裡的帳目」
+    // 鎖月：新值與舊值兩個月都要看——「把日期搬進鎖定範圍」與「動鎖定範圍裡的帳目」
     // 都要擋（對應 `a_entries_month_closed_trg` 的 update 兩側檢查）。
     _requireMonthOpen(entry.occurredOn);
     if (existing != null) _requireMonthOpen(existing.occurredOn);
 
-    if (settled) {
-      // 已結帳只能改分類與備註，其餘欄位一律 raise（不是靜靜忽略——
-      // 靜靜忽略會讓記憶體版比真 DB 寬鬆，正式環境才炸）。
-      if (entry.amount != existing.amount) {
-        throw const LedgerException('這筆已結帳，金額鎖住，請改用修正筆');
-      }
-      if (entry.payerId != existing.payerId) {
-        throw const LedgerException('這筆已結帳，付款人鎖住，請改用修正筆');
-      }
-      if (entry.splitMethod != existing.splitMethod) {
-        throw const LedgerException('這筆已結帳，分攤方式鎖住，請改用修正筆');
-      }
-      if (entry.scope != existing.scope) {
-        throw const LedgerException('這筆已結帳，共同／私人鎖住，請改用修正筆');
-      }
-      if (entry.kind != existing.kind) {
-        throw const LedgerException('這筆已結帳，收入／支出鎖住，請改用修正筆');
-      }
-      if (_d(entry.occurredOn.year, entry.occurredOn.month, entry.occurredOn.day) !=
-          _d(existing.occurredOn.year, existing.occurredOn.month, existing.occurredOn.day)) {
-        throw const LedgerException('這筆已結帳，日期鎖住，請改用修正筆');
-      }
-      final merged = existing.copyWith(categoryId: entry.categoryId, note: entry.note);
-      _entries = [for (final e in _entries) e.id == merged.id ? merged : e];
-      return merged;
-    }
-
     final id = entry.id.isEmpty ? _newId('e') : entry.id;
-    final splits = writeSplits
-        ? [for (final s in entry.splits) EntrySplit(entryId: id, memberId: s.memberId, share: s.share)]
-        : (existing?.splits ?? const <EntrySplit>[]);
     final lineItems = writeLineItems
         ? [
             for (var i = 0; i < entry.lineItems.length; i++)
@@ -242,25 +210,20 @@ class InMemoryLedgerRepository implements LedgerRepository {
       id: id,
       ledgerId: existing?.ledgerId ?? entry.ledgerId,
       kind: entry.kind,
-      scope: entry.scope,
       amount: entry.amount,
       categoryId: entry.categoryId,
       occurredOn: entry.occurredOn,
       createdBy: existing?.createdBy ?? _currentMemberId,
       note: entry.note,
       payerId: entry.payerId,
-      splitMethod: entry.splitMethod,
-      // settled_state 前端完全不可寫：沿用既有值，新筆一律 open。
-      settledState: existing?.settledState ?? SettledState.open,
       isAdjustment: entry.isAdjustment,
+      createdAt: existing?.createdAt,
       lineItems: lineItems,
-      splits: splits,
     );
 
     _entries = existing == null
         ? [..._entries, saved]
         : [for (final e in _entries) e.id == saved.id ? saved : e];
-    if (existing != null) _voidPendingSettlementFor(existing, saved);
     return saved;
   }
 
@@ -268,7 +231,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
   Future<List<LineItem>> replaceLineItems(String entryId, List<LineItem> items) async {
     final existing = _findEntry(entryId);
     if (existing == null) throw const LedgerException('找不到這筆帳目，請重新整理');
-    // 已結帳仍可改細項（ADR-0002），但已清帳的月份連細項都不能動
+    // 已清帳的月份連細項都不能動
     // （DB 的 `a_line_items_month_closed_trg` 看的是父 entry 的 occurred_on）。
     _requireMonthOpen(existing.occurredOn);
     final rebuilt = [
@@ -292,11 +255,50 @@ class InMemoryLedgerRepository implements LedgerRepository {
     final e = _findEntry(id);
     if (e == null) return;
     _requireMonthOpen(e.occurredOn);
-    if (e.settledState == SettledState.settled) {
-      throw const LedgerException('已結帳的帳目不能刪除，請改用修正筆');
-    }
     _entries = _entries.where((x) => x.id != id).toList();
-    if (e.settledState == SettledState.settling) _voidSettlementCovering(id);
+  }
+
+  // ── 個人補入（v1.5）─────────────────────────────────────────────────
+
+  @override
+  Future<List<PersonalTopup>> fetchTopups(String ledgerId) async => List.unmodifiable(_topups);
+
+  /// 三道守衛，順序照真 DB 的層次：RLS（只能寫自己那列）→ BEFORE trigger（鎖月）
+  /// → CHECK（金額 > 0）。單獨違反任何一條時兩個實作吐的都是同一句中文。
+  @override
+  Future<PersonalTopup> addTopup(PersonalTopup topup) async {
+    if (topup.memberId != _currentMemberId) {
+      _raiseDb('new row violates row-level security policy for table "personal_topups"',
+          code: '42501');
+    }
+    _requireMonthOpen(topup.occurredOn);
+    if (topup.amount <= 0) {
+      _raiseDb('violates check constraint "personal_topups_amount_positive"');
+    }
+    final saved = PersonalTopup(
+      id: topup.id.isEmpty ? _newId('pt') : topup.id,
+      ledgerId: topup.ledgerId,
+      memberId: topup.memberId,
+      amount: topup.amount,
+      occurredOn: topup.occurredOn,
+      note: topup.note,
+      // DB 的 insert policy 逼 `created_by = 本人`，不接受以別人的名義補入。
+      createdBy: _currentMemberId,
+      createdAt: DateTime.now(),
+    );
+    _topups = [..._topups, saved];
+    return saved;
+  }
+
+  @override
+  Future<void> removeTopup(String id) async {
+    final t = _findTopup(id);
+    if (t == null) return;
+    if (t.memberId != _currentMemberId) {
+      _raiseDb('permission denied for table "personal_topups"', code: '42501');
+    }
+    _requireMonthOpen(t.occurredOn);
+    _topups = _topups.where((x) => x.id != id).toList();
   }
 
   // ── 預算撥款 ────────────────────────────────────────────────────────
@@ -310,15 +312,15 @@ class InMemoryLedgerRepository implements LedgerRepository {
     // DB 的三道守衛，順序照真 DB：BEFORE trigger（鎖月）→ CHECK（amount > 0）→ unique 索引。
     _requireMonthOpen(allocation.occurredOn);
     if (allocation.amount <= 0) {
-      throw LedgerException(dbMessage('violates check constraint "budget_allocation_amount_positive"'));
+      _raiseDb('violates check constraint "budget_allocation_amount_positive"');
     }
     final clash = _allocations.any((a) =>
         a.categoryId == allocation.categoryId && sameMonth(a.occurredOn, allocation.occurredOn));
     if (clash) {
-      throw LedgerException(dbMessage(
+      _raiseDb(
         'duplicate key value violates unique constraint "budget_allocation_one_per_category_month"',
         code: '23505',
-      ));
+      );
     }
     final saved = allocation.id.isEmpty
         ? BudgetAllocation(
@@ -335,7 +337,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
     return saved;
   }
 
-  /// 與 DB `month_summary` 同形狀（v1.4）：同一組 balance_math 純函式組出來的。
+  /// 與 DB `month_summary` 同形狀（v1.5）：同一組 balance_math 純函式組出來的。
   @override
   Future<MonthSummary> monthSummary(String ledgerId, DateTime until) async {
     final snap = snapshot;
@@ -355,31 +357,28 @@ class InMemoryLedgerRepository implements LedgerRepository {
               allocations: snap.allocations, entries: snap.entries, categoryId: id, until: until),
         ),
     ];
-    Member? meMember;
-    for (final m in snap.members) {
-      if (m.id == snap.currentMemberId) meMember = m;
-    }
+    // 成員清單走 `snap`，不是 `_members`：`clearSnapshot()` 之後快照是空的，
+    // 直接讀欄位會產出「成員還在、數字全 0」的半套（登出瞬間畫面會閃出上一個帳號的人）。
+    final members = [
+      for (final m in _byJoinOrder(snap.members))
+        MemberMonthLine(
+          memberId: m.id,
+          displayName: m.displayName,
+          topup: topupIn(topups: snap.topups, memberId: m.id, month: until),
+          paid: paidIn(entries: snap.entries, memberId: m.id, month: until),
+          remaining: topupRemaining(
+              topups: snap.topups, entries: snap.entries, memberId: m.id, month: until),
+        ),
+    ];
     return MonthSummary(
-      sharedBalance: sharedBalance(ledger: snap.ledger, entries: snap.entries, until: until),
+      sharedBalance: sharedBalance(entries: snap.entries, until: until),
       budgetTotal: totalAllocated(allocations: snap.allocations, month: until),
       spentTotal: totalSpent(entries: snap.entries, until: until),
       overspendTotal:
           totalOverspend(entries: snap.entries, allocations: snap.allocations, until: until),
       categories: categories,
-      memberId: meMember?.id,
-      personalBalance: meMember == null
-          ? null
-          : personalBalance(
-              member: meMember,
-              entries: snap.entries,
-              closes: snap.closes,
-              until: until,
-              joinedMonth: _joinedMonthOf(meMember),
-            ),
-      monthlyTopup: meMember?.monthlyTopup,
-      monthNet: meMember == null
-          ? null
-          : monthNet(member: meMember, entries: snap.entries, month: until, until: until),
+      members: members,
+      sharedPaid: sharedPaidIn(entries: snap.entries, month: until),
     );
   }
 
@@ -403,69 +402,6 @@ class InMemoryLedgerRepository implements LedgerRepository {
   Future<void> removeListItem(String id) async =>
       _listItems = _listItems.where((i) => i.id != id).toList();
 
-  // ── 結算（本地模擬） ────────────────────────────────────────────────
-
-  @override
-  Future<List<Settlement>> fetchSettlements(String ledgerId) async => List.unmodifiable(_settlements);
-
-  @override
-  Future<Settlement> initiateSettlement(String ledgerId) async {
-    if (_settlements.any((s) => s.status == SettlementStatus.pending)) {
-      throw const LedgerException('已經有一筆結算正在等待簽核');
-    }
-    final targets = _entries.where(isSettleable).toList();
-    if (targets.isEmpty) throw const LedgerException('目前沒有可結算的帳目');
-    final nets = computeNets(targets, _members);
-    if (nets.values.every((v) => v == 0)) throw const LedgerException('目前淨額為零，不需要結算');
-
-    final draft = Settlement(
-      id: _newId('st'),
-      ledgerId: ledgerId,
-      status: SettlementStatus.pending,
-      initiatedBy: _currentMemberId,
-      createdAt: DateTime.now(),
-      nets: nets,
-      entryIds: [for (final e in targets) e.id],
-      approvedBy: const {},
-    );
-    // 沒有人需要簽（需簽者＝淨額非零成員−發起人）時直接成立，否則會卡成永遠 pending。
-    final settleNow = draft.fullyApproved;
-    final settlement = settleNow ? _finalize(draft, const {}) : draft;
-    _applySettledState(settlement.entryIds, settleNow ? SettledState.settled : SettledState.settling);
-    _settlements = [..._settlements, settlement];
-    return settlement;
-  }
-
-  @override
-  Future<Settlement> approveSettlement(String settlementId) async {
-    final s = _findSettlement(settlementId);
-    if (s == null) throw const LedgerException('找不到這筆結算，請重新整理');
-    if (s.status != SettlementStatus.pending) throw const LedgerException('這筆結算已經處理過了');
-    if (!s.requiredSigners.contains(_currentMemberId)) {
-      throw const LedgerException('你不是這筆結算的簽核人');
-    }
-    final next = _finalize(s, {...s.approvedBy, _currentMemberId});
-    if (next.status == SettlementStatus.settled) {
-      _applySettledState(next.entryIds, SettledState.settled);
-    }
-    _settlements = [for (final x in _settlements) x.id == next.id ? next : x];
-    return next;
-  }
-
-  @override
-  Future<Settlement> cancelSettlement(String settlementId) async {
-    final s = _findSettlement(settlementId);
-    if (s == null) throw const LedgerException('找不到這筆結算，請重新整理');
-    if (s.status != SettlementStatus.pending) throw const LedgerException('這筆結算已經處理過了');
-    if (s.initiatedBy != _currentMemberId && !s.requiredSigners.contains(_currentMemberId)) {
-      throw const LedgerException('只有發起人或簽核人可以取消結算');
-    }
-    final next = _replaceStatus(s, SettlementStatus.void_);
-    _applySettledState(next.entryIds, SettledState.open);
-    _settlements = [for (final x in _settlements) x.id == next.id ? next : x];
-    return next;
-  }
-
   // ── 月清帳（本地模擬；可清條件與 DB `month_close_guard` 逐條對應）──────
 
   @override
@@ -474,28 +410,52 @@ class InMemoryLedgerRepository implements LedgerRepository {
   @override
   Future<MonthCloseDetails> monthClosePreview(String ledgerId, DateTime month) async {
     _guardClose(month);
-    return _closeDetails(monthOf(month), withWarnings: true);
+    return _closeDetails(monthOf(month), withIncomeAmount: true);
   }
 
   @override
-  Future<MonthClose> closeMonth(String ledgerId, DateTime month) async {
+  Future<MonthClose> closeMonth(String ledgerId, DateTime month,
+      {bool recordIncome = true}) async {
     _guardClose(month);
     final m = monthOf(month);
+    // 落地的快照不帶 income_amount（那是預覽用的提示，事實快照只留三個數）。
+    final details = _closeDetails(m, withIncomeAmount: false);
+    final incomeAmount = _incomeAmountOf(details);
+
+    // 「一鍵記共同收入」：記在清帳月最後一天，所以要趕在寫 month_closes（＝鎖月）之前。
+    String? incomeEntryId;
+    if (recordIncome && incomeAmount > 0) {
+      final category = _closeIncomeCategory();
+      final entry = Entry(
+        id: _newId('e'),
+        ledgerId: _ledger.id,
+        kind: EntryKind.income,
+        amount: incomeAmount,
+        categoryId: category.id,
+        occurredOn: _lastDayOf(m),
+        createdBy: _currentMemberId,
+        note: '${m.year}／${m.month.toString().padLeft(2, '0')} 清帳',
+      );
+      _entries = [..._entries, entry];
+      incomeEntryId = entry.id;
+    }
+
     final saved = MonthClose(
       id: _newId('mc'),
       ledgerId: _ledger.id,
       month: m,
       closedBy: _currentMemberId,
       closedAt: DateTime.now(),
-      // 落地的快照不帶 warnings（提醒會隨資料變，事實快照不該跟著變）。
-      details: _closeDetails(m, withWarnings: false),
+      incomeEntryId: incomeEntryId,
+      details: details,
     );
     _closes = [..._closes, saved];
     return saved;
   }
 
   /// 可清條件。順序與訊息逐字比照 `month_close_guard`：
-  /// 必須是月初 → 月份已結束 → 已清過 → 有可清的月份 → 必須是下一個可清月 → 拆帳全簽完。
+  /// 必須是月初 → 月份已結束 → 已清過 → 有可清的月份 → 必須是下一個可清月。
+  /// （v1.5 沒有第六條「拆帳全簽完」——結算整組廢掉了。）
   void _guardClose(DateTime raw) {
     if (raw.day != 1) _raiseDb('close_month: month must be first day');
     final month = monthOf(raw);
@@ -505,24 +465,11 @@ class InMemoryLedgerRepository implements LedgerRepository {
 
     final next = _nextClosableMonth();
     if (next == null || !next.isBefore(current)) _raiseDb('close_month: nothing to close');
-    if (next != month) {
-      _raiseDb('close_month: must close '
-          '${next.year.toString().padLeft(4, '0')}-${next.month.toString().padLeft(2, '0')} first');
-    }
-    // 判準逐字比照 `initiate_settlement`／`month_close_guard`——**含「有分攤列」**：
-    // 沒有分攤列的拆帳筆結算根本撿不到，擋了那個月永遠清不掉。
-    final unsettled = _entries.any((e) =>
-        e.scope == EntryScope.shared &&
-        e.isExpense &&
-        e.payerId != null &&
-        e.splitMethod != SplitMethod.common &&
-        e.settledState != SettledState.settled &&
-        e.splits.isNotEmpty &&
-        sameMonth(e.occurredOn, month));
-    if (unsettled) _raiseDb('close_month: unsettled entries in month');
+    if (next != month) _raiseDb('close_month: must close ${_ym(next)} first');
   }
 
-  /// 下一個可清月：清過就是「最後清帳月 ＋ 1 月」，沒清過就是「最早有成員或有帳目的那個月」。
+  /// 下一個可清月：清過就是「最後清帳月 ＋ 1 月」，沒清過就是
+  /// 「最早有帳目、補入或成員加入的那個月」（spec v1.5「可清條件」第 2 條）。
   DateTime? _nextClosableMonth() {
     DateTime? last;
     for (final c in _closes) {
@@ -532,80 +479,100 @@ class InMemoryLedgerRepository implements LedgerRepository {
     if (last != null) return nextMonth(last);
 
     DateTime? earliest;
+    void consider(DateTime m) {
+      if (earliest == null || m.isBefore(earliest!)) earliest = m;
+    }
+
     for (final m in _members) {
-      final j = _joinedMonthOf(m);
-      if (earliest == null || j.isBefore(earliest)) earliest = j;
+      consider(_joinedMonthOf(m));
     }
     for (final e in _entries) {
-      final m = monthOf(e.occurredOn);
-      if (earliest == null || m.isBefore(earliest)) earliest = m;
+      consider(monthOf(e.occurredOn));
+    }
+    for (final t in _topups) {
+      consider(monthOf(t.occurredOn));
     }
     return earliest;
   }
 
   /// 清帳明細（`month_close_details` 的形狀）：每位成員一列，依 `joined_at, id` 排序。
-  MonthCloseDetails _closeDetails(DateTime month, {required bool withWarnings}) {
-    // 與 DB `month_close_details` 的 `order by c.joined_at, c.id` 同：比完整時間戳，不是月份。
-    final members = [..._members]..sort((a, b) {
-        final byJoined = a.joinedAt.compareTo(b.joinedAt);
-        return byJoined != 0 ? byJoined : a.id.compareTo(b.id);
-      });
+  MonthCloseDetails _closeDetails(DateTime month, {required bool withIncomeAmount}) {
     final lines = [
-      for (final m in members)
+      for (final m in _byJoinOrder(_members))
         () {
-          final topup = _joinedMonthOf(m).isAfter(month) ? 0 : m.monthlyTopup;
-          final net = monthNet(member: m, entries: _entries, month: month);
+          final topup = topupIn(topups: _topups, memberId: m.id, month: month);
+          final paid = paidIn(entries: _entries, memberId: m.id, month: month);
           return MonthCloseMemberLine(
             memberId: m.id,
             displayName: m.displayName,
             topup: topup,
-            net: net,
-            ending: topup + net,
+            paid: paid,
+            ending: topup - paid,
           );
         }(),
     ];
-    var sharedDelta = 0;
-    for (final e in _entries) {
-      if (e.scope != EntryScope.shared || !sameMonth(e.occurredOn, month)) continue;
-      if (!e.isExpense) {
-        sharedDelta += e.amount;
-      } else if (e.payerId == null) {
-        sharedDelta -= e.amount;
-      }
-    }
-    // 可清條件刻意放行「沒有分攤列的拆帳筆」，但它會由付款人全額承擔——預覽先講一聲。
-    final loose = _entries
-        .where((e) =>
-            e.scope == EntryScope.shared &&
-            e.isExpense &&
-            e.payerId != null &&
-            e.splitMethod != SplitMethod.common &&
-            e.splits.isEmpty &&
-            sameMonth(e.occurredOn, month))
-        .length;
-    return MonthCloseDetails(
+    final details = MonthCloseDetails(
       month: month,
       members: lines,
-      sharedDelta: sharedDelta,
-      warnings: withWarnings && loose > 0
-          ? [CloseWarning(code: 'unsplit_advances', count: loose)]
-          : const [],
+      sharedPaid: sharedPaidIn(entries: _entries, month: month),
+    );
+    if (!withIncomeAmount) return details;
+    return MonthCloseDetails(
+      month: details.month,
+      members: details.members,
+      sharedPaid: details.sharedPaid,
+      incomeAmount: _incomeAmountOf(details),
     );
   }
 
-  /// 加入月（本地時區取月初）：補入額從這個月開始算。
+  /// 應記的共同收入＝Σ應轉入 − Σ應補出 ＝ Σ 各成員月末（spec v1.5「一鍵記共同收入」）。
+  int _incomeAmountOf(MonthCloseDetails details) {
+    var sum = 0;
+    for (final l in details.members) {
+      sum += l.ending;
+    }
+    return sum;
+  }
+
+  /// 「清帳轉入」income 分類；帳本沒有時自動建（DB 那側 `close_month` 同樣現建）。
+  Category _closeIncomeCategory() {
+    for (final c in _categories) {
+      if (c.kind == EntryKind.income && c.name == kCloseIncomeCategoryName) return c;
+    }
+    var maxSort = -1;
+    for (final c in _categories) {
+      if (c.kind == EntryKind.income && c.sort > maxSort) maxSort = c.sort;
+    }
+    final created = Category(
+      id: _newId('c'),
+      ledgerId: _ledger.id,
+      kind: EntryKind.income,
+      name: kCloseIncomeCategoryName,
+      icon: 'sync_alt',
+      sort: maxSort + 1,
+    );
+    _categories = [..._categories, created];
+    return created;
+  }
+
+  /// 與 DB `month_close_details` 的 `order by c.joined_at, c.id` 同：比完整時間戳，不是月份。
+  List<Member> _byJoinOrder(List<Member> members) => [...members]..sort((a, b) {
+        final byJoined = a.joinedAt.compareTo(b.joinedAt);
+        return byJoined != 0 ? byJoined : a.id.compareTo(b.id);
+      });
+
+  /// 加入月（本地時區取月初）。
   DateTime _joinedMonthOf(Member m) => monthOf(m.joinedAt);
 
   /// 鎖月守衛（`a_*_month_closed_trg`）：最後清帳月（含）以前一律不可寫。
   void _requireMonthOpen(DateTime occurredOn) {
     if (!isMonthClosed(_closes, occurredOn)) return;
-    final m = monthOf(occurredOn);
-    _raiseDb('month closed: '
-        '${m.year.toString().padLeft(4, '0')}-${m.month.toString().padLeft(2, '0')}');
+    _raiseDb('month closed: ${_ym(monthOf(occurredOn))}');
   }
 
   /// DB 的英文 raise → 和 Supabase 版**同一句**中文（走 `errors.dart` 的同一張表）。
-  static Never _raiseDb(String raw) => throw LedgerException(dbMessage(raw));
+  static Never _raiseDb(String raw, {String? code}) =>
+      throw LedgerException(dbMessage(raw, code: code), code: code);
 
   // ── 內部工具 ────────────────────────────────────────────────────────
 
@@ -616,69 +583,11 @@ class InMemoryLedgerRepository implements LedgerRepository {
     return null;
   }
 
-  Settlement? _findSettlement(String id) {
-    for (final s in _settlements) {
-      if (s.id == id) return s;
+  PersonalTopup? _findTopup(String id) {
+    for (final t in _topups) {
+      if (t.id == id) return t;
     }
     return null;
-  }
-
-  void _applySettledState(List<String> entryIds, SettledState next) {
-    _entries = [
-      for (final e in _entries) entryIds.contains(e.id) ? e.copyWith(settledState: next) : e,
-    ];
-  }
-
-  /// 簽核集合湊齊就落 settled（對應 DB 的 `settlement_finalize_on_approval` trigger）。
-  Settlement _finalize(Settlement s, Set<String> approvedBy) {
-    final done = s.requiredSigners.difference(approvedBy).isEmpty;
-    return Settlement(
-      id: s.id,
-      ledgerId: s.ledgerId,
-      status: done ? SettlementStatus.settled : s.status,
-      initiatedBy: s.initiatedBy,
-      createdAt: s.createdAt,
-      settledAt: done ? DateTime.now() : s.settledAt,
-      nets: s.nets,
-      entryIds: s.entryIds,
-      approvedBy: approvedBy,
-    );
-  }
-
-  Settlement _replaceStatus(Settlement s, SettlementStatus status) => Settlement(
-        id: s.id,
-        ledgerId: s.ledgerId,
-        status: status,
-        initiatedBy: s.initiatedBy,
-        createdAt: s.createdAt,
-        settledAt: s.settledAt,
-        nets: s.nets,
-        entryIds: s.entryIds,
-        approvedBy: s.approvedBy,
-      );
-
-  /// 對應 `entries_void_pending_settlement_trg`：settling 期間金額／付款人／分攤方式／
-  /// 範圍／種類／日期**的值真的變了**就 void 掉那筆 pending 結算。改備註、分類不會 void。
-  void _voidPendingSettlementFor(Entry before, Entry after) {
-    if (before.settledState != SettledState.settling) return;
-    final changed = before.amount != after.amount ||
-        before.payerId != after.payerId ||
-        before.splitMethod != after.splitMethod ||
-        before.scope != after.scope ||
-        before.kind != after.kind ||
-        before.occurredOn != after.occurredOn;
-    if (changed) _voidSettlementCovering(before.id);
-  }
-
-  void _voidSettlementCovering(String entryId) {
-    for (final s in _settlements) {
-      if (s.status == SettlementStatus.pending && s.entryIds.contains(entryId)) {
-        final voided = _replaceStatus(s, SettlementStatus.void_);
-        _applySettledState(s.entryIds, SettledState.open);
-        _settlements = [for (final x in _settlements) x.id == voided.id ? voided : x];
-        return;
-      }
-    }
   }
 
   Category _withCategoryId(Category c, String id) => Category(
@@ -709,12 +618,7 @@ class InMemoryLedgerRepository implements LedgerRepository {
   /// 剛建好的空帳本：只有自己一個成員與九個預設分類（比照 `create_ledger` RPC）。
   void _reseedEmpty(String name) {
     _cleared = false;
-    _ledger = Ledger(
-      id: _newId('ledger'),
-      name: name,
-      inviteCode: 'NEWLEDGER1',
-      defaultRatio: const {kMeId: 100},
-    );
+    _ledger = Ledger(id: _newId('ledger'), name: name, inviteCode: 'NEWLEDGER1');
     _members = [
       Member(
         id: kMeId,
@@ -729,47 +633,34 @@ class InMemoryLedgerRepository implements LedgerRepository {
     _entries = [];
     _allocations = [];
     _listItems = [];
-    _settlements = [];
+    _topups = [];
     _closes = [];
   }
 
+  /// spec v1.5「驗收總表／三個數」那組已知資料集：
+  /// 本月 Mike 補入 10,000／先付 6,000、老婆補入 10,000／先付 2,000、
+  /// 共同錢包付 3,000、共同收入 20,000 → 補入剩餘 4,000／8,000、共同餘額 17,000。
+  /// Mike 那 6,000 是「先付 7,000 ＋ 沖銷 −1,000」淨算出來的（種子裡真的有一筆沖銷）。
+  ///
+  /// **上月只放成員先付與補入**，一筆共同收入與共同錢包支出都不放：`sharedBalance`
+  /// 是累計水位、不分月，上月只要淨額不是 0，本月底就不會是那 17,000。
+  /// 上月的補入與先付則是清帳測試的素材。
   void _reseed() {
     _cleared = false;
-    _ledger = const Ledger(
-      id: kLedgerId,
-      name: '我們的家',
-      inviteCode: 'A7K3QZM4XB',
-      defaultRatio: {kMeId: 50, kWifeId: 50},
-      openingBalanceShared: 120000,
-    );
-    // v1.4：兩位成員各設每月補入額 10,000（與 `supabase/seed.sql` 同一組意義）；
-    // 加入月＝上個月，所以本月與上月各補一次。期初個人餘額欄位還在但已不入公式。
+    _ledger = const Ledger(id: kLedgerId, name: '我們的家', inviteCode: 'A7K3QZM4XB');
+    // 加入月＝上個月：上月是「最早可清的月份」，本月才是還在跑的那個月。
     final joined = DateTime(DateTime.now().year, DateTime.now().month - 1, 1);
     _members = [
-      Member(
-        id: kMeId,
-        ledgerId: kLedgerId,
-        userId: 'u1',
-        displayName: 'Mike',
-        monthlyTopup: 10000,
-        joinedAt: joined,
-      ),
-      Member(
-        id: kWifeId,
-        ledgerId: kLedgerId,
-        userId: 'u2',
-        displayName: '老婆',
-        monthlyTopup: 10000,
-        joinedAt: joined,
-      ),
+      Member(id: kMeId, ledgerId: kLedgerId, userId: 'u1', displayName: 'Mike', joinedAt: joined),
+      Member(id: kWifeId, ledgerId: kLedgerId, userId: 'u2', displayName: '老婆', joinedAt: joined),
     ];
     _currentMemberId = kMeId;
     _categories = _seedCategories(kLedgerId);
     _entries = _seedEntries();
+    _topups = _seedTopups();
     _allocations = _seedAllocations();
     _listItems = _seedListItems();
-    _settlements = _seedSettlements();
-    // 假資料不預設任何清帳紀錄：有紀錄就等於把整段歷史鎖住，波 1 的畫面都寫不了。
+    // 假資料不預設任何清帳紀錄：有紀錄就等於把整段歷史鎖住，畫面都寫不了。
     _closes = [];
   }
 
@@ -789,84 +680,51 @@ class InMemoryLedgerRepository implements LedgerRepository {
     final now = DateTime.now();
     final y = now.year;
     final m = now.month;
-    int n = 0;
+    final pm = DateTime(y, m - 1, 1);
+    var n = 0;
     String id() => 'e-${++n}';
-    final list = <Entry>[
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.income, scope: EntryScope.shared, amount: 52000, categoryId: 'c-salary', occurredOn: _d(y, m, 5), createdBy: kMeId, note: '薪水'),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.income, scope: EntryScope.private, amount: 8000, categoryId: 'c-bonus', occurredOn: _d(y, m, 6), createdBy: kMeId, note: '接案'),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 26000, categoryId: 'c-house', occurredOn: _d(y, m, 1), createdBy: kMeId, note: '房租', splitMethod: SplitMethod.common),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 2300, categoryId: 'c-util', occurredOn: _d(y, m, 3), createdBy: kWifeId, note: '電費', splitMethod: SplitMethod.common),
+    return [
+      // 本月：三個數的已知資料集（共同收入 20,000、共同錢包 3,000、
+      // Mike 先付 6,000＋1,000 再沖掉 1,000、老婆先付 2,000）。
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.income, amount: 20000, categoryId: 'c-salary', occurredOn: _d(y, m, 5), createdBy: kMeId, note: '薪水'),
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: 3000, categoryId: 'c-util', occurredOn: _d(y, m, 3), createdBy: kMeId, note: '水電（共同錢包）'),
       Entry(
         id: id(),
         ledgerId: kLedgerId,
         kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 567,
+        amount: 6000,
         categoryId: 'c-food',
         occurredOn: _d(y, m, 8),
         createdBy: kMeId,
-        note: '全聯買菜',
+        note: '本月買菜',
         payerId: kMeId,
-        splitMethod: SplitMethod.equal,
-        splits: const [EntrySplit(entryId: 'e-5', memberId: kMeId, share: 283.5), EntrySplit(entryId: 'e-5', memberId: kWifeId, share: 283.5)],
         lineItems: const [
-          LineItem(id: 'li-1', entryId: 'e-5', name: '雞蛋', amount: 89),
-          LineItem(id: 'li-2', entryId: 'e-5', name: '牛奶', amount: 95),
-          LineItem(id: 'li-3', entryId: 'e-5', name: '高麗菜', amount: 45),
+          LineItem(id: 'li-1', entryId: 'e-3', name: '雞蛋', amount: 89),
+          LineItem(id: 'li-2', entryId: 'e-3', name: '牛奶', amount: 95),
+          LineItem(id: 'li-3', entryId: 'e-3', name: '高麗菜', amount: 45),
         ],
       ),
-      Entry(
-        id: id(),
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1280,
-        categoryId: 'c-dining',
-        occurredOn: _d(y, m, 9),
-        createdBy: kWifeId,
-        note: '週五晚餐', settledState: SettledState.settling,
-        payerId: kWifeId,
-        splitMethod: SplitMethod.equal,
-        splits: const [EntrySplit(entryId: 'e-6', memberId: kMeId, share: 640), EntrySplit(entryId: 'e-6', memberId: kWifeId, share: 640)],
-      ),
-      Entry(
-        id: id(),
-        ledgerId: kLedgerId,
-        kind: EntryKind.expense,
-        scope: EntryScope.shared,
-        amount: 1520,
-        categoryId: 'c-daily',
-        occurredOn: _d(y, m, 12),
-        createdBy: kMeId,
-        note: 'Costco', settledState: SettledState.settling,
-        payerId: kMeId,
-        splitMethod: SplitMethod.ratio,
-        splits: const [EntrySplit(entryId: 'e-7', memberId: kMeId, share: 760), EntrySplit(entryId: 'e-7', memberId: kWifeId, share: 760)],
-        lineItems: const [
-          LineItem(id: 'li-4', entryId: 'e-7', name: '衛生紙', amount: 499),
-          LineItem(id: 'li-5', entryId: 'e-7', name: '洗衣精', amount: 359),
-          LineItem(id: 'li-6', entryId: 'e-7', name: '雞蛋', amount: 189),
-        ],
-      ),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.private, amount: 350, categoryId: 'c-fun', occurredOn: _d(y, m, 13), createdBy: kMeId, note: 'Steam', payerId: kMeId),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 420, categoryId: 'c-transport', occurredOn: _d(y, m, 14), createdBy: kWifeId, note: '加油', settledState: SettledState.settling, payerId: kWifeId, splitMethod: SplitMethod.equal, splits: const [EntrySplit(entryId: 'e-9', memberId: kMeId, share: 210), EntrySplit(entryId: 'e-9', memberId: kWifeId, share: 210)]),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 680, categoryId: 'c-food', occurredOn: _d(y, m, 15), createdBy: kWifeId, note: '菜市場', settledState: SettledState.settling, payerId: kWifeId, splitMethod: SplitMethod.equal, splits: const [EntrySplit(entryId: 'e-10', memberId: kMeId, share: 340), EntrySplit(entryId: 'e-10', memberId: kWifeId, share: 340)], lineItems: const [LineItem(id: 'li-7', entryId: 'e-10', name: '豬肉', amount: 280), LineItem(id: 'li-8', entryId: 'e-10', name: '雞蛋', amount: 80)]),
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: 2000, categoryId: 'c-dining', occurredOn: _d(y, m, 9), createdBy: kWifeId, note: '週五晚餐', payerId: kWifeId),
+      // 沖銷重記（編輯的唯一實作）：原筆 ＋ 反向筆，付款人與日期照抄。
+      // 兩筆都留在資料裡，補入剩餘與已花都靠「負數照樣相加」淨算回來。
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: 1000, categoryId: 'c-dining', occurredOn: _d(y, m, 10), createdBy: kMeId, note: '訂錯的外送', payerId: kMeId),
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: -1000, categoryId: 'c-dining', occurredOn: _d(y, m, 10), createdBy: kMeId, note: '沖銷：訂錯的外送', payerId: kMeId, isAdjustment: true),
+      // 上月：只有成員先付（共同收入與共同錢包支出一筆都不放，見上面的註解）。
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: 1200, categoryId: 'c-food', occurredOn: DateTime(pm.year, pm.month, 10), createdBy: kMeId, note: '上月買菜', payerId: kMeId),
+      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, amount: 800, categoryId: 'c-dining', occurredOn: DateTime(pm.year, pm.month, 18), createdBy: kWifeId, note: '上月外食', payerId: kWifeId),
     ];
-    // 上個月一些資料，讓趨勢與上月信封有東西可算。
-    final pm = DateTime(y, m - 1, 1);
-    list.addAll([
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.income, scope: EntryScope.shared, amount: 52000, categoryId: 'c-salary', occurredOn: DateTime(pm.year, pm.month, 5), createdBy: kMeId, note: '薪水'),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 26000, categoryId: 'c-house', occurredOn: DateTime(pm.year, pm.month, 1), createdBy: kMeId, note: '房租', splitMethod: SplitMethod.common),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 6200, categoryId: 'c-food', occurredOn: DateTime(pm.year, pm.month, 10), createdBy: kMeId, note: '整月買菜', splitMethod: SplitMethod.common),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 3900, categoryId: 'c-dining', occurredOn: DateTime(pm.year, pm.month, 18), createdBy: kWifeId, note: '外食', splitMethod: SplitMethod.common),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1100, categoryId: 'c-daily', occurredOn: DateTime(pm.year, pm.month, 20), createdBy: kMeId, note: '日用品', splitMethod: SplitMethod.common),
-    ]);
-    // 本月共同錢包的預算支出（尾端加，不動既有筆序與 e-N 計數）：讓本月信封看得到被吃。
-    list.addAll([
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 2400, categoryId: 'c-food', occurredOn: _d(y, m, 16), createdBy: kMeId, note: '大採購', splitMethod: SplitMethod.common),
-      Entry(id: id(), ledgerId: kLedgerId, kind: EntryKind.expense, scope: EntryScope.shared, amount: 1300, categoryId: 'c-dining', occurredOn: _d(y, m, 17), createdBy: kWifeId, note: '週末外食', splitMethod: SplitMethod.common),
-    ]);
-    return list;
+  }
+
+  static List<PersonalTopup> _seedTopups() {
+    final now = DateTime.now();
+    final m = DateTime(now.year, now.month, 1);
+    final pm = DateTime(now.year, now.month - 1, 1);
+    return [
+      PersonalTopup(id: 'pt-1', ledgerId: kLedgerId, memberId: kMeId, amount: 10000, occurredOn: m, createdBy: kMeId, note: '本月補入'),
+      PersonalTopup(id: 'pt-2', ledgerId: kLedgerId, memberId: kWifeId, amount: 10000, occurredOn: m, createdBy: kWifeId, note: '本月補入'),
+      PersonalTopup(id: 'pt-3', ledgerId: kLedgerId, memberId: kMeId, amount: 5000, occurredOn: pm, createdBy: kMeId, note: '上月補入'),
+      PersonalTopup(id: 'pt-4', ledgerId: kLedgerId, memberId: kWifeId, amount: 5000, occurredOn: pm, createdBy: kWifeId, note: '上月補入'),
+    ];
   }
 
   static List<BudgetAllocation> _seedAllocations() {
@@ -876,11 +734,9 @@ class InMemoryLedgerRepository implements LedgerRepository {
     return [
       BudgetAllocation(id: 'a-1', ledgerId: kLedgerId, categoryId: 'c-food', amount: 6000, occurredOn: m, createdBy: kMeId, note: '本月食品'),
       BudgetAllocation(id: 'a-2', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 4000, occurredOn: m, createdBy: kMeId, note: '本月餐飲'),
-      BudgetAllocation(id: 'a-3', ledgerId: kLedgerId, categoryId: 'c-daily', amount: 1500, occurredOn: m, createdBy: kMeId, note: '本月日常用品'),
-      BudgetAllocation(id: 'a-4', ledgerId: kLedgerId, categoryId: 'c-util', amount: 3000, occurredOn: m, createdBy: kMeId, note: '本月水電'),
-      BudgetAllocation(id: 'a-5', ledgerId: kLedgerId, categoryId: 'c-transport', amount: 2000, occurredOn: m, createdBy: kMeId, note: '本月交通'),
-      BudgetAllocation(id: 'a-6', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5500, occurredOn: pm, createdBy: kMeId, note: '上月食品'),
-      BudgetAllocation(id: 'a-7', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 4000, occurredOn: pm, createdBy: kMeId, note: '上月餐飲'),
+      BudgetAllocation(id: 'a-3', ledgerId: kLedgerId, categoryId: 'c-util', amount: 3000, occurredOn: m, createdBy: kMeId, note: '本月水電'),
+      BudgetAllocation(id: 'a-4', ledgerId: kLedgerId, categoryId: 'c-food', amount: 5000, occurredOn: pm, createdBy: kMeId, note: '上月食品'),
+      BudgetAllocation(id: 'a-5', ledgerId: kLedgerId, categoryId: 'c-dining', amount: 3000, occurredOn: pm, createdBy: kMeId, note: '上月餐飲'),
     ];
   }
 
@@ -892,18 +748,5 @@ class InMemoryLedgerRepository implements LedgerRepository {
         const ListItem(id: 'l-5', ledgerId: kLedgerId, title: '運動鞋', store: '購物中心', estimated: 2500, categoryId: 'c-daily', assigneeId: kMeId),
         ListItem(id: 'l-6', ledgerId: kLedgerId, title: '繳管理費', dueOn: DateTime.now().add(const Duration(days: 3)), assigneeId: kMeId),
         ListItem(id: 'l-7', ledgerId: kLedgerId, title: '預約牙醫', dueOn: DateTime.now().add(const Duration(days: 10)), assigneeId: kWifeId),
-      ];
-
-  static List<Settlement> _seedSettlements() => [
-        Settlement(
-          id: 's-1',
-          ledgerId: kLedgerId,
-          status: SettlementStatus.pending,
-          initiatedBy: kWifeId,
-          createdAt: DateTime.now().subtract(const Duration(hours: 5)),
-          nets: const {kMeId: -430, kWifeId: 430},
-          entryIds: const ['e-6', 'e-7', 'e-9', 'e-10'],
-          approvedBy: const {},
-        ),
       ];
 }

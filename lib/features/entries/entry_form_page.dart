@@ -12,7 +12,6 @@ import '../../domain/balance_math.dart';
 import '../../domain/mock_data.dart';
 import '../../domain/models.dart';
 import 'reversal.dart';
-import 'split_math.dart';
 
 /// 新增／編輯帳目的全螢幕表單。entryId 為 null ＝ 新增。
 ///
@@ -53,15 +52,14 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   final _amount = TextEditingController();
   final _note = TextEditingController();
   final _lines = <_LineRow>[];
-  final _manual = <String, TextEditingController>{};
-  final _ratio = <String, TextEditingController>{};
 
   EntryKind _kind = EntryKind.expense;
-  EntryScope _scope = EntryScope.shared;
   String? _categoryId;
   DateTime _date = DateTime.now();
-  String? _payerId; // null ＝ 共同錢包
-  SplitMethod _method = SplitMethod.common;
+
+  /// 誰先付（spec v1.5）：成員 id ＝該成員先付；null ＝共同錢包。收入恆 null。
+  /// 新增預設「我」（記帳者，ADR-0009 第 8 條），在 [initState] 帶入。
+  String? _payerId;
   bool _isAdjustment = false;
   Entry? _original;
   bool _missing = false;
@@ -71,13 +69,25 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
 
   bool get _readOnly => widget.readOnly && _original != null;
 
-  /// 步驟精靈（Mike 裁示 2026-09-03，四關版）：類型・分類・金額 → 日期・備註・細項 → 進階 → 確認。
-  static const _stepTitles = ['類型・分類・金額', '日期・備註・細項', '進階', '確認'];
+  /// 步驟精靈（Mike 裁示 2026-09-03，四關版；v1.5 第三關只剩「誰先付」）。
+  static const _stepTitles = ['類型・分類・金額', '日期・備註・細項', '誰先付', '確認'];
+  static const _payerStep = 2;
   static const _confirmStep = 3;
   int _step = 0;
 
-  void _nextStep() => setState(() => _step = (_step + 1).clamp(0, _confirmStep));
-  void _prevStep() => setState(() => _step = (_step - 1).clamp(0, _confirmStep));
+  /// 實際要走的關：收入沒有付款人，整關跳過（spec v1.5「收入不顯示這列」），
+  /// 進度也跟著變成 n/3——不留一個空關讓人按「下一步」。
+  List<int> get _steps =>
+      _asksPayer ? const [0, 1, _payerStep, _confirmStep] : const [0, 1, _confirmStep];
+
+  void _go(int delta) => setState(() {
+        final path = _steps;
+        final i = (path.indexOf(_step) + delta).clamp(0, path.length - 1);
+        _step = path[i];
+      });
+
+  void _nextStep() => _go(1);
+  void _prevStep() => _go(-1);
 
   /// 編輯 hub 的單欄彈窗（bottom sheet）活在另一條 route，page 的 setState 不會讓它重建；
   /// 彈窗內容包 [AnimatedBuilder] 聽這個 tick，setState 順手 ping 一下兩邊就同步。
@@ -91,15 +101,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
 
   /// 寫入進行中：儲存鈕停用，避免重複送出。
   bool _saving = false;
-
-  /// 分攤欄位的 controller 延後到用得到時才建立：成員清單變動（加入新成員、切帳本）
-  /// 也不會出現沒有 controller 的成員。
-  TextEditingController _manualOf(String memberId) =>
-      _manual.putIfAbsent(memberId, () => TextEditingController());
-  TextEditingController _ratioOf(String memberId) => _ratio.putIfAbsent(
-        memberId,
-        () => TextEditingController(text: '${ref.read(ledgerProvider).defaultRatio[memberId] ?? 0}'),
-      );
 
   /// 該 kind 排序後的第一個分類（滾輪語義：永遠有選中值；kind 無分類時 null）。
   String? _firstCategoryOf(EntryKind kind) {
@@ -115,24 +116,19 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     super.initState();
     final id = widget.entryId;
     if (id == null) {
+      // 新增預設「我先付」（ADR-0009 第 8 條）；共同錢包要手動切。
+      _payerId = ref.read(currentMemberIdProvider);
       final tpl = widget.template;
       if (tpl != null) {
         // 沖銷重記：複製原資訊（日期改今天），仍是全新一筆、照走精靈。
         _kind = tpl.kind;
-        _scope = tpl.scope;
         _categoryId = tpl.categoryId;
         _amount.text = tpl.amount.abs().toString();
         _note.text = tpl.note;
-        _payerId = tpl.scope == EntryScope.private ? tpl.createdBy : tpl.payerId;
-        _method = tpl.splitMethod;
+        // 誰先付照抄原筆（含共同錢包的 null）：重記出來的新筆才會扣回同一個口袋。
+        _payerId = tpl.kind == EntryKind.income ? null : tpl.payerId;
         for (final li in tpl.lineItems) {
           _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
-        }
-        for (final sp in tpl.splits) {
-          _manualOf(sp.memberId).text = sp.share.abs().round().toString();
-          if (tpl.splitMethod == SplitMethod.ratio && tpl.amount != 0) {
-            _ratioOf(sp.memberId).text = '${(sp.share / tpl.amount * 100).round().abs()}';
-          }
         }
       }
       _categoryId ??= _firstCategoryOf(_kind);
@@ -155,23 +151,14 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       });
     }
     _kind = found.kind;
-    _scope = found.scope;
     _amount.text = found.amount.toString();
     _note.text = found.note;
     _categoryId = found.categoryId;
     _date = found.occurredOn;
     _payerId = found.payerId;
-    _method = found.splitMethod;
     _isAdjustment = found.isAdjustment;
     for (final li in found.lineItems) {
       _lines.add(_LineRow(name: li.name, amount: li.amount?.toString() ?? ''));
-    }
-    for (final s in found.splits) {
-      _manualOf(s.memberId).text = s.share.round().toString();
-      // 既有 ratio 筆：從 splits 反推百分比帶回表單。
-      if (found.splitMethod == SplitMethod.ratio && found.amount != 0) {
-        _ratioOf(s.memberId).text = '${(s.share / found.amount * 100).round()}';
-      }
     }
   }
 
@@ -182,12 +169,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     for (final l in _lines) {
       l.dispose();
     }
-    for (final c in _manual.values) {
-      c.dispose();
-    }
-    for (final c in _ratio.values) {
-      c.dispose();
-    }
     super.dispose();
   }
 
@@ -195,11 +176,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   /// 真正的守衛在 DB trigger，這裡是先擋一步、把原因講出來，不讓人填完整張表才被打回。
   bool get _dateClosed => isMonthClosed(ref.watch(monthClosesProvider), _date);
 
-  /// 已結帳或結算中都鎖金額／付款來源／分攤／範圍（結算中改動會讓 settlement 作廢，ADR-0002）。
-  bool get _locked => _settled || _settling;
-  bool get _settled => _original?.amountLocked ?? false;
-  bool get _settling => _original?.settledState == SettledState.settling;
-  String get _lockReason => _settled ? '已結帳：金額與分攤鎖定，可整筆沖銷後重新記一筆' : '結算中，簽核完成或作廢後才能改金額';
   int get _amountValue => int.tryParse(_amount.text.trim()) ?? 0;
   /// 名稱非空的細項列（儲存與顯示的口徑：空白列一律不算、儲存時捨棄）。
   int get _validLineCount {
@@ -226,19 +202,14 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     return sum;
   }
 
-  Map<String, int> get _manualValues =>
-      {for (final e in _manual.entries) e.key: int.tryParse(e.value.text.trim()) ?? 0};
-  Map<String, int> get _ratioValues =>
-      {for (final e in _ratio.entries) e.key: int.tryParse(e.value.text.trim()) ?? 0};
-  int get _ratioTotal => _ratioValues.values.fold(0, (a, b) => a + b);
-
   void _toast(String msg) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
-  /// 支出＋共同時才有付款來源與分攤。
-  bool get _splittable => _kind == EntryKind.expense && _scope == EntryScope.shared;
+  /// 只有支出要問「誰先付」：收入只有共同收入，`payer_id` 恆 null
+  /// （DB check `entries_income_no_payer`）。
+  bool get _asksPayer => _kind == EntryKind.expense;
 
   Future<void> _pickDate() async {
     final picked = await showDatePicker(
@@ -257,73 +228,34 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   Future<void> _save() async {
     if (_saving) return;
     final me = ref.read(currentMemberIdProvider);
-    final members = ref.read(membersProvider);
     final ledger = ref.read(ledgerProvider);
     final orig = _original;
-    final locked = _locked;
 
-    // 鎖定時金額／付款來源／分攤／範圍一律沿用原值（UI 已 disable，這是防禦層）。
-    final int amount;
-    if (locked) {
-      amount = orig!.amount;
-    } else {
-      final raw = _amount.text.trim();
-      if (raw.isEmpty) {
-        _toast('請輸入金額');
-        return;
-      }
-      final parsed = int.tryParse(raw);
-      if (parsed == null) {
-        _toast('金額格式不正確');
-        return;
-      }
-      if (parsed == 0) {
-        _toast('請輸入金額');
-        return;
-      }
-      amount = parsed;
+    final raw = _amount.text.trim();
+    if (raw.isEmpty) {
+      _toast('請輸入金額');
+      return;
     }
+    final parsed = int.tryParse(raw);
+    if (parsed == null) {
+      _toast('金額格式不正確');
+      return;
+    }
+    if (parsed == 0) {
+      _toast('請輸入金額');
+      return;
+    }
+    final amount = parsed;
     if (_categoryId == null) {
       _toast('請選擇分類');
       return;
     }
 
-    final scope = locked ? orig!.scope : _scope;
-    final payerId = locked
-        ? orig!.payerId
-        : (_kind == EntryKind.income ? null : (scope == EntryScope.private ? me : _payerId));
-    final method = locked
-        ? orig!.splitMethod
-        : (_kind == EntryKind.income || scope == EntryScope.private || payerId == null
-            ? SplitMethod.common
-            : _method);
-
-    if (!locked && method == SplitMethod.amount) {
-      final total = manualTotal(_manualValues);
-      if (total != amount) {
-        _toast('分攤金額合計需等於主筆金額（目前 ${fmtAmount(total)}／${fmtAmount(amount)}）');
-        return;
-      }
-    }
-    if (!locked && method == SplitMethod.ratio && _ratioTotal != 100) {
-      _toast('比例合計需為 100%（目前 $_ratioTotal%）');
-      return;
-    }
+    // 收入恆無付款人（DB check `entries_income_no_payer`）：UI 已隱藏那一列，這是防禦層。
+    final payerId = _kind == EntryKind.income ? null : _payerId;
 
     // 新筆的 id 留空字串＝交給 repository（Supabase 由 DB）產生。
     final id = orig?.id ?? '';
-    final splits = locked
-        ? orig!.splits
-        : toEntrySplits(
-            id,
-            buildSplits(
-              amount: amount,
-              method: method,
-              members: members,
-              ratio: _ratioValues,
-              manual: _manualValues,
-            ),
-          );
     final lineItems = <LineItem>[];
     for (var i = 0; i < _lines.length; i++) {
       final name = _lines[i].name.text.trim();
@@ -342,19 +274,14 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       id: id,
       ledgerId: ledger.id,
       kind: _kind,
-      scope: scope,
       amount: amount,
       categoryId: _categoryId!,
       occurredOn: _date,
       createdBy: orig?.createdBy ?? me,
       note: _note.text.trim(),
       payerId: payerId,
-      splitMethod: method,
-      settledState: orig?.settledState ?? SettledState.open,
-      isAdjustment: locked ? orig!.isAdjustment : _isAdjustment,
-      // v1.4 起沒有資金來源狀態機：一律走 Entry 建構的餘額支出預設值（ADR-0008）。
+      isAdjustment: _isAdjustment,
       lineItems: lineItems,
-      splits: splits,
     );
 
     setState(() => _saving = true);
@@ -362,12 +289,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       final notifier = ref.read(entriesProvider.notifier);
       if (orig == null) {
         await notifier.add(entry);
-      } else if (_settled) {
-        // 已結帳（ADR-0002：分類、備註、細項可改）：主筆走 `upsert_entry` 但**不能帶子表**
-        // ——那支的子表寫法是全刪重建，settled 下會被 policy 擋成半套。
-        // 細項本身是允許改的，改走直寫 `line_items` 表的 replaceLineItems。
-        await notifier.update(entry, writeSplits: false, writeLineItems: false);
-        await notifier.replaceLineItems(entry.id, lineItems);
       } else {
         await notifier.update(entry);
       }
@@ -424,19 +345,11 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     return '成員';
   }
 
-  /// 折疊區收起時的一行摘要：共同・老婆付・比例 50/50。
-  String _advancedSummary(List<Member> members) {
-    final scope = _scope == EntryScope.private ? '私人' : '共同';
-    if (_kind == EntryKind.income || _scope == EntryScope.private) return scope;
-    if (_payerId == null) return '$scope・共同錢包';
-    final payer = '${_nameOf(members, _payerId!)}付';
-    final method = switch (_method) {
-      SplitMethod.equal => '均分',
-      SplitMethod.ratio => '比例 ${[for (final m in members) _ratioValues[m.id] ?? 0].join('/')}',
-      SplitMethod.amount => '金額',
-      SplitMethod.common => '不分攤',
-    };
-    return '$scope・$payer・$method';
+  /// 收起時的一行摘要：付款人名稱或「共同錢包」。
+  /// 只有 `_asksPayer` 時才有這一列（見 [_confirmBody]），所以不處理收入。
+  String _payerSummary(List<Member> members) {
+    final id = _payerId;
+    return id == null ? '共同錢包' : _nameOf(members, id);
   }
 
   @override
@@ -447,10 +360,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       for (final c in ref.watch(categoriesProvider))
         if (c.kind == _kind) c,
     ]..sort((a, b) => a.sort.compareTo(b.sort));
-    for (final m in members) {
-      _manualOf(m.id);
-      _ratioOf(m.id);
-    }
 
     if (_missing) {
       return Scaffold(
@@ -477,11 +386,10 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               tooltip: '編輯（沖銷重記）',
               onPressed: _saving ? null : _reverseAndRedo,
             ),
-          // 刪除入口移到唯讀明細（編輯模式已由沖銷重記取代）；結算中仍鎖；
-          // 沖銷與被沖銷是不可變軌跡，刪除也拿掉（Mike 裁示 2026-09-04）。
+          // 刪除入口在唯讀明細（編輯已由沖銷重記取代）；沖銷與被沖銷是不可變軌跡，
+          // 已清帳月份一律鎖——三者都不給刪除入口（Mike 裁示 2026-09-04、v1.4 鎖月）。
           if (_original != null &&
               _readOnly &&
-              !_locked &&
               !_original!.isAdjustment &&
               !isMonthClosed(ref.watch(monthClosesProvider), _original!.occurredOn) &&
               !hasReversal(ref.watch(entriesProvider), _original!))
@@ -554,25 +462,10 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
                       textAlign: TextAlign.center, style: t.textTheme.titleMedium),
                   if (_original == null) ...[
                     const SizedBox(height: 4),
-                    Text('${_step + 1}/${_stepTitles.length}',
+                    Text('${_steps.indexOf(_step) + 1}/${_steps.length}',
                         textAlign: TextAlign.center,
                         style: t.textTheme.bodySmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
                   ],
-                  if (_locked)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 12),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.lock_outline, size: 16, color: t.colorScheme.onSurfaceVariant),
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Text(_lockReason,
-                                style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant)),
-                          ),
-                        ],
-                      ),
-                    ),
                   const SizedBox(height: 24),
                   KeyedSubtree(key: ValueKey('form-step-$_step'), child: _stepBody(t, members, categories)),
                 ],
@@ -610,7 +503,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ),
             ),
             const SizedBox(height: 16),
-            // 垂直滾輪：不秀 icon；鎖定只鎖金額／付款來源／分攤／範圍，分類結算中仍可改（spec）。
+            // 垂直滾輪：不秀 icon。v1.5 沒有任何欄位鎖，分類隨時可改（鎖只剩鎖月，擋在日期那關）。
             CategoryWheel(
               key: const Key('category-wheel'),
               categories: categories,
@@ -658,8 +551,8 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
             ),
           ],
         );
-      case 2:
-        return _advancedBody(t, members);
+      case _payerStep:
+        return _payerBody(members);
       default:
         return _confirmBody(t, members);
     }
@@ -668,7 +561,6 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   Widget _amountField(ThemeData t) => TextField(
         key: const Key('amount-field'),
         controller: _amount,
-        enabled: !_locked,
         keyboardType: TextInputType.number,
         inputFormatters: [FilteringTextInputFormatter.digitsOnly],
         textAlign: TextAlign.center,
@@ -795,14 +687,16 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
               ? (_lines.isEmpty ? null : () => setState(() => _liExpanded = !_liExpanded))
               : (editing ? () => _editFieldSheet('細項', (_) => _linesSection()) : go(1))
         ),
-      (
-        '進階',
-        _advancedSummary(members),
-        'edit-row-advanced',
-        editing && !ro
-            ? () => _editFieldSheet('進階', (ctx) => _advancedBody(Theme.of(ctx), ref.read(membersProvider)))
-            : go(2)
-      ),
+      // 誰先付：v1.5 起折疊區只剩這一列；收入沒有付款人，整列不出現。
+      if (_asksPayer)
+        (
+          '誰先付',
+          _payerSummary(members),
+          'edit-row-payer',
+          editing && !ro
+              ? () => _editFieldSheet('誰先付', (_) => _payerBody(ref.read(membersProvider)))
+              : go(2)
+        ),
 
     ];
     return Column(
@@ -891,16 +785,12 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
   }
 
   /// 編輯＝沖銷重記（Mike 裁示 2026-09-04 第二版，適用所有筆）：
-  /// 原筆保留（標已沖銷）→ 寫入等額反向紀錄（分攤／餘額沿原路回退）→
-  /// 帶原資訊進「新增」精靈重記成新的一筆。結算中與沖銷紀錄本身不可編輯。
+  /// 原筆保留（標已沖銷）→ 寫入等額反向紀錄（誰先付照抄，補入剩餘與共同餘額沿原路回退）→
+  /// 帶原資訊進「新增」精靈重記成新的一筆。沖銷紀錄本身與已沖銷過的原筆都不可再編輯。
   Future<void> _reverseAndRedo() async {
     final orig = _original!;
     if (orig.isAdjustment) {
       _toast('沖銷紀錄不可編輯');
-      return;
-    }
-    if (_settling) {
-      _toast('結算中不可編輯，簽核完成後再處理');
       return;
     }
     if (hasReversal(ref.read(entriesProvider), orig)) {
@@ -911,7 +801,7 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('編輯這筆帳目？'),
-        content: const Text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（分攤一併回退），接著用原資訊重新記一筆。'),
+        content: const Text('編輯＝沖銷重記：保留原筆並新增等額反向紀錄（補入剩餘與共同餘額一併回退），接著用原資訊重新記一筆。'),
         actions: [
           TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('取消')),
           FilledButton(
@@ -941,112 +831,25 @@ class _EntryFormPageState extends ConsumerState<EntryFormPage> {
     if (mounted) context.pushReplacement('/entries/new', extra: orig);
   }
 
-  Widget _advancedBody(ThemeData t, List<Member> members) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+  /// 「誰先付」一列（spec v1.5「帳目」）：每位成員一個 chip ＋「共同錢包」。
+  /// 只有支出走得到這裡——收入那一關整個跳過（[_steps]），不是顯示成空白。
+  Widget _payerBody(List<Member> members) {
+    return _OptionRow(
+      label: '誰先付',
       children: [
-        _OptionRow(
-          label: '範圍',
-          children: [
-            for (final e in const {EntryScope.shared: '共同', EntryScope.private: '私人'}.entries)
-              _MiniChip(
-                chipKey: Key('scope-${e.key.name}'),
-                label: e.value,
-                selected: _scope == e.key,
-                onTap: _locked
-                    ? null
-                    : () => setState(() {
-                          _scope = e.key;
-                          if (_scope == EntryScope.private) {
-                            _payerId = ref.read(currentMemberIdProvider);
-                            _method = SplitMethod.common;
-                          }
-                        }),
-              ),
-          ],
+        for (final m in members)
+          _MiniChip(
+            chipKey: Key('payer-${m.id}'),
+            label: m.displayName,
+            selected: _payerId == m.id,
+            onTap: () => setState(() => _payerId = m.id),
+          ),
+        _MiniChip(
+          chipKey: const Key('payer-common'),
+          label: '共同錢包',
+          selected: _payerId == null,
+          onTap: () => setState(() => _payerId = null),
         ),
-        if (_splittable) ...[
-          _OptionRow(
-            label: '付款',
-            children: [
-              _MiniChip(
-                chipKey: const Key('payer-common'),
-                label: '共同錢包',
-                selected: _payerId == null,
-                onTap: _locked
-                    ? null
-                    : () => setState(() {
-                          _payerId = null;
-                          _method = SplitMethod.common;
-                        }),
-              ),
-              for (final m in members)
-                _MiniChip(
-                  chipKey: Key('payer-${m.id}'),
-                  label: m.displayName,
-                  selected: _payerId == m.id,
-                  onTap: _locked
-                      ? null
-                      : () => setState(() {
-                            _payerId = m.id;
-                          }),
-                ),
-            ],
-          ),
-          _OptionRow(
-            label: '分攤',
-            children: [
-              for (final e in const {
-                SplitMethod.equal: ('split-equal', '均分'),
-                SplitMethod.ratio: ('split-ratio', '比例'),
-                SplitMethod.amount: ('split-amount', '金額'),
-                SplitMethod.common: ('split-common', '共同'),
-              }.entries)
-                _MiniChip(
-                  chipKey: Key(e.value.$1),
-                  label: e.value.$2,
-                  selected: _method == e.key,
-                  onTap: _locked || (_payerId == null && e.key != SplitMethod.common)
-                      ? null
-                      : () => setState(() => _method = e.key),
-                ),
-            ],
-          ),
-          if (_payerId != null && _method == SplitMethod.ratio)
-            _PercentRow(
-              members: members,
-              controllers: _ratio,
-              enabled: !_locked,
-              total: _ratioTotal,
-              onChanged: () => setState(() {}),
-            ),
-          if (_payerId != null && _method == SplitMethod.amount)
-            _ManualRow(
-              members: members,
-              controllers: _manual,
-              enabled: !_locked,
-              total: manualTotal(_manualValues),
-              amount: _amountValue,
-              onChanged: () => setState(() {}),
-            ),
-          if (_payerId != null && (_method == SplitMethod.equal || _method == SplitMethod.ratio))
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                [
-                  for (final e in buildSplits(
-                    amount: _amountValue,
-                    method: _method,
-                    members: members,
-                    ratio: _ratioValues,
-                  ).entries)
-                    '${_nameOf(members, e.key)} ${fmtShare(e.value)}',
-                ].join('　'),
-                textAlign: TextAlign.right,
-                style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.onSurfaceVariant),
-              ),
-            ),
-        ],
       ],
     );
   }
@@ -1105,116 +908,6 @@ class _MiniChip extends StatelessWidget {
       labelPadding: const EdgeInsets.symmetric(horizontal: 2),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       showCheckmark: false,
-    );
-  }
-}
-
-/// 比例分攤：每成員百分比可改，合計不是 100 才提示。
-class _PercentRow extends StatelessWidget {
-  const _PercentRow({
-    required this.members,
-    required this.controllers,
-    required this.enabled,
-    required this.total,
-    required this.onChanged,
-  });
-  final List<Member> members;
-  final Map<String, TextEditingController> controllers;
-  final bool enabled;
-  final int total;
-  final VoidCallback onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Row(
-            children: [
-              for (final m in members) ...[
-                Expanded(
-                  child: TextField(
-                    key: Key('ratio-${m.id}'),
-                    controller: controllers[m.id],
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    textAlign: TextAlign.end,
-                    style: t.textTheme.labelLarge,
-                    decoration: InputDecoration(labelText: m.displayName, suffixText: '%'),
-                    onChanged: (_) => onChanged(),
-                  ),
-                ),
-                if (m != members.last) const SizedBox(width: 8),
-              ],
-            ],
-          ),
-          if (total != 100)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text('合計 $total%，需為 100%',
-                  style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.error)),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 金額分攤：每成員金額可填，合計不等於主筆才提示。
-class _ManualRow extends StatelessWidget {
-  const _ManualRow({
-    required this.members,
-    required this.controllers,
-    required this.enabled,
-    required this.total,
-    required this.amount,
-    required this.onChanged,
-  });
-  final List<Member> members;
-  final Map<String, TextEditingController> controllers;
-  final bool enabled;
-  final int total;
-  final int amount;
-  final VoidCallback onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(top: 6),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Row(
-            children: [
-              for (final m in members) ...[
-                Expanded(
-                  child: TextField(
-                    key: Key('manual-${m.id}'),
-                    controller: controllers[m.id],
-                    keyboardType: TextInputType.number,
-                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                    textAlign: TextAlign.end,
-                    style: t.textTheme.labelLarge,
-                    decoration: InputDecoration(labelText: m.displayName),
-                    onChanged: (_) => onChanged(),
-                  ),
-                ),
-                if (m != members.last) const SizedBox(width: 8),
-              ],
-            ],
-          ),
-          if (total != amount)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text('合計 ${fmtAmount(total)}／${fmtAmount(amount)}',
-                  style: t.textTheme.labelSmall?.copyWith(color: t.colorScheme.error)),
-            ),
-        ],
-      ),
     );
   }
 }

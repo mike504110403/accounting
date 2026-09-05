@@ -1,4 +1,4 @@
-/// 清帳子頁（設定頁「清帳 ›」→ `/settings/closes`，spec v1.4「清帳」節／ADR-0008）。
+/// 清帳子頁（設定頁「清帳 ›」→ `/settings/closes`，spec v1.5「清帳」節／ADR-0009）。
 ///
 /// 頁面做三件事：依前端推算的可清條件決定「清帳」按鈕的月份與 enabled（不可清時把原因
 /// 寫成一行，字串與 `errors.dart` 全句相同）、按下去跑 `month_close_preview`、
@@ -18,14 +18,15 @@ import '../../domain/models.dart';
 import 'close_preview_sheet.dart';
 
 /// 下一個可清月（顯示用）。規則同 spec 可清條件 (2)：
-/// 清過 → 最後清帳月 ＋ 1 月；沒清過 → 最早的成員加入月或帳目月（兩者取早）。
+/// 清過 → 最後清帳月 ＋ 1 月；沒清過 → 最早有帳目、補入或成員加入的那個月（三者取早）。
 ///
-/// 回 null ＝ 這本帳本連一位成員、一筆帳目都沒有。呼叫端還要自己夾「早於當月」，
+/// 回 null ＝ 這本帳本連一位成員、一筆帳目、一筆補入都沒有。呼叫端還要自己夾「早於當月」，
 /// 那是可清條件 (1)。
 DateTime? nextClosableMonth({
   required Iterable<MonthClose> closes,
   required Iterable<Member> members,
   required Iterable<Entry> entries,
+  required Iterable<PersonalTopup> topups,
 }) {
   DateTime? last;
   for (final c in closes) {
@@ -35,47 +36,39 @@ DateTime? nextClosableMonth({
   if (last != null) return nextMonth(last);
 
   DateTime? earliest;
+  void consider(DateTime m) {
+    if (earliest == null || m.isBefore(earliest!)) earliest = m;
+  }
+
   for (final m in members) {
-    final j = monthOf(m.joinedAt);
-    if (earliest == null || j.isBefore(earliest)) earliest = j;
+    consider(monthOf(m.joinedAt));
   }
   for (final e in entries) {
-    final m = monthOf(e.occurredOn);
-    if (earliest == null || m.isBefore(earliest)) earliest = m;
+    consider(monthOf(e.occurredOn));
+  }
+  for (final t in topups) {
+    consider(monthOf(t.occurredOn));
   }
   return earliest;
 }
 
-/// 那個月還有沒有「已經拆帳、但還沒簽完」的帳目——可清條件 (3)。
-///
-/// 判準逐字比照 `month_close_guard` 與 `initiate_settlement`，**含「有分攤列」**：
-/// 沒有分攤列的拆帳筆結算根本撿不到，擋了那個月永遠清不掉（那種筆改由預覽的 warnings 提醒）。
-bool hasUnsettledSplits(Iterable<Entry> entries, DateTime month) => entries.any((e) =>
-    e.scope == EntryScope.shared &&
-    e.isExpense &&
-    e.payerId != null &&
-    e.splitMethod != SplitMethod.common &&
-    e.settledState != SettledState.settled &&
-    e.splits.isNotEmpty &&
-    sameMonth(e.occurredOn, month));
-
 /// 前端推算的「不能清」原因（可清時 null），字串與 `errors.dart` 的 RPC 訊息全句相同。
+///
+/// v1.5 可清條件只剩三條（早於當月、最早未清月、同月一次；結算整組廢掉，沒有「拆帳
+/// 未簽完」那條）——第三條（同月一次）不需要在按鈕這裡另外判斷：清過的月份會讓
+/// [nextClosableMonth] 自動推進到下一個月，不會停在已清的月份上。
 ///
 /// **這只是把按鈕先關起來、把原因講出來；真正的判定永遠在 RPC**——前端看不到別人的
 /// 私人帳目，兩邊有機會分岔（例如 RPC 說「請先清 2026／07」），那時以按下去之後
 /// 回來的中文訊息為準。
 String? closeBlockReason({
   required DateTime? next,
-  required Iterable<Entry> entries,
-  DateTime? today,
 }) {
-  final current = monthOf(today ?? DateTime.now());
-  // 條件 (4)：連一位成員、一筆帳目都沒有 → 根本推不出月份。
+  final current = monthOf(DateTime.now());
+  // 連一位成員、一筆帳目、一筆補入都沒有 → 根本推不出月份。
   if (next == null) return '沒有可清的月份';
-  // 條件 (1)：那個月要先結束（下一個可清月就是本月時，得等這個月過完）。
+  // 那個月要先結束（下一個可清月就是本月時，得等這個月過完）。
   if (!next.isBefore(current)) return '本月尚未結束';
-  // 條件 (3)：該月的拆帳要全部簽完。
-  if (hasUnsettledSplits(entries, next)) return '有拆帳尚未簽完';
   return null;
 }
 
@@ -139,16 +132,16 @@ class _ClosesPageState extends ConsumerState<ClosesPage> {
     final ledger = ref.watch(ledgerProvider);
     final members = ref.watch(membersProvider);
     final entries = ref.watch(entriesProvider);
+    final topups = ref.watch(topupsProvider);
     // watch 的是 provider 不是快照：清完自己 refresh、別的裝置清帳走 Realtime，兩條都會重建。
     final closes = ref.watch(monthClosesProvider);
 
-    final next = nextClosableMonth(closes: closes, members: members, entries: entries);
-    final blocked = closeBlockReason(next: next, entries: entries);
+    final next = nextClosableMonth(closes: closes, members: members, entries: entries, topups: topups);
+    final blocked = closeBlockReason(next: next);
     // blocked == null 蘊含 next 非 null（`closeBlockReason` 的第一條就是它）。
+    // 月份也只在這個條件下寫在按鈕上：「沒有可清的月份」時寫上本月，會變成
+    // 邀請使用者去清一個清不了的月。
     final closableMonth = blocked == null ? next : null;
-    // 月份寫在按鈕上只在「那個月確實還等著被清」時才有意義：
-    // 「沒有可清的月份」時寫上本月，會變成邀請使用者去清一個清不了的月。
-    final buttonMonth = next != null && next.isBefore(monthOf(DateTime.now())) ? next : null;
 
     final sorted = [...closes]..sort((a, b) => b.month.compareTo(a.month));
 
@@ -175,7 +168,7 @@ class _ClosesPageState extends ConsumerState<ClosesPage> {
                               ? null
                               : () => _openPreview(ledger.id, closableMonth),
                           child: Text(
-                              buttonMonth == null ? '清帳' : '清帳 ${fmtYearMonth(buttonMonth)}'),
+                              closableMonth == null ? '清帳' : '清帳 ${fmtYearMonth(closableMonth)}'),
                         ),
                         if (blocked != null)
                           Padding(

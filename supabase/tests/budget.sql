@@ -1,5 +1,6 @@
 -- 預算影子紀錄（budget_allocation）測試 — ADR-0008／spec v1.4。
--- v1.4：每分類每月至多一筆、金額 > 0、建立後不可改不可刪；entries.funding 與 enum 已 drop。
+-- v1.4 起：每分類每月至多一筆、金額 > 0、建立後不可改不可刪（v1.5 沒有動這一組規則）。
+-- 「已花」的口徑在 v1.5 改成「該分類該月全部支出、不分誰付」，那條在 month_summary.sql 驗。
 -- 一段只驗一條規則，各自獨立 fixture，全部包在 begin/rollback 裡。
 -- 身分模擬與 rls.sql 相同：request.jwt.claims + set local role authenticated。
 \set MIKE '11111111-1111-1111-1111-111111111111'
@@ -9,8 +10,8 @@
 \set LEDGER '10000000-0000-0000-0000-000000000001'
 \set CAT_FOOD '30000000-0000-0000-0000-000000000001'
 \set CAT_INCOME '30000000-0000-0000-0000-000000000008'
--- 種子在「本月」已經給食品／餐飲／日用品／水電／交通各設了一筆預算，
--- 每分類每月只能一筆（v1.4），所以要新增的段落一律用種子沒碰過的「住房」。
+-- 種子在「本月」已經給食品／日常用品／交通各設了一筆預算，
+-- 每分類每月只能一筆，所以要新增的段落一律用種子沒碰過的「住房」「娛樂」。
 \set CAT_HOUSE '30000000-0000-0000-0000-000000000004'
 \set CAT_PLAY '30000000-0000-0000-0000-000000000007'
 \set CAT_TRAFFIC '30000000-0000-0000-0000-000000000006'
@@ -315,12 +316,13 @@ end;
 $$;
 rollback;
 
-\echo '== budget: g. entries.funding 與 funding enum 已 drop；upsert_entry 忽略多餘的 funding 鍵 =='
+\echo '== budget: g. v1.3 的 funding 與 v1.4 的 scope／split_method 都已 drop；upsert_entry 忽略多餘的鍵 =='
 do $$
 begin
   assert not exists (select 1 from information_schema.columns
-                     where table_schema = 'public' and table_name = 'entries' and column_name = 'funding'),
-    'entries.funding 應該已經被移除（ADR-0008）';
+                     where table_schema = 'public' and table_name = 'entries'
+                       and column_name in ('funding', 'scope', 'split_method', 'settled_state')),
+    'entries 不該再有 funding／scope／split_method／settled_state（ADR-0008／0009）';
   assert not exists (select 1 from pg_type t join pg_namespace n on n.oid = t.typnamespace
                      where n.nspname = 'public' and t.typname = 'funding'),
     'funding enum 應該已經被移除（ADR-0008）';
@@ -329,8 +331,8 @@ begin
     'entries_funding_common_wallet_only 應該隨欄位一起消失';
   assert not exists (select 1 from information_schema.column_privileges cp
                      where cp.table_schema = 'public' and cp.table_name = 'entries'
-                       and cp.column_name = 'funding'),
-    'funding 的欄位級授權應該隨欄位一起消失';
+                       and cp.column_name in ('funding', 'scope', 'split_method')),
+    '這些欄位的欄位級授權應該隨欄位一起消失';
 end;
 $$;
 
@@ -341,17 +343,19 @@ do $$
 declare
   v_entry public.entries;
 begin
-  -- 舊版前端還會送 funding 鍵：jsonb 的多餘鍵不影響，不該炸也不該留下任何痕跡。
+  -- 舊版前端還會送 funding／scope／split_method 這些鍵：
+  -- jsonb 的多餘鍵本來就不影響，不該炸也不該留下任何痕跡。
   v_entry := public.upsert_entry(jsonb_build_object(
     'ledger_id', '10000000-0000-0000-0000-000000000001',
     'kind', 'expense', 'scope', 'shared', 'amount', 900,
     'category_id', '30000000-0000-0000-0000-000000000001',
     'occurred_on', current_date, 'note', '共同錢包支出',
-    'funding', 'budget'));
-  assert v_entry.id is not null, 'upsert_entry 帶多餘的 funding 鍵不該失敗';
+    'split_method', 'equal', 'funding', 'budget'));
+  assert v_entry.id is not null, 'upsert_entry 帶多餘的鍵不該失敗';
   assert v_entry.amount = 900 and v_entry.note = '共同錢包支出', '其餘欄位應照寫';
+  assert v_entry.payer_id is null, '沒帶 payer_id 時是共同錢包';
 
-  -- 代墊也一樣（v1.3 的 check 不在了，代墊不會再因為 funding 被擋）。
+  -- 改成成員先付：payer_id 照寫，多餘的鍵照樣沒有作用。
   v_entry := public.upsert_entry(jsonb_build_object(
     'id', v_entry.id,
     'ledger_id', '10000000-0000-0000-0000-000000000001',
