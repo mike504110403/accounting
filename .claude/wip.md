@@ -1,13 +1,13 @@
 # WIP — accounting 記帳 app（/mega：帳務規則 v1.5，ADR-0009）
 
-更新：2026-09-05 16:20（波 1 DB 已合併 feature；波 3 五分支全部完成進 review，settings 修復輪中）
+更新：2026-09-05 18:50（**v1.5 全案落 dev f5c8ea3、雲端 dev／prod 已 migration、TestFlight build 8 已上傳**，等 Mike 手測）
 
 ## 任務背景與目標
 
-夫妻共同記帳 Flutter Web/iOS app（Supabase 後端）。**spec `docs/specs/ledger.md` v1.5 已定稿（feature/rules-v15 f9e15e9）、ADR-0009 已落**：單一帳目只記誰先付、手動個人補入（`personal_topups`）、三個數（共同餘額／個人補入剩餘／分類預算剩餘）、照補入三方清帳＋一鍵記共同收入、統計無視角、prod 資料清空重來。廢 ADR-0002／0003、0008 額度制與比例。
-前案 v1.4 全案已落 dev；成員名稱功能（/solo）已落 dev 5d88705。dev 未推 remote、未出 build 8（決定與 v1.5 同波上，舊 build 對新 DB 必炸）。
+夫妻共同記帳 Flutter Web/iOS app（Supabase 後端）。spec `docs/specs/ledger.md` v1.5、ADR-0009、DB 契約 `docs/specs/db-contract.md`（v1.5）。
+v1.5：單一帳目只記誰先付、手動個人補入（`personal_topups`）、三個數（共同餘額／個人補入剩餘／分類預算剩餘）、照補入三方清帳＋一鍵記共同收入、統計無視角；prod 資料清空重來。成員名稱功能（5d88705）同波上。
 
-**設計原則（Mike 09-05）**：只有兩人用、純客製化；裁示題照兩人互信判。**環境政策**：不起地端 DB（例外：本案 DB 波要跑 SQL 測試，波 1 工人在自己 worktree 起地端棧，跑完即關）。
+**設計原則（Mike 09-05）**：只有兩人用、純客製化。**環境政策**：不起地端 DB（例外：有新 migration 時臨時起棧跑 SQL 測試，跑完關）。
 
 ## 已解決策
 
@@ -19,14 +19,14 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 波 1 DB | migration `20260905000100_rules_v15.sql`、SQL 測試、seed、db-contract | **已合併 feature（5e162c0）**，合併後 `run.sh` 全綠 | wt/rules-v15/db（已刪） | dev 5d88705 | 獨立 | db／security／code 一輪各 1～2 MAJOR（清帳競態共享鎖、鎖月測試回歸），修復後三方複審全過 | — |
 | 波 2 data | `lib/domain`＋`lib/data` 對齊 v1.5、資料層測試 | **已合併 feature（530705b）** | wt/rules-v15/data（已刪） | 同上 | INTEGRATION 等波 1 合併後大腦跑 | code-reviewer 一輪打回 2 MAJOR、修復後複審全過 | — |
-| 波 3 頁面 | entries／budget（補入區塊）／stats／settings＋closes／lists 五工人各據 feature 目錄 | **stats（d24146d）、lists（9a16af3）、entries（fe0e596）、settings（0f2e7ea）已合併 feature**；budget 8cdf44e 等複審後合併，之後跑合併點必做 | wt/rules-v15/{entries,budget,stats,settings,lists} ← feature 530705b | — | 依賴波 2（已合） | 影子審 3 BLOCKER 皆已裁示（router stub、MonthAppBar 契約、tutorial 步驟）；四 code-reviewer 進行中 | — |
-| 波 4 部署 | migration push dev → smoke → prod；build 8 上傳；Mike 手測 | 待波 3 | — | — | 依賴波 3 | — | — |
+| 波 3 頁面 | entries／budget／stats／settings＋closes／lists | **五分支全合併**；合併點全 repo analyze 無 issue、`flutter test` 434 綠、INTEGRATION 59 綠、SQL 全綠 | wt/rules-v15/{entries,budget,stats,settings,lists} ← feature 530705b | — | 依賴波 2（已合） | 影子審 3 BLOCKER 皆已裁示（router stub、MonthAppBar 契約、tutorial 步驟）；四 code-reviewer 進行中 | — |
+| 波 4 部署 | migration push dev → smoke → prod；build 8 上傳 | **完成**：dev／prod 皆套 20260905000100 並 smoke 過（prod 帳本 1／成員 2／分類 9 保留，資料歸零）；iOS 0.1.0 (8) stamp ios-0905-1846 上傳成功（Delivery cc101371）；備份 `backup-{dev,prod}-pre-v15.sql` 在 session scratchpad | — | — | — | — | — |
 
 brief 檔（session scratchpad，不進 git）：`brief-v15-db.md`、`brief-v15-data.md`、`brief-v15-common.md`＋五份頁面 brief。
 
 ## 收斂時進行中的工人
 
-v15-db-implementer（波 1）；v15-{entries,budget,stats,settings,lists}-implementer＋v15-pages-brief-reviewer（波 3）。
+無。worktree 只剩主 checkout（dev f5c8ea3）；無 feature／wt 分支。
 
 ## 合併點必做（波 3 五分支合回 feature 後，大腦親跑）
 
@@ -41,11 +41,10 @@ v15-db-implementer（波 1）；v15-{entries,budget,stats,settings,lists}-implem
 
 ## 下一步
 
-1. 收兩份影子審報告（BLOCKER 才中止工人）。
-2. 波 1／波 2 回報 → /verify（DB：本機 run.sh 親跑；data：analyze＋test 親跑）→ review chain（DB：db／security／code；data：code）→ 合併回 feature。
-3. 波 3 五份 brief 從 spec 切片（等波 2 合併，契約以波 2 落地的 `lib/data` 為準）。
-4. 波 4：migration 先 push 雲端 dev 驗證（dev 有 27 筆 v1.4 資料，驗 truncate／drop 路徑）→ prod → `tool/build_ios.sh --build-number 8` → Mike 手測（清單另寫 `.claude/handtest-v15.md`）。
-5. 工程死亡點：Mike 手測 v1.5 過即可刪本檔。
+1. **Mike 兩台裝 build 8 手測**（舊 build 7 對新 DB 會炸，先更新）；兩人先到設定「我的名稱」改掉代號。問題走 /bug。
+2. dev 領先 origin 多顆（成員名稱、v1.5、docs），下次 /ship 推。
+3. 待辦池：帳號刪除＋刪帳本 RPC（上架硬需求）、隱私政策入口、token 進 Keychain、iOS home indicator padding、`tutorial.dart` 不該 import `router.dart`（波 3 並行根因）、沖銷配對兩套實作統一、InMemory 與 SQL seed 對齊、settings_page 拆檔。
+4. 工程死亡點：Mike 手測過即可刪本檔（歷史在 ADR-0009、db-contract、git log）。下一顆 build 號 9。
 
 ## 環境備忘
 
